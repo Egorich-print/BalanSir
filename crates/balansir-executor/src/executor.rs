@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::{
-    ActionRequest, ActionResult, ActionType, ExecutorCapabilities,
+    ActionRequest, ActionResult, ActionType, DriverId, ExecutorCapabilities,
 };
 
 /// Executor trait - defines how actions are applied to the kernel/drivers
@@ -16,10 +16,10 @@ pub trait Executor: Send + Sync {
             .contains(&action_type)
     }
 
-    /// Execute an action
+    /// Execute an action (desired state -> actual state)
     async fn execute(&self, request: &ActionRequest) -> ActionResult;
 
-    /// Undo a previously applied action (if possible)
+    /// Undo a previously applied action
     async fn undo(&self, request: &ActionRequest) -> ActionResult {
         ActionResult::Unsupported {
             action_type: request.action.action_type(),
@@ -40,7 +40,8 @@ pub trait Executor: Send + Sync {
 /// Dummy executor for testing
 pub struct DummyExecutor {
     capabilities: ExecutorCapabilities,
-    log: std::sync::Mutex<Vec<ActionRequest>>,
+    log: std::sync::Mutex<Vec<(ActionRequest, ActionResult)>>,
+    applied: std::sync::Mutex<Vec<ActionRequest>>,
 }
 
 impl DummyExecutor {
@@ -53,6 +54,7 @@ impl DummyExecutor {
                     ActionType::Block,
                     ActionType::Reject,
                     ActionType::Allow,
+                    ActionType::Forward,
                     ActionType::Log,
                 ],
                 max_rules: 1024,
@@ -60,10 +62,11 @@ impl DummyExecutor {
                 max_route_tables: 64,
             },
             log: std::sync::Mutex::new(Vec::new()),
+            applied: std::sync::Mutex::new(Vec::new()),
         }
     }
 
-    pub fn log(&self) -> Vec<ActionRequest> {
+    pub fn log(&self) -> Vec<(ActionRequest, ActionResult)> {
         self.log.lock().unwrap().clone()
     }
 }
@@ -76,23 +79,36 @@ impl Executor for DummyExecutor {
 
     async fn execute(&self, request: &ActionRequest) -> ActionResult {
         let mut log = self.log.lock().unwrap();
-        log.push(request.clone());
+        let mut applied = self.applied.lock().unwrap();
 
-        ActionResult::Success {
-            execution_time_us: 100,
-            rule_id: Some(log.len() as u32),
-        }
+        // Check for idempotency (already applied)
+        let already_applied = applied.iter().any(|r| r.action == request.action);
+        let result = if already_applied {
+            ActionResult::AlreadyApplied
+        } else {
+            applied.push(request.clone());
+            ActionResult::Applied {
+                execution_time_us: 100,
+                rule_id: Some(applied.len() as u32),
+            }
+        };
+
+        log.push((request.clone(), result.clone()));
+        result
     }
 
     async fn undo(&self, request: &ActionRequest) -> ActionResult {
-        ActionResult::Success {
+        let mut applied = self.applied.lock().unwrap();
+        applied.retain(|r| r.action != request.action);
+
+        ActionResult::Applied {
             execution_time_us: 50,
             rule_id: None,
         }
     }
 
     async fn rule_count(&self) -> u32 {
-        self.log.lock().unwrap().len() as u32
+        self.applied.lock().unwrap().len() as u32
     }
 }
 
@@ -102,16 +118,9 @@ mod tests {
     use balansir_common::{Action, DecisionTrace, MatcherStep};
     use smallvec::SmallVec;
 
-    #[tokio::test]
-    async fn test_dummy_executor() {
-        let executor = DummyExecutor::new();
-
-        assert!(executor.supports(ActionType::Route));
-        assert!(executor.supports(ActionType::Block));
-        assert!(!executor.supports(ActionType::Forward));
-
-        let request = ActionRequest {
-            action: Action::Block,
+    fn make_request(action: Action) -> ActionRequest {
+        ActionRequest {
+            action,
             src_ip: [192, 168, 1, 1],
             dst_ip: [142, 250, 80, 46],
             src_port: 12345,
@@ -121,21 +130,61 @@ mod tests {
             trace: DecisionTrace {
                 policy_id: 1,
                 steps: SmallVec::new(),
-                action: Action::Block,
+                action,
                 execution_time_us: 0,
                 correlation_id: 0,
             },
-        };
+        }
+    }
 
+    #[tokio::test]
+    async fn test_dummy_executor_basic() {
+        let executor = DummyExecutor::new();
+
+        assert!(executor.supports(ActionType::Route));
+        assert!(executor.supports(ActionType::Block));
+        assert!(!executor.supports(ActionType::Shape));
+
+        let request = make_request(Action::Block);
         let result = executor.execute(&request).await;
+
         match result {
-            ActionResult::Success { rule_id, .. } => {
+            ActionResult::Applied { rule_id, .. } => {
                 assert_eq!(rule_id, Some(1));
             }
-            _ => panic!("Expected success"),
+            _ => panic!("Expected Applied"),
         }
 
         assert_eq!(executor.rule_count().await, 1);
-        assert_eq!(executor.log().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_dummy_executor_idempotent() {
+        let executor = DummyExecutor::new();
+
+        let request = make_request(Action::Block);
+
+        // First apply
+        let result1 = executor.execute(&request).await;
+        assert!(matches!(result1, ActionResult::Applied { .. }));
+
+        // Second apply (idempotent)
+        let result2 = executor.execute(&request).await;
+        assert!(matches!(result2, ActionResult::AlreadyApplied));
+
+        // Still only one rule
+        assert_eq!(executor.rule_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_dummy_executor_driver_forward() {
+        let executor = DummyExecutor::new();
+
+        let request = make_request(Action::Forward {
+            driver: DriverId::WIREGUARD,
+        });
+
+        let result = executor.execute(&request).await;
+        assert!(matches!(result, ActionResult::Applied { .. }));
     }
 }

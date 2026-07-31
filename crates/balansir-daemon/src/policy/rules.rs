@@ -80,7 +80,9 @@ impl PolicyRuleToml {
             ActionToml::Route { table } => Action::Route { table: *table },
             ActionToml::Forward { driver } => {
                 let driver_hash = hash_domain(driver);
-                Action::Forward { driver: driver_hash }
+                Action::Forward {
+                    driver: balansir_common::DriverId(driver_hash),
+                }
             }
             ActionToml::Block => Action::Block,
             ActionToml::Reject => Action::Reject,

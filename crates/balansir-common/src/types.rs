@@ -1,6 +1,11 @@
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
+// --- Type aliases ---
+
+pub type EventId = u64;
+pub type CorrelationId = u64;
+
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct Capabilities: u32 {
@@ -30,9 +35,35 @@ pub enum DriverAction {
     Status,
 }
 
+// --- DriverId (newtype) ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DriverId(pub u32);
+
+impl DriverId {
+    pub const WIREGUARD: DriverId = DriverId(1);
+    pub const XRAY: DriverId = DriverId(2);
+    pub const HYSTERIA: DriverId = DriverId(3);
+    pub const B4: DriverId = DriverId(4);
+
+    pub fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    pub fn as_u32(&self) -> u32 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for DriverId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Driver({})", self.0)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriverInfo {
-    pub id: u32,
+    pub id: DriverId,
     pub name_hash: u32,
     pub capabilities: Capabilities,
 }
@@ -87,8 +118,8 @@ pub enum Action {
     /// Set firewall mark (fwmark)
     Mark { fwmark: u32 },
 
-    /// Forward to tunnel driver (by driver ID hash)
-    Forward { driver: u32 },
+    /// Forward to tunnel driver
+    Forward { driver: DriverId },
 
     /// Block traffic silently (drop)
     Block,
@@ -151,26 +182,42 @@ pub struct ActionRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActionResult {
-    Success {
+    /// Action was successfully applied
+    Applied {
         execution_time_us: u64,
         rule_id: Option<u32>,
     },
+
+    /// Action was already in desired state (idempotent)
+    AlreadyApplied,
+
+    /// Action failed
     Failed {
         error: ActionError,
+        message: Option<String>,
     },
+
+    /// Action should be retried later
+    Retry {
+        after_ms: u32,
+        reason: String,
+    },
+
+    /// Action type is not supported by this executor
     Unsupported {
         action_type: ActionType,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActionError {
     PermissionDenied,
     ResourceExhausted,
-    InvalidArgument(String),
+    InvalidArgument,
     KernelError(u32),
-    DriverNotAvailable(u32),
+    DriverNotAvailable(DriverId),
     Timeout,
+    Unknown,
 }
 
 // --- Executor capabilities ---
@@ -183,61 +230,23 @@ pub struct ExecutorCapabilities {
     pub max_route_tables: u32,
 }
 
-// --- Event ID ---
+// --- Desired State ---
 
-pub type EventId = u64;
-
-// --- Correlation ID ---
-
-pub type CorrelationId = u64;
-
-// --- Time abstraction ---
-
-pub trait Clock: Send + Sync {
-    fn now_millis(&self) -> i64;
-    fn now_nanos(&self) -> u64;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesiredState {
+    pub rules: Vec<DesiredRule>,
+    pub drivers: Vec<DesiredDriver>,
 }
 
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now_millis(&self) -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64
-    }
-
-    fn now_nanos(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesiredRule {
+    pub id: u32,
+    pub action: Action,
+    pub priority: u32,
 }
 
-pub struct MockClock {
-    pub millis: std::sync::atomic::AtomicI64,
-}
-
-impl MockClock {
-    pub fn new(initial: i64) -> Self {
-        Self {
-            millis: std::sync::atomic::AtomicI64::new(initial),
-        }
-    }
-
-    pub fn advance(&self, ms: i64) {
-        self.millis.fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-impl Clock for MockClock {
-    fn now_millis(&self) -> i64 {
-        self.millis.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn now_nanos(&self) -> u64 {
-        (self.millis.load(std::sync::atomic::Ordering::Relaxed) * 1_000_000) as u64
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesiredDriver {
+    pub id: DriverId,
+    pub action: DriverAction,
 }

@@ -7,9 +7,13 @@ license.workspace = true
 
 [dependencies]
 balansir-common = { path = "../balansir-common" }
+balansir-executor = { path = "../balansir-executor" }
 tokio = { workspace = true, features = ["rt", "net", "macros", "io-util"] }
 postcard.workspace = true
 smallvec.workspace = true
+async-trait = "0.1"
+libc = "0.2"
+futures = "0.3"
 
 [lib]
 name = "ipc_integration"

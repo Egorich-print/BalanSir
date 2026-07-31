@@ -26,12 +26,15 @@
 - [x] Time abstraction (Clock trait)
 - [x] Policy Engine (matchers, actions)
 - [x] Health Monitor (circuit breaker)
+- [x] Action Model (Route, Mark, Forward, Block, Reject)
+- [x] Executor trait + DummyExecutor
+- [x] Full IPC integration tests
 
 ### In Progress
 
-- [ ] Full WireGuard driver
+- [ ] Network namespace tests
+- [ ] WireGuard driver (full)
 - [ ] Xray driver
-- [ ] Integration tests (netns)
 
 ### Blocked
 
