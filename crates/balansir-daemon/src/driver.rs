@@ -1,26 +1,10 @@
 use async_trait::async_trait;
-use balansir_common::{Capabilities, HealthStatus};
-use tracing::info;
+use balansir_common::{Capabilities, DriverId, HealthStatus};
 
-pub struct DummyDriver {
-    id: String,
-    name: String,
-    healthy: bool,
-}
-
-impl DummyDriver {
-    pub fn new(id: &str, name: &str) -> Self {
-        Self {
-            id: id.to_string(),
-            name: name.to_string(),
-            healthy: true,
-        }
-    }
-}
-
+/// Component driver trait
 #[async_trait]
 pub trait ComponentDriver: Send + Sync {
-    fn id(&self) -> &str;
+    fn id(&self) -> DriverId;
     fn name(&self) -> &str;
     fn capabilities(&self) -> Capabilities;
 
@@ -30,10 +14,27 @@ pub trait ComponentDriver: Send + Sync {
     async fn health_check(&self) -> HealthStatus;
 }
 
+/// Dummy driver for testing
+pub struct DummyDriver {
+    id: DriverId,
+    name: String,
+    healthy: bool,
+}
+
+impl DummyDriver {
+    pub fn new(id: DriverId, name: &str) -> Self {
+        Self {
+            id,
+            name: name.to_string(),
+            healthy: true,
+        }
+    }
+}
+
 #[async_trait]
 impl ComponentDriver for DummyDriver {
-    fn id(&self) -> &str {
-        &self.id
+    fn id(&self) -> DriverId {
+        self.id
     }
 
     fn name(&self) -> &str {
@@ -45,19 +46,19 @@ impl ComponentDriver for DummyDriver {
     }
 
     async fn start(&mut self) -> Result<(), String> {
-        info!("DummyDriver started: {}", self.name);
+        tracing::info!("DummyDriver started: {}", self.name);
         self.healthy = true;
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), String> {
-        info!("DummyDriver stopped: {}", self.name);
+        tracing::info!("DummyDriver stopped: {}", self.name);
         self.healthy = false;
         Ok(())
     }
 
     async fn restart(&mut self) -> Result<(), String> {
-        info!("DummyDriver restarted: {}", self.name);
+        tracing::info!("DummyDriver restarted: {}", self.name);
         self.stop().await?;
         self.start().await?;
         Ok(())
@@ -78,9 +79,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_dummy_driver() {
-        let mut driver = DummyDriver::new("dummy-1", "Test Dummy");
+        let mut driver = DummyDriver::new(DriverId::new(99), "Test Dummy");
 
-        assert_eq!(driver.id(), "dummy-1");
+        assert_eq!(driver.id(), DriverId::new(99));
         assert_eq!(driver.name(), "Test Dummy");
 
         driver.start().await.unwrap();

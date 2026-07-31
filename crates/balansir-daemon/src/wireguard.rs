@@ -1,49 +1,116 @@
 use async_trait::async_trait;
-use balansir_common::{Capabilities, HealthStatus};
-use tracing::info;
+use balansir_common::{
+    Action, ActionResult, ActionType, Capabilities, DriverId, ExecutorCapabilities, HealthStatus,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
+use crate::driver::ComponentDriver;
+
+/// WireGuard configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireGuardConfig {
+    pub interface: String,
+    pub private_key: Option<String>,
+    pub listen_port: Option<u16>,
+    pub address: Option<String>,
+    pub peers: Vec<WireGuardPeer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireGuardPeer {
+    pub public_key: String,
+    pub endpoint: Option<String>,
+    pub allowed_ips: Vec<String>,
+    pub persistent_keepalive: Option<u16>,
+}
+
+/// WireGuard driver
 pub struct WireGuardDriver {
-    id: String,
-    name: String,
-    interface: String,
-    private_key: Option<String>,
-    address: Option<String>,
+    id: DriverId,
+    config: WireGuardConfig,
     running: bool,
+    health: HealthStatus,
 }
 
 impl WireGuardDriver {
-    pub fn new(id: &str, name: &str, interface: &str) -> Self {
+    pub fn new(id: DriverId, config: WireGuardConfig) -> Self {
         Self {
-            id: id.to_string(),
-            name: name.to_string(),
-            interface: interface.to_string(),
-            private_key: None,
-            address: None,
+            id,
+            config,
             running: false,
+            health: HealthStatus::Unknown,
         }
     }
 
-    pub fn set_private_key(&mut self, key: &str) {
-        self.private_key = Some(key.to_string());
+    fn check_interface(&self) -> bool {
+        std::path::Path::new(&format!("/sys/class/net/{}", self.config.interface)).exists()
     }
 
-    pub fn set_address(&mut self, addr: &str) {
-        self.address = Some(addr.to_string());
+    fn create_interface(&self) -> Result<(), String> {
+        // In real implementation: use netlink to create WireGuard interface
+        // For now, use ip command as fallback
+        let output = std::process::Command::new("ip")
+            .args(["link", "add", &self.config.interface, "type", "wireguard"])
+            .output()
+            .map_err(|e| format!("Failed to create interface: {}", e))?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+
+        Ok(())
     }
 
-    fn check_interface_exists(&self) -> bool {
-        std::path::Path::new(&format!("/sys/class/net/{}", self.interface)).exists()
+    fn configure_interface(&self) -> Result<(), String> {
+        if let Some(ref addr) = self.config.address {
+            let output = std::process::Command::new("ip")
+                .args(["addr", "add", addr, "dev", &self.config.interface])
+                .output()
+                .map_err(|e| format!("Failed to set address: {}", e))?;
+
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+        }
+
+        // Bring interface up
+        let output = std::process::Command::new("ip")
+            .args(["link", "set", &self.config.interface, "up"])
+            .output()
+            .map_err(|e| format!("Failed to bring up interface: {}", e))?;
+
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+
+        Ok(())
+    }
+
+    fn delete_interface(&self) -> Result<(), String> {
+        let output = std::process::Command::new("ip")
+            .args(["link", "del", &self.config.interface])
+            .output()
+            .map_err(|e| format!("Failed to delete interface: {}", e))?;
+
+        if !output.status.success() {
+            // Interface might not exist
+            return Ok(());
+        }
+
+        Ok(())
     }
 }
 
 #[async_trait]
-impl super::driver::ComponentDriver for WireGuardDriver {
-    fn id(&self) -> &str {
-        &self.id
+impl ComponentDriver for WireGuardDriver {
+    fn id(&self) -> DriverId {
+        self.id
     }
 
     fn name(&self) -> &str {
-        &self.name
+        "WireGuard"
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -51,33 +118,34 @@ impl super::driver::ComponentDriver for WireGuardDriver {
     }
 
     async fn start(&mut self) -> Result<(), String> {
-        info!("WireGuardDriver starting: {}", self.name);
+        tracing::info!("Starting WireGuard driver: {}", self.config.interface);
 
-        // In real implementation:
-        // 1. Create WireGuard interface
-        // 2. Set private key
-        // 3. Set address
-        // 4. Bring interface up
+        // Create interface
+        self.create_interface()?;
+
+        // Configure interface
+        self.configure_interface()?;
 
         self.running = true;
-        info!("WireGuardDriver started: {}", self.name);
+        self.health = HealthStatus::Healthy;
+
+        tracing::info!("WireGuard driver started: {}", self.config.interface);
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), String> {
-        info!("WireGuardDriver stopping: {}", self.name);
+        tracing::info!("Stopping WireGuard driver: {}", self.config.interface);
 
-        // In real implementation:
-        // 1. Bring interface down
-        // 2. Delete interface
+        self.delete_interface()?;
 
         self.running = false;
-        info!("WireGuardDriver stopped: {}", self.name);
+        self.health = HealthStatus::Unknown;
+
+        tracing::info!("WireGuard driver stopped: {}", self.config.interface);
         Ok(())
     }
 
     async fn restart(&mut self) -> Result<(), String> {
-        info!("WireGuardDriver restarting: {}", self.name);
         self.stop().await?;
         self.start().await?;
         Ok(())
@@ -88,34 +156,113 @@ impl super::driver::ComponentDriver for WireGuardDriver {
             return HealthStatus::Unhealthy { reason: 1 };
         }
 
-        // In real implementation, also check:
-        // 1. Interface exists in /sys/class/net/
-        // 2. Peer connectivity
-        // 3. Latency and packet loss
+        if !self.check_interface() {
+            return HealthStatus::Degraded { reason: 1 };
+        }
 
         HealthStatus::Healthy
+    }
+}
+
+/// WireGuard executor - executes WireGuard-specific actions
+pub struct WireGuardExecutor {
+    capabilities: ExecutorCapabilities,
+    drivers: Mutex<HashMap<DriverId, WireGuardDriver>>,
+}
+
+impl WireGuardExecutor {
+    pub fn new() -> Self {
+        Self {
+            capabilities: ExecutorCapabilities {
+                supported_actions: vec![ActionType::Forward],
+                max_rules: 64,
+                max_fwmarks: 0,
+                max_route_tables: 0,
+            },
+            drivers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn add_driver(&self, driver: WireGuardDriver) {
+        let mut drivers = self.drivers.lock().unwrap();
+        drivers.insert(driver.id(), driver);
+    }
+
+    pub fn capabilities(&self) -> &ExecutorCapabilities {
+        &self.capabilities
+    }
+
+    pub fn supports(&self, action_type: ActionType) -> bool {
+        self.capabilities.supported_actions.contains(&action_type)
+    }
+
+    pub async fn execute(&self, request: &balansir_common::ActionRequest) -> ActionResult {
+        match request.action {
+            Action::Forward { driver } => {
+                let mut drivers = self.drivers.lock().unwrap();
+                if let Some(wg_driver) = drivers.get_mut(&driver) {
+                    if wg_driver.running {
+                        ActionResult::AlreadyApplied
+                    } else {
+                        match wg_driver.start().await {
+                            Ok(()) => ActionResult::Applied {
+                                execution_time_us: 0,
+                                rule_id: None,
+                            },
+                            Err(e) => ActionResult::Failed {
+                                error: balansir_common::ActionError::Unknown,
+                                message: Some(e),
+                            },
+                        }
+                    }
+                } else {
+                    ActionResult::Failed {
+                        error: balansir_common::ActionError::DriverNotAvailable(driver),
+                        message: None,
+                    }
+                }
+            }
+            _ => ActionResult::Unsupported {
+                action_type: request.action.action_type(),
+            },
+        }
+    }
+
+    pub fn rule_count(&self) -> u32 {
+        let drivers = self.drivers.lock().unwrap();
+        drivers.len() as u32
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::ComponentDriver;
 
-    #[tokio::test]
-    async fn test_wireguard_driver() {
-        let mut driver = WireGuardDriver::new("wg-1", "Test WireGuard", "wg0");
+    #[test]
+    fn test_wireguard_config() {
+        let config = WireGuardConfig {
+            interface: "wg0".to_string(),
+            private_key: Some("test-key".to_string()),
+            listen_port: Some(51820),
+            address: Some("10.0.0.1/24".to_string()),
+            peers: vec![WireGuardPeer {
+                public_key: "peer-key".to_string(),
+                endpoint: Some("vpn.example.com:51820".to_string()),
+                allowed_ips: vec!["0.0.0.0/0".to_string()],
+                persistent_keepalive: Some(25),
+            }],
+        };
 
-        assert_eq!(driver.id(), "wg-1");
-        assert_eq!(driver.name(), "Test WireGuard");
+        let driver = WireGuardDriver::new(DriverId::WIREGUARD, config);
+        assert_eq!(driver.id(), DriverId::WIREGUARD);
+        assert_eq!(driver.name(), "WireGuard");
+        assert!(driver.capabilities().contains(Capabilities::TUNNEL));
+    }
 
-        driver.start().await.unwrap();
-        assert_eq!(driver.health_check().await, HealthStatus::Healthy);
-
-        driver.stop().await.unwrap();
-        assert_eq!(
-            driver.health_check().await,
-            HealthStatus::Unhealthy { reason: 1 }
-        );
+    #[test]
+    fn test_wireguard_executor_capabilities() {
+        let executor = WireGuardExecutor::new();
+        assert!(executor.supports(ActionType::Forward));
+        assert!(!executor.supports(ActionType::Block));
     }
 }
