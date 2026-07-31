@@ -1,0 +1,38 @@
+[device]
+name = "Generic x86"
+arch = "x86_64"
+ram_mb = 4096
+cpu_cores = 4
+
+[runtime]
+flavor = "multi_thread"
+blocking_threads = 4
+
+[memory]
+daemon_rss_max_mb = 128
+executor_rss_max_mb = 64
+data_plane_rss_max_mb = 512
+event_bus_capacity = 1024
+state_cache_mb = 32
+
+[drivers]
+max_active = 5
+default = "wireguard"
+enabled = ["wireguard", "xray", "hysteria", "b4", "amneziawg"]
+
+[state]
+backend = "file"
+journal_capacity = 4096
+
+[updates]
+ab_slots = true
+boot_counter_max = 5
+
+[network]
+max_firewall_rules = 8192
+max_routes = 4096
+nftables_batch_size = 256
+
+[resources]
+max_fwmarks = 256
+max_route_tables = 128

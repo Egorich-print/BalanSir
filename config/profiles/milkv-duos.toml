@@ -1,0 +1,38 @@
+[device]
+name = "Milk-V Duo S"
+arch = "riscv64"
+ram_mb = 512
+cpu_cores = 1
+
+[runtime]
+flavor = "current_thread"
+blocking_threads = 2
+
+[memory]
+daemon_rss_max_mb = 12
+executor_rss_max_mb = 8
+data_plane_rss_max_mb = 45
+event_bus_capacity = 64
+state_cache_mb = 2
+
+[drivers]
+max_active = 1
+default = "wireguard"
+enabled = ["wireguard", "xray", "hysteria", "b4"]
+
+[state]
+backend = "file"
+journal_capacity = 256
+
+[updates]
+ab_slots = true
+boot_counter_max = 3
+
+[network]
+max_firewall_rules = 512
+max_routes = 256
+nftables_batch_size = 64
+
+[resources]
+max_fwmarks = 64
+max_route_tables = 32

@@ -14,15 +14,19 @@
 - [x] balansir-common crate
 - [x] balansir-daemon skeleton
 - [x] balansir-executor skeleton
+- [x] StateStore (file backend)
+- [x] BoundedEventBus
+- [x] ResourceAllocator
+- [x] NftablesBackend
+- [x] DummyDriver
+- [x] WireGuard driver skeleton
 
 ### In Progress
 
-- [ ] StateStore (file backend)
-- [ ] BoundedEventBus
-- [ ] ResourceAllocator
-- [ ] NftablesBackend
-- [ ] DummyDriver
-- [ ] WireGuard driver skeleton
+- [ ] Policy Engine (matchers, actions)
+- [ ] Health Monitor (circuit breaker)
+- [ ] Profile loader
+- [ ] Integration tests (netns)
 
 ### Blocked
 
