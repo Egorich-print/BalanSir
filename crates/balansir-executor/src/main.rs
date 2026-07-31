@@ -1,4 +1,4 @@
-use balansir_common::ipc::{self, IpcMessage, MsgType};
+use balansir_common::ipc::{IpcConnection, MsgType};
 use balansir_common::Result;
 use tokio::net::UnixStream;
 use tracing::{error, info};
@@ -13,21 +13,12 @@ async fn main() -> Result<()> {
 
     info!("BalanSir Executor starting");
 
-    let mut stream = UnixStream::connect(SOCKET_PATH).await?;
+    let stream = UnixStream::connect(SOCKET_PATH).await?;
+    let mut conn = IpcConnection::new(stream);
     info!("Connected to daemon at {}", SOCKET_PATH);
 
-    let msg = IpcMessage::new(MsgType::HealthCheck, 1, Vec::new());
-    ipc::send(&mut stream, &msg).await?;
-    info!("Sent health check");
-
-    match ipc::recv(&mut stream).await {
-        Ok(response) => {
-            info!("Received response: {:?}", response.msg_type);
-        }
-        Err(e) => {
-            error!("Failed to receive response: {}", e);
-        }
-    }
+    let response = conn.request(MsgType::HealthCheck, Vec::new()).await?;
+    info!("Health check response: {:?}", response.msg_type);
 
     Ok(())
 }

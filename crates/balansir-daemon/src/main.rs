@@ -1,4 +1,4 @@
-use balansir_common::ipc::{self, IpcMessage, MsgType};
+use balansir_common::ipc::{IpcConnection, IpcMessage, MsgType};
 use balansir_common::Result;
 use std::path::Path;
 use tokio::net::UnixListener;
@@ -39,12 +39,14 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn handle_connection(mut stream: tokio::net::UnixStream) {
+async fn handle_connection(stream: tokio::net::UnixStream) {
+    let mut conn = IpcConnection::new(stream);
+
     loop {
-        match ipc::recv(&mut stream).await {
+        match conn.recv().await {
             Ok(msg) => {
-                let response = handle_message(msg);
-                if let Err(e) = ipc::send(&mut stream, &response).await {
+                let response = handle_message(&msg);
+                if let Err(e) = conn.send(&response).await {
                     error!("Send error: {}", e);
                     break;
                 }
@@ -57,19 +59,19 @@ async fn handle_connection(mut stream: tokio::net::UnixStream) {
     }
 }
 
-fn handle_message(msg: IpcMessage) -> IpcMessage {
+fn handle_message(msg: &IpcMessage) -> IpcMessage {
     match msg.msg_type {
         MsgType::HealthCheck => {
             info!("Health check requested");
-            IpcMessage::response_ok(msg.sequence)
+            IpcMessage::response_ok(msg.correlation_id)
         }
         MsgType::GetMetrics => {
             info!("Metrics requested");
-            IpcMessage::response_ok(msg.sequence)
+            IpcMessage::response_ok(msg.correlation_id)
         }
         _ => {
             info!("Unknown message type: {:?}", msg.msg_type);
-            IpcMessage::response_error(msg.sequence, "Unknown message type")
+            IpcMessage::response_error(msg.correlation_id, "Unknown message type")
         }
     }
 }

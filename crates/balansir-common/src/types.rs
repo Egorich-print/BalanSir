@@ -58,3 +58,90 @@ impl Slot {
         }
     }
 }
+
+// --- Decision Trace ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionTrace {
+    pub policy_id: u32,
+    pub steps: smallvec::SmallVec<[MatcherStep; 4]>,
+    pub action: Action,
+    pub execution_time_us: u64,
+    pub correlation_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatcherStep {
+    pub rule_id: u32,
+    pub matched: bool,
+    pub reason: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Action {
+    Route { via: u32 },
+    Block,
+    Allow,
+    Drop,
+    Shape { bandwidth: u32 },
+    Log,
+}
+
+// --- Event ID ---
+
+pub type EventId = u64;
+
+// --- Correlation ID ---
+
+pub type CorrelationId = u64;
+
+// --- Time abstraction ---
+
+pub trait Clock: Send + Sync {
+    fn now_millis(&self) -> i64;
+    fn now_nanos(&self) -> u64;
+}
+
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_millis(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64
+    }
+
+    fn now_nanos(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+    }
+}
+
+pub struct MockClock {
+    pub millis: std::sync::atomic::AtomicI64,
+}
+
+impl MockClock {
+    pub fn new(initial: i64) -> Self {
+        Self {
+            millis: std::sync::atomic::AtomicI64::new(initial),
+        }
+    }
+
+    pub fn advance(&self, ms: i64) {
+        self.millis.fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Clock for MockClock {
+    fn now_millis(&self) -> i64 {
+        self.millis.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn now_nanos(&self) -> u64 {
+        (self.millis.load(std::sync::atomic::Ordering::Relaxed) * 1_000_000) as u64
+    }
+}

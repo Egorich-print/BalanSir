@@ -20,12 +20,17 @@
 - [x] NftablesBackend
 - [x] DummyDriver
 - [x] WireGuard driver skeleton
+- [x] Decision Trace
+- [x] Event ID (monotonic)
+- [x] Correlation ID for IPC
+- [x] Time abstraction (Clock trait)
+- [x] Policy Engine (matchers, actions)
+- [x] Health Monitor (circuit breaker)
 
 ### In Progress
 
-- [ ] Policy Engine (matchers, actions)
-- [ ] Health Monitor (circuit breaker)
-- [ ] Profile loader
+- [ ] Full WireGuard driver
+- [ ] Xray driver
 - [ ] Integration tests (netns)
 
 ### Blocked
