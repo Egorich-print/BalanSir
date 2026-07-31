@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/balansir-common",
+    "crates/balansir-daemon",
+    "crates/balansir-executor",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Egor Korostelev"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1", default-features = false }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+postcard = { version = "1", features = ["alloc"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+smallvec = "1"
+bitflags = { version = "2", features = ["serde"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

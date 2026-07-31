@@ -1,0 +1,8 @@
+[build]
+# Default target for development (host)
+# Uncomment below for cross-compilation to RISC-V
+# target = "riscv64gc-unknown-linux-musl"
+
+[target.riscv64gc-unknown-linux-musl]
+linker = "riscv64-linux-gnu-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
