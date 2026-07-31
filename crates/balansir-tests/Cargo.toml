@@ -1,5 +1,5 @@
 [package]
-name = "balansir-executor"
+name = "balansir-tests"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,12 +8,9 @@ license.workspace = true
 [dependencies]
 balansir-common = { path = "../balansir-common" }
 tokio = { workspace = true, features = ["rt", "net", "macros", "io-util"] }
-tracing.workspace = true
-tracing-subscriber.workspace = true
-serde.workspace = true
-serde_json = "1"
-async-trait = "0.1"
+postcard.workspace = true
 smallvec.workspace = true
 
-[dev-dependencies]
-tempfile = "3"
+[lib]
+name = "ipc_integration"
+path = "src/ipc_integration.rs"

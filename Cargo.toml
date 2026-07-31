@@ -3,6 +3,7 @@ members = [
     "crates/balansir-common",
     "crates/balansir-daemon",
     "crates/balansir-executor",
+    "crates/balansir-tests",
 ]
 resolver = "2"
 

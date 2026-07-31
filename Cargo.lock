@@ -68,13 +68,25 @@ dependencies = [
 name = "balansir-executor"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "balansir-common",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "balansir-tests"
+version = "0.1.0"
+dependencies = [
+ "balansir-common",
+ "postcard",
+ "smallvec",
+ "tokio",
 ]
 
 [[package]]

@@ -33,10 +33,11 @@ pub enum MatcherToml {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ActionToml {
-    Route { via: String },
+    Route { table: u32 },
+    Forward { driver: String },
     Block,
+    Reject,
     Allow,
-    Drop,
 }
 
 fn hash_domain(domain: &str) -> u32 {
@@ -76,13 +77,14 @@ impl PolicyRuleToml {
         };
 
         let action = match &self.action {
-            ActionToml::Route { via } => {
-                let via_hash = hash_domain(via);
-                Action::Route { via: via_hash }
+            ActionToml::Route { table } => Action::Route { table: *table },
+            ActionToml::Forward { driver } => {
+                let driver_hash = hash_domain(driver);
+                Action::Forward { driver: driver_hash }
             }
             ActionToml::Block => Action::Block,
+            ActionToml::Reject => Action::Reject,
             ActionToml::Allow => Action::Allow,
-            ActionToml::Drop => Action::Drop,
         };
 
         super::PolicyRule {
@@ -132,8 +134,8 @@ type = "DomainSuffix"
 suffix = ".youtube.com"
 
 [rules.action]
-type = "Route"
-via = "hysteria-primary"
+type = "Forward"
+driver = "hysteria-primary"
 "#;
 
         let policy: PolicyFile = toml::from_str(toml).unwrap();

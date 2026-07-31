@@ -70,21 +70,117 @@ pub struct DecisionTrace {
     pub correlation_id: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct MatcherStep {
     pub rule_id: u32,
     pub matched: bool,
     pub reason: u16,
 }
 
+// --- Actions ---
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
-    Route { via: u32 },
+    /// Route traffic to specific routing table
+    Route { table: u32 },
+
+    /// Set firewall mark (fwmark)
+    Mark { fwmark: u32 },
+
+    /// Forward to tunnel driver (by driver ID hash)
+    Forward { driver: u32 },
+
+    /// Block traffic silently (drop)
     Block,
+
+    /// Reject traffic with ICMP unreachable
+    Reject,
+
+    /// Allow traffic (no modification)
     Allow,
-    Drop,
-    Shape { bandwidth: u32 },
+
+    /// Shape traffic (QoS)
+    Shape { class: u32 },
+
+    /// Log packet (for debugging)
     Log,
+}
+
+impl Action {
+    pub fn action_type(&self) -> ActionType {
+        match self {
+            Self::Route { .. } => ActionType::Route,
+            Self::Mark { .. } => ActionType::Mark,
+            Self::Forward { .. } => ActionType::Forward,
+            Self::Block => ActionType::Block,
+            Self::Reject => ActionType::Reject,
+            Self::Allow => ActionType::Allow,
+            Self::Shape { .. } => ActionType::Shape,
+            Self::Log => ActionType::Log,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActionType {
+    Route,
+    Mark,
+    Forward,
+    Block,
+    Reject,
+    Allow,
+    Shape,
+    Log,
+}
+
+// --- Action Request (daemon -> executor) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionRequest {
+    pub action: Action,
+    pub src_ip: [u8; 4],
+    pub dst_ip: [u8; 4],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub interface: u32,
+    pub trace: DecisionTrace,
+}
+
+// --- Action Result (executor -> daemon) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ActionResult {
+    Success {
+        execution_time_us: u64,
+        rule_id: Option<u32>,
+    },
+    Failed {
+        error: ActionError,
+    },
+    Unsupported {
+        action_type: ActionType,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ActionError {
+    PermissionDenied,
+    ResourceExhausted,
+    InvalidArgument(String),
+    KernelError(u32),
+    DriverNotAvailable(u32),
+    Timeout,
+}
+
+// --- Executor capabilities ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutorCapabilities {
+    pub supported_actions: Vec<ActionType>,
+    pub max_rules: u32,
+    pub max_fwmarks: u32,
+    pub max_route_tables: u32,
 }
 
 // --- Event ID ---
