@@ -18,6 +18,7 @@ pub struct WireGuardConfig {
     pub peers: Vec<WireGuardPeer>,
 }
 
+/// WireGuard peer configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireGuardPeer {
     pub public_key: String,
@@ -35,6 +36,7 @@ pub struct WireGuardDriver {
 }
 
 impl WireGuardDriver {
+    /// Create a new WireGuard driver
     pub fn new(id: DriverId, config: WireGuardConfig) -> Self {
         Self {
             id,
@@ -49,8 +51,6 @@ impl WireGuardDriver {
     }
 
     fn create_interface(&self) -> Result<(), String> {
-        // In real implementation: use netlink to create WireGuard interface
-        // For now, use ip command as fallback
         let output = std::process::Command::new("ip")
             .args(["link", "add", &self.config.interface, "type", "wireguard"])
             .output()
@@ -75,7 +75,6 @@ impl WireGuardDriver {
             }
         }
 
-        // Bring interface up
         let output = std::process::Command::new("ip")
             .args(["link", "set", &self.config.interface, "up"])
             .output()
@@ -95,7 +94,6 @@ impl WireGuardDriver {
             .map_err(|e| format!("Failed to delete interface: {}", e))?;
 
         if !output.status.success() {
-            // Interface might not exist
             return Ok(());
         }
 
@@ -120,10 +118,7 @@ impl ComponentDriver for WireGuardDriver {
     async fn start(&mut self) -> Result<(), String> {
         tracing::info!("Starting WireGuard driver: {}", self.config.interface);
 
-        // Create interface
         self.create_interface()?;
-
-        // Configure interface
         self.configure_interface()?;
 
         self.running = true;
@@ -170,7 +165,14 @@ pub struct WireGuardExecutor {
     drivers: Mutex<HashMap<DriverId, WireGuardDriver>>,
 }
 
+impl Default for WireGuardExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WireGuardExecutor {
+    /// Create a new WireGuard executor
     pub fn new() -> Self {
         Self {
             capabilities: ExecutorCapabilities {
@@ -183,28 +185,58 @@ impl WireGuardExecutor {
         }
     }
 
+    /// Add a WireGuard driver
     pub fn add_driver(&self, driver: WireGuardDriver) {
         let mut drivers = self.drivers.lock().unwrap();
         drivers.insert(driver.id(), driver);
     }
 
+    /// Get capabilities
     pub fn capabilities(&self) -> &ExecutorCapabilities {
         &self.capabilities
     }
 
+    /// Check if action type is supported
     pub fn supports(&self, action_type: ActionType) -> bool {
         self.capabilities.supported_actions.contains(&action_type)
     }
 
+    /// Execute an action
     pub async fn execute(&self, request: &balansir_common::ActionRequest) -> ActionResult {
         match request.action {
             Action::Forward { driver } => {
-                let mut drivers = self.drivers.lock().unwrap();
-                if let Some(wg_driver) = drivers.get_mut(&driver) {
-                    if wg_driver.running {
-                        ActionResult::AlreadyApplied
-                    } else {
-                        match wg_driver.start().await {
+                // Check if driver exists and get status
+                let driver_status = {
+                    let drivers = self.drivers.lock().unwrap();
+                    drivers.get(&driver).map(|d| d.running)
+                };
+
+                match driver_status {
+                    Some(true) => ActionResult::AlreadyApplied,
+                    Some(false) => {
+                        // Start driver outside of lock
+                        let start_result = {
+                            let mut drivers = self.drivers.lock().unwrap();
+                            if let Some(wg_driver) = drivers.get_mut(&driver) {
+                                // Can't await while holding lock, so we'll do sync start
+                                match wg_driver.create_interface() {
+                                    Ok(()) => {
+                                        match wg_driver.configure_interface() {
+                                            Ok(()) => {
+                                                wg_driver.running = true;
+                                                Ok(())
+                                            }
+                                            Err(e) => Err(e),
+                                        }
+                                    }
+                                    Err(e) => Err(e),
+                                }
+                            } else {
+                                Err("Driver not found".to_string())
+                            }
+                        };
+
+                        match start_result {
                             Ok(()) => ActionResult::Applied {
                                 execution_time_us: 0,
                                 rule_id: None,
@@ -215,11 +247,10 @@ impl WireGuardExecutor {
                             },
                         }
                     }
-                } else {
-                    ActionResult::Failed {
+                    None => ActionResult::Failed {
                         error: balansir_common::ActionError::DriverNotAvailable(driver),
                         message: None,
-                    }
+                    },
                 }
             }
             _ => ActionResult::Unsupported {
@@ -228,6 +259,7 @@ impl WireGuardExecutor {
         }
     }
 
+    /// Get rule count
     pub fn rule_count(&self) -> u32 {
         let drivers = self.drivers.lock().unwrap();
         drivers.len() as u32

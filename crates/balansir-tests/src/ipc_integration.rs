@@ -1,8 +1,13 @@
+
+#[cfg(test)]
 use balansir_common::ipc::{IpcConnection, IpcMessage, MsgType};
+#[cfg(test)]
 use balansir_common::{
     Action, ActionResult, DecisionTrace, DriverId, MatcherStep,
 };
+#[cfg(test)]
 use smallvec::SmallVec;
+#[cfg(test)]
 use tokio::net::UnixStream;
 
 pub mod netns;

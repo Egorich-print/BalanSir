@@ -4,10 +4,9 @@
 //! in an isolated network namespace without affecting the host.
 
 use balansir_common::{
-    Action, ActionRequest, ActionResult, ActionType, DecisionTrace, DriverId,
-    ExecutorCapabilities, MatcherStep,
+    Action, ActionRequest, ActionResult, ActionType,
+    ExecutorCapabilities,
 };
-use smallvec::SmallVec;
 
 /// Nftables executor that uses real nft commands
 pub struct NftablesExecutor {
@@ -129,7 +128,9 @@ impl balansir_executor::executor::Executor for NftablesExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use balansir_common::{DecisionTrace, MatcherStep};
     use balansir_executor::executor::Executor;
+    use smallvec::SmallVec;
 
     fn is_root() -> bool {
         unsafe { libc::getuid() == 0 }

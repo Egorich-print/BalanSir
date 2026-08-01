@@ -1,7 +1,7 @@
 use balansir_common::ipc::{IpcConnection, MsgType};
 use balansir_common::Result;
 use tokio::net::UnixStream;
-use tracing::{error, info};
+use tracing::info;
 
 const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
 

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::{
-    ActionRequest, ActionResult, ActionType, DriverId, ExecutorCapabilities,
+    ActionRequest, ActionResult, ActionType, ExecutorCapabilities,
 };
 
 /// Executor trait - defines how actions are applied to the kernel/drivers
@@ -42,6 +42,12 @@ pub struct DummyExecutor {
     capabilities: ExecutorCapabilities,
     log: std::sync::Mutex<Vec<(ActionRequest, ActionResult)>>,
     applied: std::sync::Mutex<Vec<ActionRequest>>,
+}
+
+impl Default for DummyExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DummyExecutor {
@@ -115,7 +121,7 @@ impl Executor for DummyExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use balansir_common::{Action, DecisionTrace, MatcherStep};
+    use balansir_common::{Action, DecisionTrace, DriverId, MatcherStep};
     use smallvec::SmallVec;
 
     fn make_request(action: Action) -> ActionRequest {

@@ -1,0 +1,34 @@
+[Unit]
+Description=BalanSir Network Policy Engine - Daemon
+Documentation=https://github.com/balansir/balansir
+After=network.target
+Wants=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/balansir-daemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+
+# Security
+User=balansir
+Group=balansir
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/balansir /var/log/balansir /run/balansir
+PrivateTmp=yes
+
+# Resource limits
+MemoryMax=128M
+TasksMax=64
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=balansir-daemon
+
+[Install]
+WantedBy=multi-user.target

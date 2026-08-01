@@ -3,11 +3,13 @@ use serde::{Deserialize, Serialize};
 use super::matcher::Matcher;
 use balansir_common::Action;
 
+/// Policy file structure loaded from TOML
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyFile {
     pub rules: Vec<PolicyRuleToml>,
 }
 
+/// Single policy rule in TOML format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyRuleToml {
     pub name: String,
@@ -17,6 +19,7 @@ pub struct PolicyRuleToml {
     pub action: ActionToml,
 }
 
+/// Matcher types for TOML configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MatcherToml {
@@ -30,6 +33,7 @@ pub enum MatcherToml {
     Protocol { proto: u8 },
 }
 
+/// Action types for TOML configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ActionToml {
@@ -48,8 +52,36 @@ fn hash_domain(domain: &str) -> u32 {
     hasher.finish() as u32
 }
 
+fn parse_cidr(cidr: &str) -> Result<([u8; 4], u8), String> {
+    let parts: Vec<&str> = cidr.split('/').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid CIDR format: {}", cidr));
+    }
+
+    let ip_parts: Vec<u8> = parts[0]
+        .split('.')
+        .map(|s| s.parse::<u8>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Invalid IP address: {}", e))?;
+
+    if ip_parts.len() != 4 {
+        return Err(format!("Invalid IP address: {}", parts[0]));
+    }
+
+    let mask: u8 = parts[1]
+        .parse()
+        .map_err(|e| format!("Invalid prefix length: {}", e))?;
+
+    if mask > 32 {
+        return Err(format!("Prefix length must be <= 32: {}", mask));
+    }
+
+    Ok(([ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3]], mask))
+}
+
 impl PolicyRuleToml {
-    pub fn to_rule(&self, id: u32) -> super::PolicyRule {
+    /// Convert TOML rule to internal representation
+    pub fn to_rule(&self, id: u32) -> Result<super::PolicyRule, String> {
         let matcher = match &self.matcher {
             MatcherToml::Any => Matcher::Any,
             MatcherToml::None => Matcher::None,
@@ -60,13 +92,8 @@ impl PolicyRuleToml {
                 hash: hash_domain(domain),
             },
             MatcherToml::IpRange { cidr } => {
-                let parts: Vec<&str> = cidr.split('/').collect();
-                let ip_parts: Vec<u8> = parts[0].split('.').map(|s| s.parse().unwrap()).collect();
-                let mask: u8 = parts[1].parse().unwrap();
-                Matcher::IpRange {
-                    base: [ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3]],
-                    mask,
-                }
+                let (base, mask) = parse_cidr(cidr)?;
+                Matcher::IpRange { base, mask }
             }
             MatcherToml::Port { port } => Matcher::Port { port: *port },
             MatcherToml::PortRange { start, end } => Matcher::PortRange {
@@ -89,7 +116,7 @@ impl PolicyRuleToml {
             ActionToml::Allow => Action::Allow,
         };
 
-        super::PolicyRule {
+        Ok(super::PolicyRule {
             id,
             name: self.name.clone(),
             priority: self.priority,
@@ -97,11 +124,12 @@ impl PolicyRuleToml {
             matcher,
             action,
             fallback: None,
-        }
+        })
     }
 }
 
 impl PolicyFile {
+    /// Load policy file from TOML
     pub fn load(path: &str) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read policy file: {}", e))?;
@@ -110,7 +138,8 @@ impl PolicyFile {
         Ok(policy)
     }
 
-    pub fn to_rules(&self) -> Vec<super::PolicyRule> {
+    /// Convert TOML rules to internal representation
+    pub fn to_rules(&self) -> Result<Vec<super::PolicyRule>, String> {
         self.rules
             .iter()
             .enumerate()
@@ -143,5 +172,19 @@ driver = "hysteria-primary"
         let policy: PolicyFile = toml::from_str(toml).unwrap();
         assert_eq!(policy.rules.len(), 1);
         assert_eq!(policy.rules[0].name, "youtube-hysteria");
+    }
+
+    #[test]
+    fn test_cidr_parsing() {
+        let (ip, mask) = parse_cidr("192.168.1.0/24").unwrap();
+        assert_eq!(ip, [192, 168, 1, 0]);
+        assert_eq!(mask, 24);
+    }
+
+    #[test]
+    fn test_cidr_parsing_invalid() {
+        assert!(parse_cidr("invalid").is_err());
+        assert!(parse_cidr("192.168.1.0/33").is_err());
+        assert!(parse_cidr("999.999.999.999/24").is_err());
     }
 }

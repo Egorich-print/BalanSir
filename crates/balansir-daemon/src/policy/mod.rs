@@ -8,10 +8,12 @@ pub mod rules;
 pub use matcher::*;
 pub use rules::*;
 
+/// Policy engine evaluates packet context against rules
 pub struct PolicyEngine {
     rules: Vec<PolicyRule>,
 }
 
+/// A single policy rule
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyRule {
     pub id: u32,
@@ -24,12 +26,14 @@ pub struct PolicyRule {
 }
 
 impl PolicyEngine {
+    /// Create a new policy engine with the given rules
     pub fn new(rules: Vec<PolicyRule>) -> Self {
         let mut sorted_rules = rules;
         sorted_rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
         Self { rules: sorted_rules }
     }
 
+    /// Evaluate packet context and return decision trace
     pub fn evaluate(&self, ctx: &PacketContext) -> DecisionTrace {
         let start = std::time::Instant::now();
         let mut steps = SmallVec::new();
@@ -64,20 +68,24 @@ impl PolicyEngine {
         }
     }
 
+    /// Get all rules
     pub fn rules(&self) -> &[PolicyRule] {
         &self.rules
     }
 
+    /// Add a new rule
     pub fn add_rule(&mut self, rule: PolicyRule) {
         self.rules.push(rule);
         self.rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
     }
 
+    /// Remove a rule by ID
     pub fn remove_rule(&mut self, id: u32) {
         self.rules.retain(|r| r.id != id);
     }
 }
 
+/// Packet context for policy evaluation
 #[derive(Debug, Clone)]
 pub struct PacketContext {
     pub src_ip: [u8; 4],

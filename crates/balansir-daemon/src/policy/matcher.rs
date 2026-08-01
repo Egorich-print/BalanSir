@@ -24,10 +24,10 @@ impl Matcher {
             Self::Any => true,
             Self::None => false,
             Self::DomainSuffix { suffix } => {
-                ctx.domain_hash.map_or(false, |h| h == *suffix)
+                ctx.domain_hash == Some(*suffix)
             }
             Self::DomainExact { hash } => {
-                ctx.domain_hash.map_or(false, |h| h == *hash)
+                ctx.domain_hash == Some(*hash)
             }
             Self::IpRange { base, mask } => {
                 let mask_bits = !((1u32 << (32 - mask)) - 1);
@@ -45,7 +45,7 @@ impl Matcher {
                 ctx.protocol == *proto
             }
             Self::Interface { id } => {
-                ctx.interface.map_or(false, |i| i == *id)
+                ctx.interface == Some(*id)
             }
             Self::All(matchers) => {
                 matchers.iter().all(|m| m.matches(ctx))

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use balansir_common::CircuitState;
 
+/// Circuit breaker for health monitoring
 pub struct CircuitBreaker {
     inner: Mutex<CircuitBreakerInner>,
     config: CircuitBreakerConfig,
@@ -15,6 +16,7 @@ struct CircuitBreakerInner {
     last_success: Option<Instant>,
 }
 
+/// Configuration for circuit breaker
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerConfig {
     pub failure_threshold: u32,
@@ -33,6 +35,7 @@ impl Default for CircuitBreakerConfig {
 }
 
 impl CircuitBreaker {
+    /// Create a new circuit breaker with the given configuration
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             inner: Mutex::new(CircuitBreakerInner {
@@ -45,13 +48,21 @@ impl CircuitBreaker {
         }
     }
 
+    /// Get current circuit state
     pub fn state(&self) -> CircuitState {
-        let inner = self.inner.lock().unwrap();
-        inner.state
+        self.inner
+            .lock()
+            .map(|inner| inner.state)
+            .unwrap_or(CircuitState::Open)
     }
 
+    /// Record a successful operation
     pub fn record_success(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let Ok(mut inner) = self.inner.lock() else {
+            tracing::error!("Failed to acquire circuit breaker lock");
+            return;
+        };
+
         inner.failure_count = 0;
         inner.last_success = Some(Instant::now());
 
@@ -61,8 +72,13 @@ impl CircuitBreaker {
         }
     }
 
+    /// Record a failed operation
     pub fn record_failure(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let Ok(mut inner) = self.inner.lock() else {
+            tracing::error!("Failed to acquire circuit breaker lock");
+            return;
+        };
+
         inner.failure_count += 1;
         inner.last_failure = Some(Instant::now());
 
@@ -77,8 +93,11 @@ impl CircuitBreaker {
         }
     }
 
+    /// Check if a request should be allowed
     pub fn allow_request(&self) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
+        };
 
         match inner.state {
             CircuitState::Closed => true,
@@ -96,8 +115,13 @@ impl CircuitBreaker {
         }
     }
 
+    /// Reset circuit breaker to closed state
     pub fn reset(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let Ok(mut inner) = self.inner.lock() else {
+            tracing::error!("Failed to acquire circuit breaker lock");
+            return;
+        };
+
         inner.state = CircuitState::Closed;
         inner.failure_count = 0;
         inner.last_failure = None;
