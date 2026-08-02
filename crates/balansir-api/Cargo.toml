@@ -1,0 +1,18 @@
+[package]
+name = "balansir-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+balansir-common = { path = "../balansir-common" }
+tokio = { workspace = true, features = ["rt", "net", "macros"] }
+axum.workspace = true
+serde.workspace = true
+serde_json = "1"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }

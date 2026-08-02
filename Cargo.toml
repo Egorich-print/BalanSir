@@ -3,6 +3,7 @@ members = [
     "crates/balansir-common",
     "crates/balansir-daemon",
     "crates/balansir-executor",
+    "crates/balansir-api",
     "crates/balansir-tests",
 ]
 resolver = "2"
@@ -23,6 +24,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
 smallvec = { version = "1", features = ["serde"] }
 bitflags = { version = "2", features = ["serde"] }
+prometheus-client = "0.22"
+axum = "0.7"
 
 [profile.release]
 opt-level = "z"
