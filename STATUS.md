@@ -2,12 +2,12 @@
 
 > Last updated: 2026-08-02
 
-## Current Phase: Phase 6 (Complete)
+## Current Phase: Phase 7 (Complete)
 
 ### Completed
 
 - [x] Architecture specification (v7.0)
-- [x] ADR-000 through ADR-018
+- [x] ADR-000 through ADR-010
 - [x] Hardware profiles design
 - [x] IPC protocol (postcard-based)
 - [x] Workspace setup
@@ -18,10 +18,13 @@
 - [x] BoundedEventBus
 - [x] ResourceAllocator
 - [x] NftablesBackend
-- [x] DummyDriver
-- [x] WireGuard driver
-- [x] Xray driver
-- [x] AmneziaWG driver
+- [x] Drivers:
+  - [x] WireGuard
+  - [x] AmneziaWG (obfuscation)
+  - [x] Xray (VLESS)
+  - [x] Hysteria 2 (salamander obfs)
+  - [x] B4 (DPI bypass)
+  - [x] DNS Forwarder (stub)
 - [x] Decision Trace
 - [x] Event ID (monotonic)
 - [x] Correlation ID for IPC
@@ -43,13 +46,14 @@
 - [x] SSE Event Stream (/events/stream)
 - [x] Web UI (Svelte dashboard)
 
-### Next: Phase 7 (High Availability)
+### Next: Phase 8 (Production Hardening)
 
-- [ ] State export/import
-- [ ] Multi-node sync (optional)
-- [ ] Hysteria 2 driver
-- [ ] B4 driver
-- [ ] DNS forwarder
+- [ ] systemd hardening
+- [ ] RPM/DEB packaging
+- [ ] Docker image
+- [ ] Configuration validation
+- [ ] Graceful shutdown
+- [ ] Log rotation
 
 ## Architecture Decisions
 
@@ -66,6 +70,17 @@
 | Observability | ✅ Prometheus metrics | ADR-009 |
 | API | ✅ REST + SSE | ADR-010 |
 
+## Drivers
+
+| Driver | Status | Capabilities | Obfuscation |
+|--------|--------|--------------|-------------|
+| WireGuard | ✅ Complete | TUNNEL | No |
+| AmneziaWG | ✅ Complete | TUNNEL | Yes (AWG params) |
+| Xray (VLESS) | ✅ Complete | PROXY | Yes (XTLS) |
+| Hysteria 2 | ✅ Complete | PROXY | Yes (salamander) |
+| B4 | ✅ Complete | PACKET_PROCESSOR | Yes (fragmentation, fake) |
+| DNS Forwarder | ✅ Stub | DNS | N/A |
+
 ## Performance Targets
 
 | Metric | Target | Current |
@@ -79,24 +94,16 @@
 
 **Repository:** https://github.com/Egorich-print/BalanSir
 
-**Tests:** 52 passing, 2 ignored (require root)
-
-## Drivers
-
-| Driver | Status | Obfuscation |
-|--------|--------|-------------|
-| WireGuard | ✅ Complete | No |
-| AmneziaWG | ✅ Complete | Yes (Jc, Jmin, Jmax, S1, S2, H1, H2, H3) |
-| Xray (VLESS) | ✅ Complete | Yes (XTLS) |
-| Hysteria 2 | ⏳ Pending | Yes (built-in) |
-| B4 | ⏳ Pending | Yes (DPI bypass) |
+**Tests:** 62 passing, 2 ignored (require root)
 
 ## Web UI
 
-```
-http://localhost:5173
+```bash
+cd webui && npm install && npm run dev
+# http://localhost:5173
 ```
 
+Features:
 - Health status
 - Real-time events (SSE)
 - Desired state
