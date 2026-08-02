@@ -29,3 +29,7 @@ smallvec.workspace = true
 toml = "0.8"
 which = "7"
 postcard.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rtnetlink.workspace = true
+netlink-packet-route.workspace = true

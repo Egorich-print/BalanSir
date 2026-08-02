@@ -26,6 +26,10 @@ smallvec = { version = "1", features = ["serde"] }
 bitflags = { version = "2", features = ["serde"] }
 prometheus-client = "0.22"
 axum = "0.7"
+rtnetlink = "0.14"
+netlink-packet-route = "0.19"
+netlink-packet-core = "0.7"
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"

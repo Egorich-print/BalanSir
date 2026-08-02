@@ -8,6 +8,8 @@ pub mod driver;
 pub mod health;
 #[cfg(feature = "hysteria")]
 pub mod hysteria;
+#[cfg(target_os = "linux")]
+pub mod netlink;
 pub mod policy;
 pub mod reconciliation;
 #[cfg(feature = "wireguard")]
