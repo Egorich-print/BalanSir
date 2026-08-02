@@ -7,12 +7,15 @@ license.workspace = true
 
 [dependencies]
 balansir-common = { path = "../balansir-common" }
-tokio = { workspace = true, features = ["rt", "net", "macros"] }
+tokio = { workspace = true, features = ["rt", "net", "macros", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 axum.workspace = true
+axum-extra = "0.7"
 serde.workspace = true
 serde_json = "1"
 tracing.workspace = true
 tracing-subscriber.workspace = true
+futures = "0.3"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }

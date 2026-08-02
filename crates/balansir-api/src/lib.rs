@@ -80,6 +80,7 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/drift", get(handlers::get_drift))
         .route("/reconcile", post(handlers::trigger_reconcile))
         .route("/events", get(handlers::get_events))
+        .route("/events/stream", get(handlers::events_stream))
         .with_state(state)
 }
 
