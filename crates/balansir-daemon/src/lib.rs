@@ -1,6 +1,9 @@
 pub mod amneziawg;
+pub mod b4;
+pub mod dns;
 pub mod driver;
 pub mod health;
+pub mod hysteria;
 pub mod policy;
 pub mod reconciliation;
 pub mod wireguard;
