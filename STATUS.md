@@ -1,8 +1,8 @@
 # BalanSir Status
 
-> Last updated: 2026-08-01
+> Last updated: 2026-08-02
 
-## Current Phase: Phase 5.1-5.2 (Complete)
+## Current Phase: Phase 6 (Complete)
 
 ### Completed
 
@@ -21,6 +21,7 @@
 - [x] DummyDriver
 - [x] WireGuard driver
 - [x] Xray driver
+- [x] AmneziaWG driver
 - [x] Decision Trace
 - [x] Event ID (monotonic)
 - [x] Correlation ID for IPC
@@ -37,13 +38,18 @@
 - [x] Crash recovery (bootstrap)
 - [x] GitHub Actions CI/CD
 - [x] Polished code (clippy, unwrap fixes, docs)
+- [x] Prometheus metrics (/metrics endpoint)
+- [x] REST API (axum)
+- [x] SSE Event Stream (/events/stream)
+- [x] Web UI (Svelte dashboard)
 
-### Next: Phase 5 (Observability + API + UI)
+### Next: Phase 7 (High Availability)
 
-- [ ] Observability (metrics + tracing)
-- [ ] REST API
-- [ ] Web UI
-- [ ] Package Manager
+- [ ] State export/import
+- [ ] Multi-node sync (optional)
+- [ ] Hysteria 2 driver
+- [ ] B4 driver
+- [ ] DNS forwarder
 
 ## Architecture Decisions
 
@@ -57,6 +63,8 @@
 | Health | ✅ Circuit breaker | ADR-006 |
 | Updates | ✅ A/B slots | ADR-007 |
 | Reconciliation | ✅ Desired state + drift detection | ADR-008 |
+| Observability | ✅ Prometheus metrics | ADR-009 |
+| API | ✅ REST + SSE | ADR-010 |
 
 ## Performance Targets
 
@@ -71,8 +79,26 @@
 
 **Repository:** https://github.com/Egorich-print/BalanSir
 
-**Tests:** 43 passing, 2 ignored (require root)
+**Tests:** 52 passing, 2 ignored (require root)
 
-## Next Milestone
+## Drivers
 
-**Phase 5:** Observability (Prometheus metrics) → REST API → Web UI
+| Driver | Status | Obfuscation |
+|--------|--------|-------------|
+| WireGuard | ✅ Complete | No |
+| AmneziaWG | ✅ Complete | Yes (Jc, Jmin, Jmax, S1, S2, H1, H2, H3) |
+| Xray (VLESS) | ✅ Complete | Yes (XTLS) |
+| Hysteria 2 | ⏳ Pending | Yes (built-in) |
+| B4 | ⏳ Pending | Yes (DPI bypass) |
+
+## Web UI
+
+```
+http://localhost:5173
+```
+
+- Health status
+- Real-time events (SSE)
+- Desired state
+- Metrics
+- Manual reconcile
