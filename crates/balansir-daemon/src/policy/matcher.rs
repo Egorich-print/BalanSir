@@ -146,4 +146,107 @@ mod tests {
         };
         assert!(matcher.matches(&ctx));
     }
+
+    // Property-based tests
+    #[cfg(test)]
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Strategy for generating PacketContext
+        fn arb_packet_context() -> impl Strategy<Value = PacketContext> {
+            (
+                any::<[u8; 4]>(),
+                any::<[u8; 4]>(),
+                any::<u16>(),
+                any::<u16>(),
+                any::<u8>(),
+                proptest::option::of(any::<u32>()),
+                proptest::option::of(any::<u32>()),
+            )
+                .prop_map(
+                    |(src_ip, dst_ip, src_port, dst_port, protocol, domain_hash, interface)| {
+                        PacketContext {
+                            src_ip,
+                            dst_ip,
+                            src_port,
+                            dst_port,
+                            protocol,
+                            domain_hash,
+                            interface,
+                        }
+                    },
+                )
+        }
+
+        // Property: Not(Not(x)) should be equivalent to x
+        proptest! {
+            #[test]
+            fn double_negation_is_identity(
+                port in any::<u16>(),
+                ctx in arb_packet_context(),
+            ) {
+                let matcher = Matcher::Not(Box::new(Matcher::Not(Box::new(Matcher::Port { port }))));
+                let direct = Matcher::Port { port };
+                prop_assert_eq!(matcher.matches(&ctx), direct.matches(&ctx));
+            }
+        }
+
+        // Property: Any always matches
+        proptest! {
+            #[test]
+            fn any_always_matches(ctx in arb_packet_context()) {
+                let matcher = Matcher::Any;
+                prop_assert!(matcher.matches(&ctx));
+            }
+        }
+
+        // Property: None never matches
+        proptest! {
+            #[test]
+            fn none_never_matches(ctx in arb_packet_context()) {
+                let matcher = Matcher::None;
+                prop_assert!(!matcher.matches(&ctx));
+            }
+        }
+
+        // Property: All([]) should match (vacuous truth)
+        proptest! {
+            #[test]
+            fn all_empty_matches(ctx in arb_packet_context()) {
+                let matcher = Matcher::All(vec![]);
+                prop_assert!(matcher.matches(&ctx));
+            }
+        }
+
+        // Property: AnyOf([]) should not match
+        proptest! {
+            #[test]
+            fn any_of_empty_not_match(ctx in arb_packet_context()) {
+                let matcher = Matcher::AnyOf(vec![]);
+                prop_assert!(!matcher.matches(&ctx));
+            }
+        }
+
+        // Property: Port matcher is exact
+        proptest! {
+            #[test]
+            fn port_matcher_exact(
+                port in any::<u16>(),
+                dst_port in any::<u16>(),
+            ) {
+                let matcher = Matcher::Port { port };
+                let ctx = PacketContext {
+                    src_ip: [0; 4],
+                    dst_ip: [0; 4],
+                    src_port: 0,
+                    dst_port,
+                    protocol: 0,
+                    domain_hash: None,
+                    interface: None,
+                };
+                prop_assert_eq!(matcher.matches(&ctx), port == dst_port);
+            }
+        }
+    }
 }

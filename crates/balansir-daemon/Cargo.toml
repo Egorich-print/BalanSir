@@ -16,6 +16,7 @@ dns = []
 
 [dev-dependencies]
 tempfile = "3"
+proptest = "1"
 
 [dependencies]
 balansir-common = { path = "../balansir-common" }
