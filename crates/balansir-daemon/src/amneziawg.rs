@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::{
-    Capabilities, DriverId, HealthStatus,
+    Capabilities, DriverId, DriverError, HealthStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -85,58 +85,58 @@ impl AmneziaWGDriver {
         std::path::Path::new(&format!("/sys/class/net/{}", self.config.interface)).exists()
     }
 
-    fn create_interface(&self) -> Result<(), String> {
+    fn create_interface(&self) -> Result<(), DriverError> {
         // Check if amneziawg kernel module is loaded
         let output = std::process::Command::new("lsmod")
             .output()
-            .map_err(|e| format!("Failed to check modules: {}", e))?;
+            .map_err(|e| DriverError::StartFailed(format!("Failed to check modules: {}", e)))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.contains("amneziawg") {
-            return Err("AmneziaWG kernel module not loaded".to_string());
+            return Err(DriverError::StartFailed("AmneziaWG kernel module not loaded".into()));
         }
 
         let output = std::process::Command::new("ip")
             .args(["link", "add", &self.config.interface, "type", "wireguard"])
             .output()
-            .map_err(|e| format!("Failed to create interface: {}", e))?;
+            .map_err(|e| DriverError::StartFailed(format!("Failed to create interface: {}", e)))?;
 
         if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            return Err(DriverError::InterfaceError(String::from_utf8_lossy(&output.stderr).to_string()));
         }
 
         Ok(())
     }
 
-    fn configure_interface(&self) -> Result<(), String> {
+    fn configure_interface(&self) -> Result<(), DriverError> {
         if let Some(ref addr) = self.config.address {
             let output = std::process::Command::new("ip")
                 .args(["addr", "add", addr, "dev", &self.config.interface])
                 .output()
-                .map_err(|e| format!("Failed to set address: {}", e))?;
+                .map_err(|e| DriverError::StartFailed(format!("Failed to set address: {}", e)))?;
 
             if !output.status.success() {
-                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+                return Err(DriverError::InterfaceError(String::from_utf8_lossy(&output.stderr).to_string()));
             }
         }
 
         let output = std::process::Command::new("ip")
             .args(["link", "set", &self.config.interface, "up"])
             .output()
-            .map_err(|e| format!("Failed to bring up interface: {}", e))?;
+            .map_err(|e| DriverError::StartFailed(format!("Failed to bring up interface: {}", e)))?;
 
         if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            return Err(DriverError::InterfaceError(String::from_utf8_lossy(&output.stderr).to_string()));
         }
 
         Ok(())
     }
 
-    fn delete_interface(&self) -> Result<(), String> {
+    fn delete_interface(&self) -> Result<(), DriverError> {
         let output = std::process::Command::new("ip")
             .args(["link", "del", &self.config.interface])
             .output()
-            .map_err(|e| format!("Failed to delete interface: {}", e))?;
+            .map_err(|e| DriverError::StopFailed(format!("Failed to delete interface: {}", e)))?;
 
         if !output.status.success() {
             return Ok(());
@@ -160,7 +160,7 @@ impl ComponentDriver for AmneziaWGDriver {
         Capabilities::TUNNEL
     }
 
-    async fn start(&mut self) -> Result<(), String> {
+    async fn start(&mut self) -> Result<(), DriverError> {
         tracing::info!("Starting AmneziaWG driver: {}", self.config.interface);
 
         self.create_interface()?;
@@ -173,7 +173,7 @@ impl ComponentDriver for AmneziaWGDriver {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), String> {
+    async fn stop(&mut self) -> Result<(), DriverError> {
         tracing::info!("Stopping AmneziaWG driver: {}", self.config.interface);
 
         self.delete_interface()?;
@@ -185,7 +185,7 @@ impl ComponentDriver for AmneziaWGDriver {
         Ok(())
     }
 
-    async fn restart(&mut self) -> Result<(), String> {
+    async fn restart(&mut self) -> Result<(), DriverError> {
         self.stop().await?;
         self.start().await?;
         Ok(())

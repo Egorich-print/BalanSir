@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::{
-    Capabilities, DriverId, HealthStatus,
+    Capabilities, DriverId, DriverError, HealthStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::process::Child;
@@ -73,17 +73,17 @@ impl XrayDriver {
         )
     }
 
-    fn start_process(&mut self, config_path: &str) -> Result<(), String> {
+    fn start_process(&mut self, config_path: &str) -> Result<(), DriverError> {
         let xray_path = which::which("xray")
             .or_else(|_| which::which("xray-core"))
-            .map_err(|_| "xray binary not found in PATH")?;
+            .map_err(|_| DriverError::BinaryNotFound("xray".into()))?;
 
         let child = std::process::Command::new(&xray_path)
             .args(["run", "-c", config_path])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| format!("Failed to start xray: {}", e))?;
+            .map_err(|e| DriverError::StartFailed(format!("Failed to start xray: {}", e)))?;
 
         self.child = Some(child);
         self.config_path = Some(config_path.to_string());
@@ -91,10 +91,10 @@ impl XrayDriver {
         Ok(())
     }
 
-    fn stop_process(&mut self) -> Result<(), String> {
+    fn stop_process(&mut self) -> Result<(), DriverError> {
         if let Some(mut child) = self.child.take() {
-            child.kill().map_err(|e| format!("Failed to kill xray: {}", e))?;
-            child.wait().map_err(|e| format!("Failed to wait xray: {}", e))?;
+            child.kill().map_err(|e| DriverError::StopFailed(format!("Failed to kill xray: {}", e)))?;
+            child.wait().map_err(|e| DriverError::StopFailed(format!("Failed to wait xray: {}", e)))?;
         }
 
         if let Some(ref path) = self.config_path {
@@ -129,13 +129,13 @@ impl ComponentDriver for XrayDriver {
         Capabilities::PROXY
     }
 
-    async fn start(&mut self) -> Result<(), String> {
+    async fn start(&mut self) -> Result<(), DriverError> {
         tracing::info!("Starting Xray driver: {}", self.config.server);
 
         let config_path = self.generate_config();
         let path = format!("/tmp/balansir-xray-{}.json", self.id.as_u32());
         std::fs::write(&path, &config_path)
-            .map_err(|e| format!("Failed to write config: {}", e))?;
+            .map_err(|e| DriverError::StartFailed(format!("Failed to write config: {}", e)))?;
 
         self.start_process(&path)?;
 
@@ -144,7 +144,7 @@ impl ComponentDriver for XrayDriver {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), String> {
+    async fn stop(&mut self) -> Result<(), DriverError> {
         tracing::info!("Stopping Xray driver");
         self.stop_process()?;
         self.health = HealthStatus::Unknown;
@@ -152,7 +152,7 @@ impl ComponentDriver for XrayDriver {
         Ok(())
     }
 
-    async fn restart(&mut self) -> Result<(), String> {
+    async fn restart(&mut self) -> Result<(), DriverError> {
         self.stop().await?;
         self.start().await?;
         Ok(())

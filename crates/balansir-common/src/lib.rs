@@ -9,7 +9,7 @@ pub mod types;
 pub mod validation;
 pub mod version;
 
-pub use error::{Error, Result};
+pub use error::{DriverError, Error, Result};
 pub use event_bus::BoundedEventBus;
 pub use metrics::Metrics;
 pub use profile::Profile;

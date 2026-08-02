@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::{
-    Capabilities, DriverId, HealthStatus,
+    Capabilities, DriverId, DriverError, HealthStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -82,14 +82,14 @@ impl DnsForwarderDriver {
         )
     }
 
-    fn start_process(&self) -> Result<(), String> {
+    fn start_process(&self) -> Result<(), DriverError> {
         // For now, just log that we would start a DNS forwarder
         // In production, this would start a real DNS forwarder
         tracing::info!("DNS forwarder would listen on {}", self.config.listen);
         Ok(())
     }
 
-    fn stop_process(&self) -> Result<(), String> {
+    fn stop_process(&self) -> Result<(), DriverError> {
         // Stop DNS forwarder process
         tracing::info!("DNS forwarder stopped");
         Ok(())
@@ -110,7 +110,7 @@ impl ComponentDriver for DnsForwarderDriver {
         Capabilities::DNS
     }
 
-    async fn start(&mut self) -> Result<(), String> {
+    async fn start(&mut self) -> Result<(), DriverError> {
         tracing::info!("Starting DNS forwarder on {}", self.config.listen);
 
         self.start_process()?;
@@ -122,7 +122,7 @@ impl ComponentDriver for DnsForwarderDriver {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), String> {
+    async fn stop(&mut self) -> Result<(), DriverError> {
         tracing::info!("Stopping DNS forwarder");
 
         self.stop_process()?;
@@ -134,7 +134,7 @@ impl ComponentDriver for DnsForwarderDriver {
         Ok(())
     }
 
-    async fn restart(&mut self) -> Result<(), String> {
+    async fn restart(&mut self) -> Result<(), DriverError> {
         self.stop().await?;
         self.start().await?;
         Ok(())

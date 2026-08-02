@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::{
-    Capabilities, DriverId, HealthStatus,
+    Capabilities, DriverId, DriverError, HealthStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::process::Child;
@@ -175,21 +175,21 @@ impl Hysteria2Driver {
         )
     }
 
-    fn write_config(&self) -> Result<String, String> {
+    fn write_config(&self) -> Result<String, DriverError> {
         let config = self.generate_config();
         let path = format!("/tmp/balansir-hysteria-{}.json", self.id.as_u32());
 
         std::fs::write(&path, config)
-            .map_err(|e| format!("Failed to write config: {}", e))?;
+            .map_err(|e| DriverError::StartFailed(format!("Failed to write config: {}", e)))?;
 
         Ok(path)
     }
 
-    fn start_process(&self, config_path: &str) -> Result<(), String> {
+    fn start_process(&self, config_path: &str) -> Result<(), DriverError> {
         // Check if hysteria binary exists
         let hysteria_path = which::which("hysteria")
             .or_else(|_| which::which("hysteria2"))
-            .map_err(|_| "hysteria binary not found in PATH")?;
+            .map_err(|_| DriverError::BinaryNotFound("hysteria".into()))?;
 
         // Start hysteria process
         let child = std::process::Command::new(&hysteria_path)
@@ -197,7 +197,7 @@ impl Hysteria2Driver {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| format!("Failed to start hysteria: {}", e))?;
+            .map_err(|e| DriverError::StartFailed(format!("Failed to start hysteria: {}", e)))?;
 
         // Store PID for later cleanup
         let _ = child.id();
@@ -205,7 +205,7 @@ impl Hysteria2Driver {
         Ok(())
     }
 
-    fn stop_process(&self) -> Result<(), String> {
+    fn stop_process(&self) -> Result<(), DriverError> {
         // Kill hysteria process
         let output = std::process::Command::new("pkill")
             .args(["-f", &format!("balansir-hysteria-{}", self.id.as_u32())])
@@ -232,7 +232,7 @@ impl ComponentDriver for Hysteria2Driver {
         Capabilities::PROXY
     }
 
-    async fn start(&mut self) -> Result<(), String> {
+    async fn start(&mut self) -> Result<(), DriverError> {
         tracing::info!("Starting Hysteria2 driver: {}", self.config.server);
 
         let config_path = self.write_config()?;
@@ -246,7 +246,7 @@ impl ComponentDriver for Hysteria2Driver {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), String> {
+    async fn stop(&mut self) -> Result<(), DriverError> {
         tracing::info!("Stopping Hysteria2 driver");
 
         self.stop_process()?;
@@ -262,7 +262,7 @@ impl ComponentDriver for Hysteria2Driver {
         Ok(())
     }
 
-    async fn restart(&mut self) -> Result<(), String> {
+    async fn restart(&mut self) -> Result<(), DriverError> {
         self.stop().await?;
         self.start().await?;
         Ok(())

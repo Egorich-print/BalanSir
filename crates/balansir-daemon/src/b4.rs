@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::{
-    Capabilities, DriverId, HealthStatus,
+    Capabilities, DriverId, DriverError, HealthStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -108,20 +108,20 @@ impl B4Driver {
         )
     }
 
-    fn write_config(&self) -> Result<String, String> {
+    fn write_config(&self) -> Result<String, DriverError> {
         let config = self.generate_config();
         let path = format!("/tmp/balansir-b4-{}.json", self.id.as_u32());
 
         std::fs::write(&path, config)
-            .map_err(|e| format!("Failed to write config: {}", e))?;
+            .map_err(|e| DriverError::StartFailed(format!("Failed to write config: {}", e)))?;
 
         Ok(path)
     }
 
-    fn start_process(&self, config_path: &str) -> Result<(), String> {
+    fn start_process(&self, config_path: &str) -> Result<(), DriverError> {
         // Check if b4 binary exists
         let b4_path = which::which("b4")
-            .map_err(|_| "b4 binary not found in PATH")?;
+            .map_err(|_| DriverError::BinaryNotFound("b4".into()))?;
 
         // Start b4 process
         let child = std::process::Command::new(&b4_path)
@@ -129,7 +129,7 @@ impl B4Driver {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| format!("Failed to start b4: {}", e))?;
+            .map_err(|e| DriverError::StartFailed(format!("Failed to start b4: {}", e)))?;
 
         // Store PID for later cleanup
         let _ = child.id();
@@ -137,7 +137,7 @@ impl B4Driver {
         Ok(())
     }
 
-    fn stop_process(&self) -> Result<(), String> {
+    fn stop_process(&self) -> Result<(), DriverError> {
         // Kill b4 process
         let output = std::process::Command::new("pkill")
             .args(["-f", &format!("balansir-b4-{}", self.id.as_u32())])
@@ -164,7 +164,7 @@ impl ComponentDriver for B4Driver {
         Capabilities::PACKET_PROCESSOR
     }
 
-    async fn start(&mut self) -> Result<(), String> {
+    async fn start(&mut self) -> Result<(), DriverError> {
         tracing::info!("Starting B4 driver");
 
         let config_path = self.write_config()?;
@@ -177,7 +177,7 @@ impl ComponentDriver for B4Driver {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), String> {
+    async fn stop(&mut self) -> Result<(), DriverError> {
         tracing::info!("Stopping B4 driver");
 
         self.stop_process()?;
@@ -189,7 +189,7 @@ impl ComponentDriver for B4Driver {
         Ok(())
     }
 
-    async fn restart(&mut self) -> Result<(), String> {
+    async fn restart(&mut self) -> Result<(), DriverError> {
         self.stop().await?;
         self.start().await?;
         Ok(())

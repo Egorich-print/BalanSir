@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use balansir_common::{Capabilities, DriverId, HealthStatus};
+use balansir_common::{Capabilities, DriverId, DriverError, HealthStatus};
 
 /// Component driver trait
 #[async_trait]
@@ -8,9 +8,9 @@ pub trait ComponentDriver: Send + Sync {
     fn name(&self) -> &str;
     fn capabilities(&self) -> Capabilities;
 
-    async fn start(&mut self) -> Result<(), String>;
-    async fn stop(&mut self) -> Result<(), String>;
-    async fn restart(&mut self) -> Result<(), String>;
+    async fn start(&mut self) -> Result<(), DriverError>;
+    async fn stop(&mut self) -> Result<(), DriverError>;
+    async fn restart(&mut self) -> Result<(), DriverError>;
     async fn health_check(&self) -> HealthStatus;
 }
 
@@ -45,19 +45,19 @@ impl ComponentDriver for DummyDriver {
         Capabilities::TUNNEL | Capabilities::PROXY
     }
 
-    async fn start(&mut self) -> Result<(), String> {
+    async fn start(&mut self) -> Result<(), DriverError> {
         tracing::info!("DummyDriver started: {}", self.name);
         self.healthy = true;
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), String> {
+    async fn stop(&mut self) -> Result<(), DriverError> {
         tracing::info!("DummyDriver stopped: {}", self.name);
         self.healthy = false;
         Ok(())
     }
 
-    async fn restart(&mut self) -> Result<(), String> {
+    async fn restart(&mut self) -> Result<(), DriverError> {
         tracing::info!("DummyDriver restarted: {}", self.name);
         self.stop().await?;
         self.start().await?;
