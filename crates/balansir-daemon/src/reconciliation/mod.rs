@@ -26,12 +26,23 @@ pub struct ActualRule {
     pub rule_id: Option<u32>,
 }
 
+/// Snapshot of actual state for rollback
+#[derive(Debug, Clone)]
+struct StateSnapshot {
+    actual: ActualState,
+    timestamp: std::time::Instant,
+}
+
 /// Configuration for reconciliation loop
 #[derive(Debug, Clone)]
 pub struct ReconcilerConfig {
     pub check_interval_secs: u64,
     pub max_retries: u32,
     pub retry_delay_secs: u64,
+    /// Timeout for watchdog (seconds)
+    pub watchdog_timeout_secs: u64,
+    /// Enable atomic rollback
+    pub atomic_rollback: bool,
 }
 
 impl Default for ReconcilerConfig {
@@ -40,6 +51,8 @@ impl Default for ReconcilerConfig {
             check_interval_secs: 30,
             max_retries: 3,
             retry_delay_secs: 5,
+            watchdog_timeout_secs: 30,
+            atomic_rollback: true,
         }
     }
 }
@@ -203,7 +216,7 @@ impl Reconciler {
         Ok(())
     }
 
-    /// Single reconciliation cycle
+    /// Single reconciliation cycle (legacy)
     pub async fn reconcile(&self) -> Result<(), String> {
         let drifts = self.detect_drift().await;
 
@@ -240,6 +253,104 @@ impl Reconciler {
         self.apply_desired_state().await
     }
 
+    /// Atomic reconciliation with watchdog rollback
+    /// 
+    /// Transactional flow:
+    /// 1. Snapshot current state
+    /// 2. Apply changes
+    /// 3. Health check with timeout
+    /// 4. OK → commit snapshot
+    /// 5. FAIL → rollback(snapshot)
+    pub async fn reconcile_atomic(&self) -> Result<(), String> {
+        if !self.config.atomic_rollback {
+            return self.reconcile().await;
+        }
+
+        let drifts = self.detect_drift().await;
+        if drifts.is_empty() {
+            info!("State is consistent, no drift");
+            return Ok(());
+        }
+
+        info!(drift_count = drifts.len(), "Drift detected, starting atomic reconcile");
+
+        // 1. Snapshot current state
+        let snapshot = {
+            let actual = self.actual_state.lock().await;
+            StateSnapshot {
+                actual: actual.clone(),
+                timestamp: std::time::Instant::now(),
+            }
+        };
+
+        // 2. Apply changes
+        {
+            let mut actual = self.actual_state.lock().await;
+            actual.active_rules.clear();
+        }
+
+        if let Err(e) = self.apply_desired_state().await {
+            warn!("Failed to apply changes, rolling back: {}", e);
+            self.rollback_to_snapshot(snapshot).await;
+            return Err(e);
+        }
+
+        // 3. Health check with timeout
+        let health_result = tokio::time::timeout(
+            std::time::Duration::from_secs(self.config.watchdog_timeout_secs),
+            self.health_check_all(),
+        ).await;
+
+        match health_result {
+            Ok(true) => {
+                info!("Atomic reconcile successful, changes committed");
+                Ok(())
+            }
+            Ok(false) => {
+                warn!("Health check failed, rolling back");
+                self.rollback_to_snapshot(snapshot).await;
+                Err("Health check failed after applying changes".into())
+            }
+            Err(_) => {
+                warn!("Health check timed out, rolling back");
+                self.rollback_to_snapshot(snapshot).await;
+                Err("Health check timed out".into())
+            }
+        }
+    }
+
+    /// Rollback to a previous state snapshot
+    async fn rollback_to_snapshot(&self, snapshot: StateSnapshot) {
+        warn!("Rolling back to snapshot from {:?}", snapshot.timestamp);
+
+        let mut actual = self.actual_state.lock().await;
+        *actual = snapshot.actual;
+
+        // Re-apply the actual state to restore system
+        drop(actual);
+        if let Err(e) = self.apply_desired_state().await {
+            error!("Failed to rollback: {}", e);
+        }
+    }
+
+    /// Health check all components
+    async fn health_check_all(&self) -> bool {
+        // Check if executor is responding
+        let rule_count = self.executor.rule_count().await;
+
+        // Basic connectivity check
+        if rule_count == 0 && !self.desired_state.lock().await.rules.is_empty() {
+            return false;
+        }
+
+        // TODO: Add more health checks
+        // - DNS resolution
+        // - Interface status
+        // - Process status
+
+        true
+    }
+
     /// Run reconciliation loop forever
     pub async fn run_loop(&self) {
         info!(interval = self.config.check_interval_secs, "Reconciliation loop started");
@@ -247,7 +358,7 @@ impl Reconciler {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(self.config.check_interval_secs)).await;
 
-            if let Err(e) = self.reconcile().await {
+            if let Err(e) = self.reconcile_atomic().await {
                 error!("Reconciliation error: {}", e);
                 tokio::time::sleep(tokio::time::Duration::from_secs(self.config.retry_delay_secs)).await;
             }

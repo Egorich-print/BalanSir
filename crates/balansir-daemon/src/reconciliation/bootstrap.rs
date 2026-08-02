@@ -24,6 +24,8 @@ pub async fn bootstrap(
         check_interval_secs: 30,
         max_retries: 3,
         retry_delay_secs: 5,
+        watchdog_timeout_secs: 30,
+        atomic_rollback: true,
     };
 
     let reconciler = Reconciler::new(desired, executor, config);
