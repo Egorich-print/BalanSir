@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use super::PacketContext;
 
+/// Maximum recursion depth for matcher evaluation
+const MAX_MATCHER_DEPTH: usize = 16;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Matcher {
     Any,
@@ -19,7 +22,19 @@ pub enum Matcher {
 }
 
 impl Matcher {
+    /// Check if matcher matches the packet context
     pub fn matches(&self, ctx: &PacketContext) -> bool {
+        self.matches_inner(ctx, 0)
+    }
+
+    /// Internal recursive matching with depth limit
+    fn matches_inner(&self, ctx: &PacketContext, depth: usize) -> bool {
+        // Prevent stack overflow from deeply nested matchers
+        if depth > MAX_MATCHER_DEPTH {
+            tracing::warn!("Matcher recursion depth exceeded (>{})", MAX_MATCHER_DEPTH);
+            return false;
+        }
+
         match self {
             Self::Any => true,
             Self::None => false,
@@ -48,14 +63,41 @@ impl Matcher {
                 ctx.interface == Some(*id)
             }
             Self::All(matchers) => {
-                matchers.iter().all(|m| m.matches(ctx))
+                matchers.iter().all(|m| m.matches_inner(ctx, depth + 1))
             }
             Self::AnyOf(matchers) => {
-                matchers.iter().any(|m| m.matches(ctx))
+                matchers.iter().any(|m| m.matches_inner(ctx, depth + 1))
             }
             Self::Not(inner) => {
-                !inner.matches(ctx)
+                !inner.matches_inner(ctx, depth + 1)
             }
+        }
+    }
+
+    /// Calculate the depth of nested matchers
+    pub fn depth(&self) -> usize {
+        match self {
+            Self::Any | Self::None => 1,
+            Self::DomainSuffix { .. } | Self::DomainExact { .. } => 1,
+            Self::IpRange { .. } | Self::Port { .. } | Self::PortRange { .. } => 1,
+            Self::Protocol { .. } | Self::Interface { .. } => 1,
+            Self::All(matchers) | Self::AnyOf(matchers) => {
+                1 + matchers.iter().map(|m| m.depth()).max().unwrap_or(0)
+            }
+            Self::Not(inner) => 1 + inner.depth(),
+        }
+    }
+
+    /// Validate matcher doesn't exceed max depth
+    pub fn validate(&self) -> Result<(), String> {
+        let depth = self.depth();
+        if depth > MAX_MATCHER_DEPTH {
+            Err(format!(
+                "Matcher depth {} exceeds maximum {}",
+                depth, MAX_MATCHER_DEPTH
+            ))
+        } else {
+            Ok(())
         }
     }
 }
@@ -248,5 +290,39 @@ mod tests {
                 prop_assert_eq!(matcher.matches(&ctx), port == dst_port);
             }
         }
+    }
+
+    #[test]
+    fn test_matcher_depth_limit() {
+        // Create deeply nested matcher (should fail validation)
+        let mut matcher = Matcher::Port { port: 80 };
+        for _ in 0..20 {
+            matcher = Matcher::Not(Box::new(matcher));
+        }
+        assert!(matcher.depth() > 16);
+        assert!(matcher.validate().is_err());
+    }
+
+    #[test]
+    fn test_matcher_recursion_stops() {
+        // Create matcher that exceeds depth limit
+        let mut matcher = Matcher::Port { port: 80 };
+        for _ in 0..20 {
+            matcher = Matcher::Not(Box::new(matcher));
+        }
+
+        let ctx = PacketContext {
+            src_ip: [0; 4],
+            dst_ip: [0; 4],
+            src_port: 0,
+            dst_port: 80,
+            protocol: 0,
+            domain_hash: None,
+            interface: None,
+        };
+
+        // Should not panic due to depth limit
+        // Result depends on parity of Not nesting
+        let _result = matcher.matches(&ctx);
     }
 }
