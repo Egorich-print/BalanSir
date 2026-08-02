@@ -78,8 +78,13 @@ impl XrayDriver {
             .or_else(|_| which::which("xray-core"))
             .map_err(|_| DriverError::BinaryNotFound("xray".into()))?;
 
+        // Go runtime memory guardrails
+        // GOMEMLIMIT: Hard memory limit (triggers GC before OOM)
+        // GOGC: Trigger GC more aggressively (30% instead of default 100%)
         let child = std::process::Command::new(&xray_path)
             .args(["run", "-c", config_path])
+            .env("GOMEMLIMIT", "48MiB")
+            .env("GOGC", "30")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()

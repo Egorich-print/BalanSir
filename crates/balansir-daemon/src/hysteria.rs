@@ -191,9 +191,13 @@ impl Hysteria2Driver {
             .or_else(|_| which::which("hysteria2"))
             .map_err(|_| DriverError::BinaryNotFound("hysteria".into()))?;
 
-        // Start hysteria process
+        // Go runtime memory guardrails
+        // GOMEMLIMIT: Hard memory limit (triggers GC before OOM)
+        // GOGC: Trigger GC more aggressively (30% instead of default 100%)
         let child = std::process::Command::new(&hysteria_path)
             .args(["client", config_path])
+            .env("GOMEMLIMIT", "48MiB")
+            .env("GOGC", "30")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
