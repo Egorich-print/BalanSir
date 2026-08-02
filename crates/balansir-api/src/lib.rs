@@ -73,12 +73,27 @@ pub struct DriftItemInfo {
 pub fn create_router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/", get(index))
+        // Health & Status
         .route("/health", get(handlers::health))
+        .route("/ready", get(handlers::ready))
+        .route("/live", get(handlers::live))
+        .route("/version", get(handlers::version))
+        .route("/build-info", get(handlers::build_info))
+        // Metrics
         .route("/metrics", get(handlers::metrics))
+        // State
         .route("/desired", get(handlers::get_desired))
         .route("/desired", post(handlers::set_desired))
+        .route("/actual", get(handlers::get_actual))
+        .route("/state", get(handlers::get_state))
         .route("/drift", get(handlers::get_drift))
+        // Drivers
+        .route("/drivers", get(handlers::list_drivers))
+        .route("/drivers/:id", get(handlers::get_driver))
+        .route("/drivers/:id/restart", post(handlers::restart_driver))
+        // Actions
         .route("/reconcile", post(handlers::trigger_reconcile))
+        // Events
         .route("/events", get(handlers::get_events))
         .route("/events/stream", get(handlers::events_stream))
         .with_state(state)

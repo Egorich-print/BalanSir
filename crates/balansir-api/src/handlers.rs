@@ -209,3 +209,103 @@ pub async fn events_stream(
             .text("ping"),
     )
 }
+
+/// Ready check (Kubernetes-style)
+pub async fn ready() -> impl IntoResponse {
+    // TODO: Check if all components are initialized
+    Json(serde_json::json!({
+        "ready": true,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+/// Liveness check (Kubernetes-style)
+pub async fn live() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "alive": true,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+/// Version information
+pub async fn version() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "name": env!("CARGO_PKG_NAME"),
+    }))
+}
+
+/// Build information
+pub async fn build_info() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "rust_version": option_env!("RUSTC_VERSION").unwrap_or("unknown"),
+        "target": option_env!("TARGET").unwrap_or("unknown"),
+        "build_time": option_env!("BUILD_TIME").unwrap_or("unknown"),
+        "git_hash": option_env!("GIT_HASH").unwrap_or("unknown"),
+    }))
+}
+
+/// Get actual state
+pub async fn get_actual(State(_state): State<Arc<ApiState>>) -> impl IntoResponse {
+    // TODO: Get actual state from reconciler
+    Json(serde_json::json!({
+        "rules": [],
+        "rule_count": 0,
+    }))
+}
+
+/// Get combined state (desired + actual + drift)
+pub async fn get_state(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let desired = if let Some(ref reconciler) = state.reconciler {
+        reconciler.get_desired().await
+    } else {
+        DesiredState::default()
+    };
+
+    Json(serde_json::json!({
+        "desired": {
+            "rule_count": desired.rules.len(),
+        },
+        "actual": {
+            "rule_count": 0,
+        },
+        "drift": {
+            "drift_count": 0,
+        },
+    }))
+}
+
+/// List all drivers
+pub async fn list_drivers(State(_state): State<Arc<ApiState>>) -> impl IntoResponse {
+    // TODO: Get drivers from registry
+    Json(serde_json::json!({
+        "drivers": [],
+        "count": 0,
+    }))
+}
+
+/// Get driver by ID
+pub async fn get_driver(
+    State(_state): State<Arc<ApiState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    // TODO: Get driver by ID
+    Json(serde_json::json!({
+        "id": id,
+        "status": "not_found",
+    }))
+}
+
+/// Restart driver
+pub async fn restart_driver(
+    State(_state): State<Arc<ApiState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    // TODO: Restart driver
+    Json(serde_json::json!({
+        "ok": true,
+        "driver_id": id,
+        "message": "Restart requested",
+    }))
+}
