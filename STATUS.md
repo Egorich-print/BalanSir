@@ -1,8 +1,8 @@
 # BalanSir Status
 
-> Last updated: 2026-07-31
+> Last updated: 2026-08-01
 
-## Current Phase: Phase 1 (Core Foundation)
+## Current Phase: Phase 4 (Complete)
 
 ### Completed
 
@@ -19,7 +19,8 @@
 - [x] ResourceAllocator
 - [x] NftablesBackend
 - [x] DummyDriver
-- [x] WireGuard driver skeleton
+- [x] WireGuard driver
+- [x] Xray driver
 - [x] Decision Trace
 - [x] Event ID (monotonic)
 - [x] Correlation ID for IPC
@@ -29,16 +30,20 @@
 - [x] Action Model (Route, Mark, Forward, Block, Reject)
 - [x] Executor trait + DummyExecutor
 - [x] Full IPC integration tests
+- [x] DriverId newtype
+- [x] ActionResult enrichment
+- [x] Network namespace tests
+- [x] Reconciliation loop
+- [x] Crash recovery (bootstrap)
+- [x] GitHub Actions CI/CD
+- [x] Polished code (clippy, unwrap fixes, docs)
 
-### In Progress
+### Next: Phase 5 (Observability + API + UI)
 
-- [ ] Network namespace tests
-- [ ] WireGuard driver (full)
-- [ ] Xray driver
-
-### Blocked
-
-- None
+- [ ] Observability (metrics + tracing)
+- [ ] REST API
+- [ ] Web UI
+- [ ] Package Manager
 
 ## Architecture Decisions
 
@@ -51,6 +56,7 @@
 | Privilege separation | ✅ daemon + executor | ADR-005 |
 | Health | ✅ Circuit breaker | ADR-006 |
 | Updates | ✅ A/B slots | ADR-007 |
+| Reconciliation | ✅ Desired state + drift detection | ADR-008 |
 
 ## Performance Targets
 
@@ -61,6 +67,12 @@
 | Policy eval | < 100µs | TBD |
 | Firewall apply | < 50ms | TBD |
 
+## GitHub
+
+**Repository:** https://github.com/Egorich-print/BalanSir
+
+**Tests:** 43 passing, 2 ignored (require root)
+
 ## Next Milestone
 
-**Walking Skeleton**: daemon + executor + IPC + dummy driver + basic policy
+**Phase 5:** Observability (Prometheus metrics) → REST API → Web UI
