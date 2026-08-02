@@ -2,7 +2,7 @@
 
 > Last updated: 2026-08-02
 
-## Current Phase: Phase 7 (Complete)
+## Current Phase: Phase 8 (Complete)
 
 ### Completed
 
@@ -45,15 +45,19 @@
 - [x] REST API (axum)
 - [x] SSE Event Stream (/events/stream)
 - [x] Web UI (Svelte dashboard)
+- [x] Graceful shutdown (SIGTERM/SIGINT)
+- [x] Configuration validation
+- [x] Docker image (multi-stage)
+- [x] docker-compose.yml
 
-### Next: Phase 8 (Production Hardening)
+### Next: Phase 9 (Advanced Features)
 
-- [ ] systemd hardening
-- [ ] RPM/DEB packaging
-- [ ] Docker image
-- [ ] Configuration validation
-- [ ] Graceful shutdown
-- [ ] Log rotation
+- [ ] Hysteria 2 full integration (process management)
+- [ ] B4 full integration (iptables/nftables rules)
+- [ ] DNS forwarder (full implementation)
+- [ ] Batch rule processing (optimize for 8.5k+ rules)
+- [ ] Multi-WAN support
+- [ ] GeoIP routing
 
 ## Architecture Decisions
 
@@ -78,7 +82,7 @@
 | AmneziaWG | ✅ Complete | TUNNEL | Yes (AWG params) |
 | Xray (VLESS) | ✅ Complete | PROXY | Yes (XTLS) |
 | Hysteria 2 | ✅ Complete | PROXY | Yes (salamander) |
-| B4 | ✅ Complete | PACKET_PROCESSOR | Yes (fragmentation, fake) |
+| B4 | ✅ Complete | PACKET_PROCESSOR | Yes (fragmentation) |
 | DNS Forwarder | ✅ Stub | DNS | N/A |
 
 ## Performance Targets
@@ -94,7 +98,18 @@
 
 **Repository:** https://github.com/Egorich-print/BalanSir
 
-**Tests:** 62 passing, 2 ignored (require root)
+**Tests:** 66 passing, 2 ignored (require root)
+
+## Docker
+
+```bash
+# Build and run
+docker-compose up -d
+
+# Or build manually
+docker build -t balansir .
+docker run -d -p 8080:8080 --cap-add NET_ADMIN balansir
+```
 
 ## Web UI
 
@@ -102,10 +117,3 @@
 cd webui && npm install && npm run dev
 # http://localhost:5173
 ```
-
-Features:
-- Health status
-- Real-time events (SSE)
-- Desired state
-- Metrics
-- Manual reconcile
