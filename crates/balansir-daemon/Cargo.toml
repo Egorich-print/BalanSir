@@ -5,6 +5,9 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
 [dependencies]
 balansir-common = { path = "../balansir-common" }
 tokio = { workspace = true, features = ["rt", "net", "macros", "io-util", "fs", "time"] }

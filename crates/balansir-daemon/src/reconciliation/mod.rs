@@ -1,3 +1,5 @@
+pub mod bootstrap;
+
 use balansir_common::{Action, ActionRequest, ActionResult, DesiredState, DesiredRule};
 use std::sync::Arc;
 use tracing::{error, info, warn};
