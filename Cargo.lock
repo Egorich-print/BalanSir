@@ -182,6 +182,7 @@ dependencies = [
  "async-trait",
  "bitflags 2.13.1",
  "bytes",
+ "libc",
  "postcard",
  "prometheus-client",
  "serde",

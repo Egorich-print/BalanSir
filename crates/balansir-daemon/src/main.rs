@@ -1,4 +1,4 @@
-use balansir_common::ipc::{IpcConnection, IpcMessage, MsgType};
+use balansir_common::ipc::{IpcServerConnection, IpcMessage, MsgType};
 use balansir_common::Result;
 use std::path::Path;
 use tokio::net::UnixListener;
@@ -36,8 +36,16 @@ async fn main() -> Result<()> {
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _addr)) => {
-                        info!("Executor connected");
-                        tokio::spawn(handle_connection(stream));
+                        // Authenticate peer via SO_PEERCRED
+                        match IpcServerConnection::accept(stream).await {
+                            Ok(conn) => {
+                                info!("Executor connected (UID: {})", conn.peer_uid());
+                                tokio::spawn(handle_connection(conn));
+                            }
+                            Err(e) => {
+                                warn!("Authentication failed: {}", e);
+                            }
+                        }
                     }
                     Err(e) => {
                         error!("Accept error: {}", e);
@@ -67,9 +75,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream) {
-    let mut conn = IpcConnection::new(stream);
-
+async fn handle_connection(mut conn: IpcServerConnection) {
     loop {
         match conn.recv().await {
             Ok(msg) => {

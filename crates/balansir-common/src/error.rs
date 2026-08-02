@@ -3,6 +3,28 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Driver-specific errors
+#[derive(Debug, Error)]
+pub enum DriverError {
+    #[error("Process not found")]
+    ProcessNotFound,
+
+    #[error("Config invalid: {0}")]
+    ConfigInvalid(String),
+
+    #[error("Start failed: {0}")]
+    StartFailed(String),
+
+    #[error("Stop failed: {0}")]
+    StopFailed(String),
+
+    #[error("Binary not found: {0}")]
+    BinaryNotFound(String),
+
+    #[error("Interface error: {0}")]
+    InterfaceError(String),
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Temporary failure: {0}")]
@@ -26,6 +48,9 @@ pub enum Error {
     #[error("IPC violation: {0}")]
     IpcViolation(String),
 
+    #[error("Unauthorized: UID {uid} not in allowed list {allowed:?}")]
+    Unauthorized { uid: u32, allowed: Vec<u32> },
+
     #[error("Invalid IPC magic: expected 0x{expected:X}, got 0x{got:X}")]
     InvalidMagic { expected: u32, got: u32 },
 
@@ -40,6 +65,9 @@ pub enum Error {
 
     #[error("Payload too large: {size} bytes (max {max})")]
     PayloadTooLarge { size: usize, max: usize },
+
+    #[error("Driver error: {0}")]
+    Driver(#[from] DriverError),
 }
 
 impl Error {

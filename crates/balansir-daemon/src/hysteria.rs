@@ -3,6 +3,7 @@ use balansir_common::{
     Capabilities, DriverId, HealthStatus,
 };
 use serde::{Deserialize, Serialize};
+use std::process::Child;
 
 use crate::driver::ComponentDriver;
 

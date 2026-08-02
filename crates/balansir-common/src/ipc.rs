@@ -6,6 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 pub const MAX_PAYLOAD_SIZE: usize = 65536;
+pub const ALLOWED_UIDS: &[u32] = &[0]; // Only root by default
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MsgType {
@@ -54,6 +55,66 @@ impl IpcMessage {
 
     pub fn response_data(correlation_id: CorrelationId, data: Vec<u8>) -> Self {
         Self::new(MsgType::ResponseData, correlation_id, data)
+    }
+}
+
+/// Validate peer credentials on Unix socket
+/// Returns Ok(uid) if peer is authorized, Err otherwise
+pub fn validate_peer_cred(stream: &UnixStream) -> Result<u32> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = stream.as_raw_fd();
+
+    // Get peer credentials via getpeereid (POSIX)
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+
+    let ret = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+
+    if ret != 0 {
+        return Err(Error::IpcViolation("Failed to get peer creds".into()));
+    }
+
+    if !ALLOWED_UIDS.contains(&uid) {
+        return Err(Error::Unauthorized {
+            uid,
+            allowed: ALLOWED_UIDS.to_vec(),
+        });
+    }
+
+    Ok(uid)
+}
+
+/// Server-side connection wrapper with authentication
+pub struct IpcServerConnection {
+    inner: IpcConnection,
+    peer_uid: u32,
+}
+
+impl IpcServerConnection {
+    /// Accept a connection and validate credentials
+    pub async fn accept(stream: UnixStream) -> Result<Self> {
+        let peer_uid = validate_peer_cred(&stream)?;
+
+        Ok(Self {
+            inner: IpcConnection::new(stream),
+            peer_uid,
+        })
+    }
+
+    /// Get peer UID
+    pub fn peer_uid(&self) -> u32 {
+        self.peer_uid
+    }
+
+    /// Receive a message
+    pub async fn recv(&mut self) -> Result<IpcMessage> {
+        self.inner.recv().await
+    }
+
+    /// Send a message
+    pub async fn send(&mut self, msg: &IpcMessage) -> Result<()> {
+        self.inner.send(msg).await
     }
 }
 
