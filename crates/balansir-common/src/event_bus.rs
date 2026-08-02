@@ -57,6 +57,7 @@ impl BoundedEventBus {
     }
 
     pub fn publish(&self, event: Event) {
+        let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
         let id = self.inner.sequence.fetch_add(1, Ordering::Relaxed);
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -69,7 +70,6 @@ impl BoundedEventBus {
             event,
         };
 
-        let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
         if queue.len() >= self.inner.capacity {
             queue.pop_front();
         }

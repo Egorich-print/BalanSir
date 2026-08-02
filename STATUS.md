@@ -2,12 +2,12 @@
 
 > Last updated: 2026-08-03
 
-## Current Phase: Phase A (Critical Fixes) Complete
+## Current Phase: Phase D (Technical Debt) — D3 Stress Testing Complete
 
 ### Completed
 
 - [x] Architecture specification (v7.0)
-- [x] ADR-000 through ADR-010
+- [x] ADR-000 through ADR-011
 - [x] Hardware profiles design
 - [x] IPC protocol (postcard-based)
 - [x] Workspace setup
@@ -54,14 +54,30 @@
 - [x] Phase A: DriverError enum (typed errors)
 - [x] Phase A: Feature flags for external binaries
 - [x] Phase A: BoundedEventBus Clone fix (Arc<Inner>)
+- [x] Phase B: Native netlink (Linux only)
+- [x] Phase B: Go runtime memory guardrails (GOMEMLIMIT/GOGC)
+- [x] Phase B: Atomic rollback + watchdog
+- [x] Phase B: Missing API endpoints (/ready, /live, /version, /build-info, /drivers)
+- [x] Phase B: Property testing (proptest)
+- [x] Phase C: DriverId as enum (exhaustive matching)
+- [x] Phase C: Matcher recursion limit (depth 16)
+- [x] Phase C: L3/L7 driver trait split
+- [x] Phase C: DomainMatcher/PortMatcher fast lookup
+- [x] Phase C: Policy Trie optimization
+- [x] Phase D1: Binary size optimization (daemon 704KB, executor 655KB)
+- [x] Phase D2: CONTRIBUTING.md + scripts/balansir-cli
+- [x] Phase D3: Stress testing
+  - [x] Policy engine: 1000+ rules, timing measured
+  - [x] Reconciliation: 24h simulation (2880 cycles, rule churn)
+  - [x] EventBus: 100k burst, drop-oldest semantics, concurrent publishers
+  - [x] IPC: 10k message burst over Unix socket
+  - [x] Fixed EventBus publish() race (ID assignment moved under mutex)
 
-### Next: Phase B (High Priority)
+### Next
 
-- [ ] B1: Native netlink (replace `ip` commands)
-- [ ] B2: Go runtime memory guardrails (GOMEMLIMIT)
-- [ ] B3: Atomic rollback (watchdog)
-- [ ] B4: Missing API endpoints (/ready, /live, /version)
-- [ ] B5: Property testing (proptest)
+- [ ] v0.1.0 release (tag, CHANGELOG)
+- [ ] Verify `make install` on macOS
+- [ ] Push to Forgejo backup
 
 ## Architecture Decisions
 
@@ -95,16 +111,16 @@
 
 | Metric | Target | Current |
 |--------|--------|---------|
-| Daemon RSS | ≤ 12MB | TBD |
-| Executor RSS | ≤ 8MB | TBD |
-| Policy eval | < 100µs | TBD |
-| Firewall apply | < 50ms | TBD |
+| Daemon RSS | ≤ 12MB | TBD (target device) |
+| Executor RSS | ≤ 8MB | TBD (target device) |
+| Policy eval | < 100µs | ~10.9µs (debug, 1024 rules) |
+| Firewall apply | < 50ms | TBD (target device) |
 
 ## GitHub
 
 **Repository:** https://github.com/Egorich-print/BalanSir
 
-**Tests:** 58 passing, 2 ignored (require root)
+**Tests:** 70 passing, 2 ignored (require root) + 5 proptest suites
 
 ## Docker
 

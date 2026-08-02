@@ -21,7 +21,7 @@ else
     OS := unknown
 endif
 
-.PHONY: all build install uninstall clean test check
+.PHONY: all build install uninstall clean test check stress
 
 all: build
 
@@ -37,6 +37,10 @@ check:
 	$(CARGO) check
 	$(CARGO) clippy -- -D warnings
 	@echo "Check complete."
+
+stress:
+	$(CARGO) test --release -p balansir-common --test stress -p balansir-daemon --test stress -- --test-threads=1 --nocapture
+	@echo "Stress tests complete."
 
 install: build install-bin install-config install-systemd
 	@echo ""

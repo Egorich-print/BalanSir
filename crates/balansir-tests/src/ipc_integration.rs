@@ -148,11 +148,13 @@ async fn test_error_handling() {
 #[test]
 fn test_driver_id_constants() {
     assert_eq!(DriverId::WireGuard.as_u32(), 1);
-    assert_eq!(DriverId::Xray.as_u32(), 2);
-    assert_eq!(DriverId::Hysteria.as_u32(), 3);
-    assert_eq!(DriverId::B4.as_u32(), 4);
+    assert_eq!(DriverId::AmneziaWG.as_u32(), 2);
+    assert_eq!(DriverId::Xray.as_u32(), 3);
+    assert_eq!(DriverId::Hysteria.as_u32(), 4);
+    assert_eq!(DriverId::B4.as_u32(), 5);
+    assert_eq!(DriverId::DnsForwarder.as_u32(), 6);
 
     let custom = DriverId::Custom(99);
     assert_eq!(custom.as_u32(), 99);
-    assert_eq!(format!("{}", custom), "Driver(99)");
+    assert_eq!(format!("{}", custom), "Custom(99)");
 }
