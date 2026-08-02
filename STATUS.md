@@ -1,8 +1,8 @@
 # BalanSir Status
 
-> Last updated: 2026-08-02
+> Last updated: 2026-08-03
 
-## Current Phase: Phase 8 (Complete)
+## Current Phase: Phase A (Critical Fixes) Complete
 
 ### Completed
 
@@ -15,16 +15,16 @@
 - [x] balansir-daemon skeleton
 - [x] balansir-executor skeleton
 - [x] StateStore (file backend)
-- [x] BoundedEventBus
+- [x] BoundedEventBus (Arc<Inner> pattern)
 - [x] ResourceAllocator
 - [x] NftablesBackend
 - [x] Drivers:
-  - [x] WireGuard
-  - [x] AmneziaWG (obfuscation)
-  - [x] Xray (VLESS)
-  - [x] Hysteria 2 (salamander obfs)
-  - [x] B4 (DPI bypass)
-  - [x] DNS Forwarder (stub)
+  - [x] WireGuard (feature flag)
+  - [x] AmneziaWG (feature flag)
+  - [x] Xray (VLESS) (feature flag)
+  - [x] Hysteria 2 (feature flag)
+  - [x] B4 (feature flag)
+  - [x] DNS Forwarder (feature flag)
 - [x] Decision Trace
 - [x] Event ID (monotonic)
 - [x] Correlation ID for IPC
@@ -49,15 +49,19 @@
 - [x] Configuration validation
 - [x] Docker image (multi-stage)
 - [x] docker-compose.yml
+- [x] Phase A: IPC Authentication (SO_PEERCRED)
+- [x] Phase A: MAX_MESSAGE_SIZE validation
+- [x] Phase A: DriverError enum (typed errors)
+- [x] Phase A: Feature flags for external binaries
+- [x] Phase A: BoundedEventBus Clone fix (Arc<Inner>)
 
-### Next: Phase 9 (Advanced Features)
+### Next: Phase B (High Priority)
 
-- [ ] Hysteria 2 full integration (process management)
-- [ ] B4 full integration (iptables/nftables rules)
-- [ ] DNS forwarder (full implementation)
-- [ ] Batch rule processing (optimize for 8.5k+ rules)
-- [ ] Multi-WAN support
-- [ ] GeoIP routing
+- [ ] B1: Native netlink (replace `ip` commands)
+- [ ] B2: Go runtime memory guardrails (GOMEMLIMIT)
+- [ ] B3: Atomic rollback (watchdog)
+- [ ] B4: Missing API endpoints (/ready, /live, /version)
+- [ ] B5: Property testing (proptest)
 
 ## Architecture Decisions
 
@@ -73,6 +77,8 @@
 | Reconciliation | ✅ Desired state + drift detection | ADR-008 |
 | Observability | ✅ Prometheus metrics | ADR-009 |
 | API | ✅ REST + SSE | ADR-010 |
+| IPC Auth | ✅ SO_PEERCRED | ADR-011 |
+| Error Typing | ✅ DriverError enum | ADR-012 |
 
 ## Drivers
 
@@ -98,17 +104,12 @@
 
 **Repository:** https://github.com/Egorich-print/BalanSir
 
-**Tests:** 66 passing, 2 ignored (require root)
+**Tests:** 58 passing, 2 ignored (require root)
 
 ## Docker
 
 ```bash
-# Build and run
 docker-compose up -d
-
-# Or build manually
-docker build -t balansir .
-docker run -d -p 8080:8080 --cap-add NET_ADMIN balansir
 ```
 
 ## Web UI
