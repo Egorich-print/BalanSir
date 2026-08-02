@@ -195,8 +195,8 @@ mod tests {
             tls: None,
         };
 
-        let driver = XrayDriver::new(DriverId::XRAY, config);
-        assert_eq!(driver.id(), DriverId::XRAY);
+        let driver = XrayDriver::new(DriverId::Xray, config);
+        assert_eq!(driver.id(), DriverId::Xray);
         assert!(driver.child.is_none());
     }
 }

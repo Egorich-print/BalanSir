@@ -79,9 +79,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_dummy_driver() {
-        let mut driver = DummyDriver::new(DriverId::new(99), "Test Dummy");
+        let mut driver = DummyDriver::new(DriverId::Custom(99), "Test Dummy");
 
-        assert_eq!(driver.id(), DriverId::new(99));
+        assert_eq!(driver.id(), DriverId::Custom(99));
         assert_eq!(driver.name(), "Test Dummy");
 
         driver.start().await.unwrap();

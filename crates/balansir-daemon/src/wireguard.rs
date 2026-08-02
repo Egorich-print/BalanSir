@@ -176,8 +176,8 @@ mod tests {
             }],
         };
 
-        let driver = WireGuardDriver::new(DriverId::WIREGUARD, config);
-        assert_eq!(driver.id(), DriverId::WIREGUARD);
+        let driver = WireGuardDriver::new(DriverId::WireGuard, config);
+        assert_eq!(driver.id(), DriverId::WireGuard);
         assert_eq!(driver.name(), "WireGuard");
         assert!(driver.capabilities().contains(Capabilities::TUNNEL));
     }

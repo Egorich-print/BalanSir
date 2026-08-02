@@ -35,29 +35,57 @@ pub enum DriverAction {
     Status,
 }
 
-// --- DriverId (newtype) ---
+// --- DriverId (enum for exhaustive matching) ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DriverId(pub u32);
+pub enum DriverId {
+    WireGuard,
+    AmneziaWG,
+    Xray,
+    Hysteria,
+    B4,
+    DnsForwarder,
+    /// Custom driver with numeric ID
+    Custom(u32),
+}
 
 impl DriverId {
-    pub const WIREGUARD: DriverId = DriverId(1);
-    pub const XRAY: DriverId = DriverId(2);
-    pub const HYSTERIA: DriverId = DriverId(3);
-    pub const B4: DriverId = DriverId(4);
-
-    pub fn new(id: u32) -> Self {
-        Self(id)
+    pub fn as_u32(&self) -> u32 {
+        match self {
+            Self::WireGuard => 1,
+            Self::AmneziaWG => 2,
+            Self::Xray => 3,
+            Self::Hysteria => 4,
+            Self::B4 => 5,
+            Self::DnsForwarder => 6,
+            Self::Custom(id) => *id,
+        }
     }
 
-    pub fn as_u32(&self) -> u32 {
-        self.0
+    pub fn from_u32(id: u32) -> Self {
+        match id {
+            1 => Self::WireGuard,
+            2 => Self::AmneziaWG,
+            3 => Self::Xray,
+            4 => Self::Hysteria,
+            5 => Self::B4,
+            6 => Self::DnsForwarder,
+            n => Self::Custom(n),
+        }
     }
 }
 
 impl std::fmt::Display for DriverId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Driver({})", self.0)
+        match self {
+            Self::WireGuard => write!(f, "WireGuard"),
+            Self::AmneziaWG => write!(f, "AmneziaWG"),
+            Self::Xray => write!(f, "Xray"),
+            Self::Hysteria => write!(f, "Hysteria"),
+            Self::B4 => write!(f, "B4"),
+            Self::DnsForwarder => write!(f, "DnsForwarder"),
+            Self::Custom(id) => write!(f, "Custom({})", id),
+        }
     }
 }
 

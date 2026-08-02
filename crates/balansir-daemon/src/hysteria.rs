@@ -315,8 +315,8 @@ mod tests {
             }),
         };
 
-        let driver = Hysteria2Driver::new(DriverId::new(3), config);
-        assert_eq!(driver.id(), DriverId::new(3));
+        let driver = Hysteria2Driver::new(DriverId::Hysteria, config);
+        assert_eq!(driver.id(), DriverId::Hysteria);
         assert_eq!(driver.name(), "Hysteria2");
         assert!(driver.capabilities().contains(Capabilities::PROXY));
     }
@@ -339,7 +339,7 @@ mod tests {
             tls: None,
         };
 
-        let driver = Hysteria2Driver::new(DriverId::new(3), config);
+        let driver = Hysteria2Driver::new(DriverId::Hysteria, config);
         let config_str = driver.generate_config();
 
         assert!(config_str.contains("proxy.example.com"));

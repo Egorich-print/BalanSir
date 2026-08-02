@@ -108,7 +108,7 @@ impl PolicyRuleToml {
             ActionToml::Forward { driver } => {
                 let driver_hash = hash_domain(driver);
                 Action::Forward {
-                    driver: balansir_common::DriverId(driver_hash),
+                    driver: balansir_common::DriverId::Custom(driver_hash),
                 }
             }
             ActionToml::Block => Action::Block,

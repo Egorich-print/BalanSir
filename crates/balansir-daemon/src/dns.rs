@@ -179,8 +179,8 @@ mod tests {
     #[test]
     fn test_dns_forwarder_driver() {
         let config = DnsForwarderConfig::default();
-        let driver = DnsForwarderDriver::new(DriverId::new(6), config);
-        assert_eq!(driver.id(), DriverId::new(6));
+        let driver = DnsForwarderDriver::new(DriverId::DnsForwarder, config);
+        assert_eq!(driver.id(), DriverId::DnsForwarder);
         assert_eq!(driver.name(), "DNS Forwarder");
         assert!(driver.capabilities().contains(Capabilities::DNS));
     }
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn test_dns_forwarder_config_generation() {
         let config = DnsForwarderConfig::default();
-        let driver = DnsForwarderDriver::new(DriverId::new(6), config);
+        let driver = DnsForwarderDriver::new(DriverId::DnsForwarder, config);
         let config_str = driver.generate_config();
 
         assert!(config_str.contains("127.0.0.1:53"));

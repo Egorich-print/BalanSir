@@ -187,7 +187,7 @@ mod tests {
         let executor = DummyExecutor::new();
 
         let request = make_request(Action::Forward {
-            driver: DriverId::WIREGUARD,
+            driver: DriverId::WireGuard,
         });
 
         let result = executor.execute(&request).await;

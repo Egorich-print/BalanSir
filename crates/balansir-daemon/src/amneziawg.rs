@@ -224,8 +224,8 @@ mod tests {
             obfuscation: ObfuscationConfig::default(),
         };
 
-        let driver = AmneziaWGDriver::new(DriverId::new(5), config);
-        assert_eq!(driver.id(), DriverId::new(5));
+        let driver = AmneziaWGDriver::new(DriverId::B4, config);
+        assert_eq!(driver.id(), DriverId::B4);
         assert_eq!(driver.name(), "AmneziaWG");
         assert!(driver.capabilities().contains(Capabilities::TUNNEL));
     }

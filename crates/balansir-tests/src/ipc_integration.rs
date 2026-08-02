@@ -28,7 +28,7 @@ async fn test_full_pipeline() {
                 reason: 0,
             }]),
             action: Action::Forward {
-                driver: DriverId::WIREGUARD,
+                driver: DriverId::WireGuard,
             },
             execution_time_us: 42,
             correlation_id: 0,
@@ -54,7 +54,7 @@ async fn test_full_pipeline() {
         assert_eq!(
             trace.action,
             Action::Forward {
-                driver: DriverId::WIREGUARD
+                driver: DriverId::WireGuard
             }
         );
         assert_eq!(trace.policy_id, 1);
@@ -79,7 +79,7 @@ async fn test_full_pipeline() {
     assert_eq!(
         trace.action,
         Action::Forward {
-            driver: DriverId::WIREGUARD
+            driver: DriverId::WireGuard
         }
     );
 }
@@ -147,12 +147,12 @@ async fn test_error_handling() {
 /// Test DriverId type safety
 #[test]
 fn test_driver_id_constants() {
-    assert_eq!(DriverId::WIREGUARD.as_u32(), 1);
-    assert_eq!(DriverId::XRAY.as_u32(), 2);
-    assert_eq!(DriverId::HYSTERIA.as_u32(), 3);
+    assert_eq!(DriverId::WireGuard.as_u32(), 1);
+    assert_eq!(DriverId::Xray.as_u32(), 2);
+    assert_eq!(DriverId::Hysteria.as_u32(), 3);
     assert_eq!(DriverId::B4.as_u32(), 4);
 
-    let custom = DriverId::new(99);
+    let custom = DriverId::Custom(99);
     assert_eq!(custom.as_u32(), 99);
     assert_eq!(format!("{}", custom), "Driver(99)");
 }
