@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  balansir-daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: balansir-daemon
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /etc/balansir:/etc/balansir:ro
+      - /var/lib/balansir:/var/lib/balansir
+      - /var/log/balansir:/var/log/balansir
+      - /run/balansir:/run/balansir
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - RUST_LOG=info
+      - BALANSIR_CONFIG=/etc/balansir/balansir.toml
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  balansir-executor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: balansir-executor
+    restart: unless-stopped
+    command: ["balansir-executor"]
+    volumes:
+      - /etc/balansir:/etc/balansir:ro
+      - /var/lib/balansir:/var/lib/balansir
+      - /run/balansir:/run/balansir
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      balansir-daemon:
+        condition: service_healthy

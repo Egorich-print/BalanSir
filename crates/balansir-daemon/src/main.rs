@@ -2,7 +2,8 @@ use balansir_common::ipc::{IpcConnection, IpcMessage, MsgType};
 use balansir_common::Result;
 use std::path::Path;
 use tokio::net::UnixListener;
-use tracing::{error, info};
+use tokio::signal::unix::{signal, SignalKind};
+use tracing::{error, info, warn};
 
 const SOCKET_PATH: &str = "/tmp/balansir-test/daemon.sock";
 
@@ -26,17 +27,44 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(socket_path)?;
     info!("Listening on {}", SOCKET_PATH);
 
+    // Setup signal handlers
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+
     loop {
-        match listener.accept().await {
-            Ok((stream, _addr)) => {
-                info!("Executor connected");
-                tokio::spawn(handle_connection(stream));
+        tokio::select! {
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((stream, _addr)) => {
+                        info!("Executor connected");
+                        tokio::spawn(handle_connection(stream));
+                    }
+                    Err(e) => {
+                        error!("Accept error: {}", e);
+                    }
+                }
             }
-            Err(e) => {
-                error!("Accept error: {}", e);
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down gracefully...");
+                break;
+            }
+            _ = sigint.recv() => {
+                info!("Received SIGINT, shutting down gracefully...");
+                break;
             }
         }
     }
+
+    // Cleanup
+    info!("Cleaning up...");
+    if socket_path.exists() {
+        if let Err(e) = tokio::fs::remove_file(socket_path).await {
+            warn!("Failed to remove socket: {}", e);
+        }
+    }
+
+    info!("BalanSir Daemon stopped");
+    Ok(())
 }
 
 async fn handle_connection(stream: tokio::net::UnixStream) {
