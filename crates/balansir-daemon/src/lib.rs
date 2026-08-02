@@ -1,10 +1,16 @@
+#[cfg(feature = "amneziawg")]
 pub mod amneziawg;
+#[cfg(feature = "b4")]
 pub mod b4;
+#[cfg(feature = "dns")]
 pub mod dns;
 pub mod driver;
 pub mod health;
+#[cfg(feature = "hysteria")]
 pub mod hysteria;
 pub mod policy;
 pub mod reconciliation;
+#[cfg(feature = "wireguard")]
 pub mod wireguard;
+#[cfg(feature = "xray")]
 pub mod xray;

@@ -5,6 +5,15 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = ["wireguard", "xray", "hysteria", "b4"]
+wireguard = []
+xray = []
+hysteria = []
+b4 = []
+amneziawg = []
+dns = []
+
 [dev-dependencies]
 tempfile = "3"
 
