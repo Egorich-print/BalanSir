@@ -73,7 +73,7 @@ impl DummyExecutor {
     }
 
     pub fn log(&self) -> Vec<(ActionRequest, ActionResult)> {
-        self.log.lock().unwrap().clone()
+        self.log.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -84,8 +84,8 @@ impl Executor for DummyExecutor {
     }
 
     async fn execute(&self, request: &ActionRequest) -> ActionResult {
-        let mut log = self.log.lock().unwrap();
-        let mut applied = self.applied.lock().unwrap();
+        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        let mut applied = self.applied.lock().unwrap_or_else(|e| e.into_inner());
 
         // Check for idempotency (already applied)
         let already_applied = applied.iter().any(|r| r.action == request.action);
@@ -104,7 +104,7 @@ impl Executor for DummyExecutor {
     }
 
     async fn undo(&self, request: &ActionRequest) -> ActionResult {
-        let mut applied = self.applied.lock().unwrap();
+        let mut applied = self.applied.lock().unwrap_or_else(|e| e.into_inner());
         applied.retain(|r| r.action != request.action);
 
         ActionResult::Applied {
@@ -114,7 +114,7 @@ impl Executor for DummyExecutor {
     }
 
     async fn rule_count(&self) -> u32 {
-        self.applied.lock().unwrap().len() as u32
+        self.applied.lock().unwrap_or_else(|e| e.into_inner()).len() as u32
     }
 }
 

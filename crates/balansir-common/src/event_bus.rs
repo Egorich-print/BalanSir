@@ -65,7 +65,7 @@ impl BoundedEventBus {
             event,
         };
 
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.queue.len() >= self.capacity {
             inner.queue.pop_front();
         }
@@ -75,7 +75,7 @@ impl BoundedEventBus {
     }
 
     pub fn try_recv(&self) -> Option<EventEnvelope> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.queue.pop_front()
     }
 

@@ -132,9 +132,9 @@ impl Metrics {
 
     /// Encode metrics in Prometheus text format
     pub fn encode_metrics(&self) -> String {
-        let registry = self.registry.read().unwrap();
+        let registry = self.registry.read().unwrap_or_else(|e| e.into_inner());
         let mut buffer = String::new();
-        encode(&mut buffer, &*registry).unwrap();
+        let _ = encode(&mut buffer, &*registry);
         buffer
     }
 
@@ -215,12 +215,12 @@ impl SharedMetrics {
 
     /// Get metrics reference
     pub fn get(&self) -> std::sync::RwLockReadGuard<Metrics> {
-        self.metrics.read().unwrap()
+        self.metrics.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Encode metrics in Prometheus text format
     pub fn encode_metrics(&self) -> String {
-        let metrics = self.metrics.read().unwrap();
+        let metrics = self.metrics.read().unwrap_or_else(|e| e.into_inner());
         metrics.encode_metrics()
     }
 }

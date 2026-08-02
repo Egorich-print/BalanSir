@@ -4,7 +4,7 @@ use std::path::Path;
 use tokio::net::UnixListener;
 use tracing::{error, info};
 
-const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
+const SOCKET_PATH: &str = "/tmp/balansir-test/daemon.sock";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {

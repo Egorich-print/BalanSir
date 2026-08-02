@@ -187,7 +187,7 @@ impl WireGuardExecutor {
 
     /// Add a WireGuard driver
     pub fn add_driver(&self, driver: WireGuardDriver) {
-        let mut drivers = self.drivers.lock().unwrap();
+        let mut drivers = self.drivers.lock().unwrap_or_else(|e| e.into_inner());
         drivers.insert(driver.id(), driver);
     }
 
@@ -207,7 +207,7 @@ impl WireGuardExecutor {
             Action::Forward { driver } => {
                 // Check if driver exists and get status
                 let driver_status = {
-                    let drivers = self.drivers.lock().unwrap();
+                    let drivers = self.drivers.lock().unwrap_or_else(|e| e.into_inner());
                     drivers.get(&driver).map(|d| d.running)
                 };
 
@@ -216,7 +216,7 @@ impl WireGuardExecutor {
                     Some(false) => {
                         // Start driver outside of lock
                         let start_result = {
-                            let mut drivers = self.drivers.lock().unwrap();
+                            let mut drivers = self.drivers.lock().unwrap_or_else(|e| e.into_inner());
                             if let Some(wg_driver) = drivers.get_mut(&driver) {
                                 // Can't await while holding lock, so we'll do sync start
                                 match wg_driver.create_interface() {

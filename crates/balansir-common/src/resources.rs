@@ -1,5 +1,6 @@
 use std::sync::Mutex;
 
+/// Resource allocator for fwmarks and route tables
 pub struct ResourceAllocator {
     inner: Mutex<ResourceAllocatorInner>,
 }
@@ -10,6 +11,7 @@ struct ResourceAllocatorInner {
 }
 
 impl ResourceAllocator {
+    /// Create a new resource allocator
     pub fn new(max_fwmarks: u32, max_route_tables: u32) -> Self {
         Self {
             inner: Mutex::new(ResourceAllocatorInner {
@@ -19,8 +21,9 @@ impl ResourceAllocator {
         }
     }
 
+    /// Allocate a firewall mark (fwmark)
     pub fn allocate_fwmark(&self) -> Option<u32> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         for (i, used) in inner.fwmarks.iter_mut().enumerate() {
             if !*used {
                 *used = true;
@@ -30,16 +33,18 @@ impl ResourceAllocator {
         None
     }
 
+    /// Release a firewall mark
     pub fn release_fwmark(&self, mark: u32) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let index = (mark - 100) as usize;
         if index < inner.fwmarks.len() {
             inner.fwmarks[index] = false;
         }
     }
 
+    /// Allocate a routing table
     pub fn allocate_route_table(&self) -> Option<u32> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         for (i, used) in inner.route_tables.iter_mut().enumerate() {
             if !*used {
                 *used = true;
@@ -49,16 +54,18 @@ impl ResourceAllocator {
         None
     }
 
+    /// Release a routing table
     pub fn release_route_table(&self, table: u32) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let index = (table - 100) as usize;
         if index < inner.route_tables.len() {
             inner.route_tables[index] = false;
         }
     }
 
+    /// Get all allocated fwmarks
     pub fn allocated_fwmarks(&self) -> Vec<u32> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .fwmarks
             .iter()
@@ -68,8 +75,9 @@ impl ResourceAllocator {
             .collect()
     }
 
+    /// Get all allocated route tables
     pub fn allocated_route_tables(&self) -> Vec<u32> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .route_tables
             .iter()
