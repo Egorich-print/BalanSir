@@ -15,18 +15,42 @@ Thank you for your interest in contributing to BalanSir!
 
 ```bash
 # Clone
-git clone https://github.com/YOUR_USERNAME/BalanSir.git
+git clone https://github.com/Egorich-print/BalanSir.git
 cd BalanSir
 
 # Build
-make dev
+cargo build
 
 # Run tests
-make test
+cargo test
 
 # Run linter
-make check
+cargo clippy
 ```
+
+## Architecture
+
+BalanSir uses a layered architecture:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    balansir-daemon (unprivileged)       │
+│  Policy Engine │ Reconciler Loop │ Health Monitor       │
+├─────────────────────────────────────────────────────────┤
+│                    balansir-executor (privileged)       │
+│  Network Backend │ Driver Manager │ Resource Allocator  │
+├─────────────────────────────────────────────────────────┤
+│                    Linux Kernel (nftables/netlink)       │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Crates
+
+- `balansir-common` — Types, IPC, State, Metrics
+- `balansir-daemon` — Policy Engine, Drivers, Reconciler
+- `balansir-executor` — Network Backend, nftables
+- `balansir-api` — REST API + SSE (optional)
+- `balansir-tests` — Integration tests
 
 ## Code Style
 
