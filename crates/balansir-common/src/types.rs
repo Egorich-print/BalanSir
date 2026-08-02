@@ -232,7 +232,7 @@ pub struct ExecutorCapabilities {
 
 // --- Desired State ---
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DesiredState {
     pub rules: Vec<DesiredRule>,
     pub drivers: Vec<DesiredDriver>,

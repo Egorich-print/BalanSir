@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 balansir-common = { path = "../balansir-common" }
-tokio = { workspace = true, features = ["rt", "net", "macros", "io-util", "fs"] }
+tokio = { workspace = true, features = ["rt", "net", "macros", "io-util", "fs", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
@@ -16,3 +16,4 @@ async-trait = "0.1"
 smallvec.workspace = true
 toml = "0.8"
 which = "7"
+postcard.workspace = true
