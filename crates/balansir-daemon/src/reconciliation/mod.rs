@@ -1,6 +1,12 @@
 pub mod bootstrap;
+pub mod plan;
+pub mod diff;
 
-use balansir_common::{Action, ActionRequest, ActionResult, DesiredState, DesiredRule};
+
+
+use crate::reconciliation::diff::StateDiff;
+use crate::reconciliation::plan::{ReconciliationOperation, ReconciliationPlan};
+use balansir_common::{Action, ActionRequest, ActionResult, DesiredRule, DesiredState};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -165,99 +171,80 @@ impl Reconciler {
         drifts
     }
 
-    /// Apply desired state
-    async fn apply_desired_state(&self) -> Result<(), String> {
-        let desired = self.desired_state.lock().await;
-
-        for rule in &desired.rules {
-            let request = ActionRequest {
-                action: rule.action,
-                src_ip: [0; 4],
-                dst_ip: [0; 4],
-                src_port: 0,
-                dst_port: 0,
-                protocol: 0,
-                interface: 0,
-                trace: balansir_common::DecisionTrace {
-                    policy_id: 0,
-                    steps: smallvec::SmallVec::new(),
-                    action: rule.action,
-                    execution_time_us: 0,
-                    correlation_id: 0,
-                },
-            };
-
-            let result = self.executor.execute(&request).await;
-
-            match result {
-                ActionResult::Applied { rule_id, .. } => {
-                    let mut actual = self.actual_state.lock().await;
-                    actual.active_rules.push(ActualRule {
-                        id: rule.id,
+    /// Apply plan
+    async fn apply_plan(&self, plan: ReconciliationPlan) -> Result<(), String> {
+        for op in plan.operations {
+            match op {
+                ReconciliationOperation::UpdatePolicy(rule) => {
+                    let request = ActionRequest {
                         action: rule.action,
-                        rule_id,
-                    });
-                    info!(rule_id = rule.id, "Rule applied");
+                        src_ip: [0; 4],
+                        dst_ip: [0; 4],
+                        src_port: 0,
+                        dst_port: 0,
+                        protocol: 0,
+                        interface: 0,
+                        trace: balansir_common::DecisionTrace {
+                            policy_id: 0,
+                            steps: smallvec::SmallVec::new(),
+                            action: rule.action,
+                            execution_time_us: 0,
+                            correlation_id: 0,
+                        },
+                    };
+
+                    match self.executor.execute(&request).await {
+                        ActionResult::Applied { rule_id, .. } => {
+                            let mut actual = self.actual_state.lock().await;
+                            actual.active_rules.retain(|r| r.id != rule.id);
+                            actual.active_rules.push(ActualRule {
+                                id: rule.id,
+                                action: rule.action,
+                                rule_id,
+                            });
+                            info!(rule_id = rule.id, "Rule applied");
+                        }
+                        ActionResult::AlreadyApplied => {}
+                        ActionResult::Failed { error, message } => {
+                            return Err(format!("Rule {} failed: {:?}", rule.id, message));
+                        }
+                        _ => {}
+                    }
                 }
-                ActionResult::AlreadyApplied => {}
-                ActionResult::Failed { error, message } => {
-                    warn!(rule_id = rule.id, ?error, ?message, "Failed to apply rule");
-                    return Err(format!("Rule {} failed: {:?}", rule.id, message));
+                ReconciliationOperation::RemovePolicy(rule_id) => {
+                    info!(rule_id, "Removing rule");
+                    let mut actual = self.actual_state.lock().await;
+                    actual.active_rules.retain(|r| r.id != rule_id);
                 }
-                ActionResult::Retry { after_ms, reason } => {
-                    warn!(rule_id = rule.id, after_ms, reason, "Retry needed");
-                }
-                ActionResult::Unsupported { .. } => {
-                    warn!(rule_id = rule.id, "Unsupported action");
-                }
+                _ => {}
             }
         }
-
         Ok(())
     }
 
-    /// Single reconciliation cycle (legacy)
+    /// Single reconciliation cycle
     pub async fn reconcile(&self) -> Result<(), String> {
-        let drifts = self.detect_drift().await;
+        let desired = self.desired_state.lock().await;
+        let actual = self.actual_state.lock().await;
+        let plan = StateDiff::build(&desired, &actual);
+        drop(desired);
+        drop(actual);
 
-        if drifts.is_empty() {
+        if plan.is_empty() {
             info!("State is consistent, no drift");
             return Ok(());
         }
 
-        info!(drift_count = drifts.len(), "Drift detected, reconciling");
+        info!(op_count = plan.operations.len(), "Plan generated, reconciling");
 
-        for drift in &drifts {
-            match drift {
-                DriftItem::RuleMissing { rule_id, expected: _ } => {
-                    info!(rule_id, "Adding missing rule");
-                }
-                DriftItem::RuleExtra { rule_id } => {
-                    info!(rule_id, "Removing extra rule");
-                }
-                DriftItem::RuleChanged {
-                    rule_id,
-                    expected,
-                } => {
-                    info!(rule_id, ?expected, "Updating changed rule");
-                }
-            }
-        }
-
-        // Rebuild actual state from desired
-        {
-            let mut actual = self.actual_state.lock().await;
-            actual.active_rules.clear();
-        }
-
-        self.apply_desired_state().await
+        self.apply_plan(plan).await
     }
 
     /// Atomic reconciliation with watchdog rollback
-    /// 
+    ///
     /// Transactional flow:
     /// 1. Snapshot current state
-    /// 2. Apply changes
+    /// 2. Generate and apply plan
     /// 3. Health check with timeout
     /// 4. OK → commit snapshot
     /// 5. FAIL → rollback(snapshot)
@@ -266,13 +253,18 @@ impl Reconciler {
             return self.reconcile().await;
         }
 
-        let drifts = self.detect_drift().await;
-        if drifts.is_empty() {
+        let desired = self.desired_state.lock().await;
+        let actual = self.actual_state.lock().await;
+        let plan = StateDiff::build(&desired, &actual);
+        drop(desired);
+        drop(actual);
+
+        if plan.is_empty() {
             info!("State is consistent, no drift");
             return Ok(());
         }
 
-        info!(drift_count = drifts.len(), "Drift detected, starting atomic reconcile");
+        info!(op_count = plan.operations.len(), "Drift detected, starting atomic reconcile");
 
         // 1. Snapshot current state
         let snapshot = {
@@ -283,17 +275,13 @@ impl Reconciler {
             }
         };
 
-        // 2. Apply changes
-        {
-            let mut actual = self.actual_state.lock().await;
-            actual.active_rules.clear();
-        }
-
-        if let Err(e) = self.apply_desired_state().await {
-            warn!("Failed to apply changes, rolling back: {}", e);
+        // 2. Apply plan
+        if let Err(e) = self.apply_plan(plan).await {
+            warn!("Failed to apply plan, rolling back: {}", e);
             self.rollback_to_snapshot(snapshot).await;
             return Err(e);
         }
+
 
         // 3. Health check with timeout
         let health_result = tokio::time::timeout(
@@ -325,12 +313,6 @@ impl Reconciler {
 
         let mut actual = self.actual_state.lock().await;
         *actual = snapshot.actual;
-
-        // Re-apply the actual state to restore system
-        drop(actual);
-        if let Err(e) = self.apply_desired_state().await {
-            error!("Failed to rollback: {}", e);
-        }
     }
 
     /// Health check all components

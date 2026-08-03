@@ -2,7 +2,25 @@
 
 > Last updated: 2026-08-03
 
-## Current Phase: Phase D (Technical Debt) — D3 Stress Testing Complete
+## Current Phase: Planning v0.5.0 — Enterprise-Grade Control Plane & Self-Healing
+
+### v0.5.0 Roadmap
+1. **Configuration Reconciliation**
+   - [x] StateDiff & ReconciliationPlan abstraction (Completed)
+   - [ ] Hot Reload & Atomic Config Swap
+   - [ ] Dry-run mode (`--dry-run`)
+   - [ ] Configuration versioning & rollback
+2. **Control Plane**
+   - Expanded HTTP Control API (`/status`, `/drivers`, `/rules`, `/drain`, etc.)
+   - Runtime Driver Lifecycle (`enable`, `disable`, `start`, `stop`, `restart`)
+   - Graceful Drain (no connection drops on reload)
+3. **Observability & Health Engine**
+   - Health Engine with multi-tier states (`Healthy` → `Degraded` → `Failing` → `Disabled`)
+   - Enhanced Prometheus Metrics
+4. **Policy Engine v2**
+   - Universal matchers (protocols, IPs, ports, latency, metadata)
+5. **Event System**
+   - Internal Event Bus for state changes and plugins
 
 ### Completed
 
