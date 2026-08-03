@@ -121,7 +121,7 @@ impl Executor for DummyExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use balansir_common::{Action, DecisionTrace, DriverId, MatcherStep};
+    use balansir_common::{Action, DecisionTrace, DriverId};
     use smallvec::SmallVec;
 
     fn make_request(action: Action) -> ActionRequest {

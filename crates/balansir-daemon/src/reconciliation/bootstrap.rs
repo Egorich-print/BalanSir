@@ -102,7 +102,7 @@ mod tests {
         let executor = std::sync::Arc::new(crate::reconciliation::DummyExecutorAdapter::new());
 
         // Create and save state
-        let mut reconciler = Reconciler::new(
+        let reconciler = Reconciler::new(
             DesiredState::default(),
             executor.clone(),
             ReconcilerConfig::default(),

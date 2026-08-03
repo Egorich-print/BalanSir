@@ -7,7 +7,7 @@ use axum::{
     },
     Json,
 };
-use balansir_common::{DesiredState, DesiredRule, Action};
+use balansir_common::DesiredState;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -32,6 +32,12 @@ pub struct EventEntry {
     pub timestamp: i64,
     pub event_type: String,
     pub details: String,
+}
+
+impl Default for ReconcilerHandle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReconcilerHandle {

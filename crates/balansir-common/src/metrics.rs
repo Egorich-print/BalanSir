@@ -1,10 +1,8 @@
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
 use prometheus_client::registry::Registry;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 /// BalanSir metrics collector
@@ -134,7 +132,7 @@ impl Metrics {
     pub fn encode_metrics(&self) -> String {
         let registry = self.registry.read().unwrap_or_else(|e| e.into_inner());
         let mut buffer = String::new();
-        let _ = encode(&mut buffer, &*registry);
+        let _ = encode(&mut buffer, &registry);
         buffer
     }
 
@@ -214,7 +212,7 @@ impl SharedMetrics {
     }
 
     /// Get metrics reference
-    pub fn get(&self) -> std::sync::RwLockReadGuard<Metrics> {
+    pub fn get(&self) -> std::sync::RwLockReadGuard<'_, Metrics> {
         self.metrics.read().unwrap_or_else(|e| e.into_inner())
     }
 

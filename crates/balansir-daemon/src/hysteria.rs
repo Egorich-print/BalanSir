@@ -3,7 +3,6 @@ use balansir_common::{
     Capabilities, DriverId, DriverError, HealthStatus,
 };
 use serde::{Deserialize, Serialize};
-use std::process::Child;
 
 use crate::driver::ComponentDriver;
 
@@ -77,7 +76,7 @@ impl Hysteria2Driver {
     }
 
     fn generate_config(&self) -> String {
-        let obfs_section = if let Some(ref obfs) = self.config.obfs {
+        let _obfs_section = if let Some(ref obfs) = self.config.obfs {
             format!(
                 r#""obfs": {{
                 "type": "{}",
@@ -89,7 +88,7 @@ impl Hysteria2Driver {
             String::new()
         };
 
-        let tls_section = if let Some(ref tls) = self.config.tls {
+        let _tls_section = if let Some(ref tls) = self.config.tls {
             let sni = tls.sni.as_deref().unwrap_or("");
             format!(
                 r#""tls": {{
@@ -167,7 +166,7 @@ impl Hysteria2Driver {
             up_bw,
             down_bw,
             self.config.server.split(':').next().unwrap_or(""),
-            self.config.server.split(':').last().unwrap_or("443").parse::<u16>().unwrap_or(443),
+            self.config.server.split(':').next_back().unwrap_or("443").parse::<u16>().unwrap_or(443),
             self.config.password,
             self.config.obfs.as_ref().map(|o| o.password.as_str()).unwrap_or(""),
             self.config.tls.as_ref().and_then(|t| t.sni.as_deref()).unwrap_or(""),

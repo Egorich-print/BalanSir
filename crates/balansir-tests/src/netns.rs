@@ -128,7 +128,7 @@ impl balansir_executor::executor::Executor for NftablesExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use balansir_common::{DecisionTrace, MatcherStep};
+    use balansir_common::DecisionTrace;
     use balansir_executor::executor::Executor;
     use smallvec::SmallVec;
 

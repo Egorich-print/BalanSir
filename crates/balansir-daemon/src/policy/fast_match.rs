@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use super::PacketContext;
 
 /// Fast domain matcher using pre-compiled hash map
 /// 
@@ -74,6 +73,13 @@ impl DomainMatcher {
     }
 }
 
+impl Default for DomainMatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+
 /// Statistics for domain matcher
 #[derive(Debug, Clone)]
 pub struct DomainMatcherStats {
@@ -88,6 +94,12 @@ pub struct DomainMatcherStats {
 pub struct PortMatcher {
     /// HashMap for all ports
     ports: HashMap<u16, usize>,
+}
+
+impl Default for PortMatcher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PortMatcher {

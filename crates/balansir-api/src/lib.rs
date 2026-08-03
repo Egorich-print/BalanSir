@@ -1,12 +1,9 @@
 use axum::{
-    extract::State,
-    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use balansir_common::{DesiredState, DesiredRule, Action};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -133,6 +130,7 @@ pub async fn start_server(state: Arc<ApiState>, port: u16) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
 
     #[tokio::test]
     async fn test_index() {
