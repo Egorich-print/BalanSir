@@ -273,3 +273,19 @@ pub struct DesiredDriver {
     pub id: DriverId,
     pub action: DriverAction,
 }
+
+// --- Actual State ---
+
+/// Actual state of the system (what is currently applied)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ActualState {
+    pub active_rules: Vec<ActualRule>,
+}
+
+/// A single active rule in the system
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActualRule {
+    pub id: u32,
+    pub action: Action,
+    pub rule_id: Option<u32>,
+}

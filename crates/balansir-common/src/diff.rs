@@ -1,8 +1,7 @@
-// crates/balansir-daemon/src/reconciliation/diff.rs
+// crates/balansir-common/src/diff.rs
 
-use super::plan::{ReconciliationOperation, ReconciliationPlan};
-use super::ActualState;
-use balansir_common::DesiredState;
+use crate::plan::{ReconciliationOperation, ReconciliationPlan};
+use crate::{ActualState, DesiredState};
 
 pub struct StateDiff;
 
@@ -50,8 +49,7 @@ impl StateDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reconciliation::ActualRule;
-    use balansir_common::{Action, DesiredRule};
+    use crate::{Action, ActualRule, DesiredRule};
 
     #[test]
     fn test_diff_no_changes() {

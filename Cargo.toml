@@ -26,6 +26,8 @@ smallvec = { version = "1", features = ["serde"] }
 bitflags = { version = "2", features = ["serde"] }
 prometheus-client = "0.22"
 axum = "0.7"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 rtnetlink = "0.14"
 netlink-packet-route = "0.19"
 netlink-packet-core = "0.7"

@@ -19,6 +19,8 @@ async-trait = "0.1"
 toml = "0.8"
 prometheus-client.workspace = true
 libc = "0.2"
+chrono.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

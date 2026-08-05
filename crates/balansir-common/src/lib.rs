@@ -1,19 +1,25 @@
+pub mod diff;
 pub mod error;
 pub mod event_bus;
 pub mod ipc;
 pub mod metrics;
+pub mod plan;
 pub mod profile;
 pub mod resources;
+pub mod snapshot;
 pub mod state;
 pub mod types;
 pub mod validation;
 pub mod version;
 
+pub use diff::StateDiff;
 pub use error::{DriverError, Error, Result};
 pub use event_bus::BoundedEventBus;
 pub use metrics::Metrics;
+pub use plan::{PlanMetadata, ReconciliationOperation, ReconciliationPlan};
 pub use profile::Profile;
 pub use resources::ResourceAllocator;
+pub use snapshot::Snapshot;
 pub use types::*;
 pub use validation::*;
 pub use version::*;

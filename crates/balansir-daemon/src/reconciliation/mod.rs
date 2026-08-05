@@ -1,10 +1,10 @@
 pub mod bootstrap;
-pub mod diff;
-pub mod plan;
+pub use balansir_common::diff;
+pub use balansir_common::plan;
+pub use balansir_common::{ActualRule, ActualState};
 
-use crate::reconciliation::diff::StateDiff;
-use crate::reconciliation::plan::{ReconciliationOperation, ReconciliationPlan};
-use balansir_common::{Action, ActionRequest, ActionResult, DesiredRule, DesiredState};
+use balansir_common::plan::{ReconciliationOperation, ReconciliationPlan};
+use balansir_common::{ActionRequest, ActionResult, DesiredRule, DesiredState, StateDiff};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -16,20 +16,6 @@ pub struct Reconciler {
     executor: Arc<dyn ExecutorAdapter>,
     config: ReconcilerConfig,
     generation: AtomicU64,
-}
-
-/// Actual state of the system
-#[derive(Debug, Clone, Default)]
-pub struct ActualState {
-    pub active_rules: Vec<ActualRule>,
-}
-
-/// A single active rule in the system
-#[derive(Debug, Clone)]
-pub struct ActualRule {
-    pub id: u32,
-    pub action: Action,
-    pub rule_id: Option<u32>,
 }
 
 /// Snapshot of actual state for rollback
@@ -389,6 +375,7 @@ impl ExecutorAdapter for DummyExecutorAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use balansir_common::Action;
 
     #[tokio::test]
     async fn test_reconciler_basic() {

@@ -1,10 +1,13 @@
-// crates/balansir-daemon/src/reconciliation/plan.rs
+// crates/balansir-common/src/plan.rs
 
-use balansir_common::{DesiredRule, DriverId};
-use serde::Serialize;
+use crate::{DesiredRule, DriverId};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::fmt;
+use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// One step in a reconciliation plan
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReconciliationOperation {
     CreateDriver(DriverId),
     RemoveDriver(DriverId),
@@ -27,7 +30,26 @@ impl fmt::Display for ReconciliationOperation {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Transport metadata attached to a plan (DTO)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanMetadata {
+    pub plan_id: Uuid,
+    pub generation: u64,
+    pub created_at: DateTime<Utc>,
+}
+
+impl PlanMetadata {
+    pub fn new(generation: u64) -> Self {
+        Self {
+            plan_id: Uuid::new_v4(),
+            generation,
+            created_at: Utc::now(),
+        }
+    }
+}
+
+/// A reconciliation plan: ordered set of operations to converge actual -> desired
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconciliationPlan {
     pub generation_before: u64,
     pub generation_after: u64,
