@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
-
 /// Fast domain matcher using pre-compiled hash map
-/// 
+///
 /// For O(1) lookup of domain rules instead of O(n) linear scan
 pub struct DomainMatcher {
     /// Exact domain hash matches
@@ -79,7 +78,6 @@ impl Default for DomainMatcher {
     }
 }
 
-
 /// Statistics for domain matcher
 #[derive(Debug, Clone)]
 pub struct DomainMatcherStats {
@@ -89,7 +87,7 @@ pub struct DomainMatcherStats {
 }
 
 /// Fast port matcher using hash map
-/// 
+///
 /// For O(1) lookup of port rules
 pub struct PortMatcher {
     /// HashMap for all ports

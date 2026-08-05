@@ -134,7 +134,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_index() {
-        let state = Arc::new(ApiState::new(Arc::new(balansir_common::metrics::SharedMetrics::new())));
+        let state = Arc::new(ApiState::new(Arc::new(
+            balansir_common::metrics::SharedMetrics::new(),
+        )));
         let app = create_router(state);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

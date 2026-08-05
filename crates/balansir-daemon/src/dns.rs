@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use balansir_common::{
-    Capabilities, DriverId, DriverError, HealthStatus,
-};
+use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
@@ -28,10 +26,7 @@ impl Default for DnsForwarderConfig {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:53".parse().unwrap(),
-            upstreams: vec![
-                "1.1.1.1:53".parse().unwrap(),
-                "8.8.8.8:53".parse().unwrap(),
-            ],
+            upstreams: vec!["1.1.1.1:53".parse().unwrap(), "8.8.8.8:53".parse().unwrap()],
             doh: false,
             dot: false,
             cache_size: 10000,
@@ -60,9 +55,12 @@ impl DnsForwarderDriver {
     }
 
     fn generate_config(&self) -> String {
-        let upstreams: Vec<String> = self.config.upstreams.iter().map(|u| {
-            format!("\"{}\"", u)
-        }).collect();
+        let upstreams: Vec<String> = self
+            .config
+            .upstreams
+            .iter()
+            .map(|u| format!("\"{}\"", u))
+            .collect();
 
         format!(
             r#"{{

@@ -12,25 +12,35 @@ pub fn validate_profile(profile: &crate::Profile) -> Result<()> {
 
     // Memory validation
     if profile.memory.daemon_rss_max_mb == 0 {
-        return Err(Error::Misconfiguration("daemon_rss_max_mb must be > 0".into()));
+        return Err(Error::Misconfiguration(
+            "daemon_rss_max_mb must be > 0".into(),
+        ));
     }
     if profile.memory.executor_rss_max_mb == 0 {
-        return Err(Error::Misconfiguration("executor_rss_max_mb must be > 0".into()));
+        return Err(Error::Misconfiguration(
+            "executor_rss_max_mb must be > 0".into(),
+        ));
     }
 
     // Drivers validation
     if profile.drivers.max_active == 0 {
-        return Err(Error::Misconfiguration("max_active drivers must be > 0".into()));
+        return Err(Error::Misconfiguration(
+            "max_active drivers must be > 0".into(),
+        ));
     }
 
     // State validation
     if profile.state.journal_capacity == 0 {
-        return Err(Error::Misconfiguration("journal_capacity must be > 0".into()));
+        return Err(Error::Misconfiguration(
+            "journal_capacity must be > 0".into(),
+        ));
     }
 
     // Network validation
     if profile.network.max_firewall_rules == 0 {
-        return Err(Error::Misconfiguration("max_firewall_rules must be > 0".into()));
+        return Err(Error::Misconfiguration(
+            "max_firewall_rules must be > 0".into(),
+        ));
     }
 
     Ok(())
@@ -43,13 +53,15 @@ pub fn validate_policy_rules(rules: &[crate::DesiredRule]) -> Result<()> {
     for rule in rules {
         if rule.id == 0 {
             return Err(Error::Misconfiguration(format!(
-                "Rule ID must be > 0 (rule: {})", rule.id
+                "Rule ID must be > 0 (rule: {})",
+                rule.id
             )));
         }
 
         if !seen_ids.insert(rule.id) {
             return Err(Error::Misconfiguration(format!(
-                "Duplicate rule ID: {}", rule.id
+                "Duplicate rule ID: {}",
+                rule.id
             )));
         }
     }
@@ -72,7 +84,10 @@ pub fn validate_ipc_message(msg: &crate::ipc::IpcMessage) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::{Profile, DeviceConfig, RuntimeConfig, MemoryConfig, DriversConfig, StateConfig, UpdatesConfig, NetworkConfig, ResourcesConfig};
+    use crate::profile::{
+        DeviceConfig, DriversConfig, MemoryConfig, NetworkConfig, Profile, ResourcesConfig,
+        RuntimeConfig, StateConfig, UpdatesConfig,
+    };
 
     fn test_profile() -> Profile {
         Profile {
@@ -133,13 +148,11 @@ mod tests {
 
     #[test]
     fn test_validate_policy_rules_valid() {
-        let rules = vec![
-            crate::DesiredRule {
-                id: 1,
-                action: crate::Action::Block,
-                priority: 100,
-            },
-        ];
+        let rules = vec![crate::DesiredRule {
+            id: 1,
+            action: crate::Action::Block,
+            priority: 100,
+        }];
         assert!(validate_policy_rules(&rules).is_ok());
     }
 

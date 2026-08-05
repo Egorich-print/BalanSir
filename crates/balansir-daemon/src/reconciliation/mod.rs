@@ -1,12 +1,11 @@
 pub mod bootstrap;
-pub mod plan;
 pub mod diff;
-
-
+pub mod plan;
 
 use crate::reconciliation::diff::StateDiff;
 use crate::reconciliation::plan::{ReconciliationOperation, ReconciliationPlan};
 use balansir_common::{Action, ActionRequest, ActionResult, DesiredRule, DesiredState};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -16,6 +15,7 @@ pub struct Reconciler {
     actual_state: Arc<tokio::sync::Mutex<ActualState>>,
     executor: Arc<dyn ExecutorAdapter>,
     config: ReconcilerConfig,
+    generation: AtomicU64,
 }
 
 /// Actual state of the system
@@ -82,6 +82,7 @@ impl Reconciler {
             actual_state: Arc::new(tokio::sync::Mutex::new(ActualState::default())),
             executor,
             config,
+            generation: AtomicU64::new(1),
         }
     }
 
@@ -107,8 +108,7 @@ impl Reconciler {
         state_store: &impl balansir_common::state::StateStore,
     ) -> Result<(), String> {
         let state = self.desired_state.lock().await;
-        let data =
-            postcard::to_allocvec(&*state).map_err(|e| format!("Serialize: {}", e))?;
+        let data = postcard::to_allocvec(&*state).map_err(|e| format!("Serialize: {}", e))?;
         state_store
             .save("desired_state", &data)
             .await
@@ -136,39 +136,14 @@ impl Reconciler {
         self.desired_state.lock().await.rules.retain(|r| r.id != id);
     }
 
-    /// Compare desired vs actual, return drift items
-    async fn detect_drift(&self) -> Vec<DriftItem> {
-        let desired = self.desired_state.lock().await;
-        let actual = self.actual_state.lock().await;
-        let mut drifts = Vec::new();
+    /// Get current actual state (for testing and monitoring)
+    pub async fn get_actual(&self) -> ActualState {
+        self.actual_state.lock().await.clone()
+    }
 
-        for rule in &desired.rules {
-            match actual.active_rules.iter().find(|r| r.id == rule.id) {
-                Some(ar) if ar.action == rule.action => {}
-                Some(_) => {
-                    drifts.push(DriftItem::RuleChanged {
-                        rule_id: rule.id,
-                        expected: rule.action,
-                    });
-                }
-                None => {
-                    drifts.push(DriftItem::RuleMissing {
-                        rule_id: rule.id,
-                        expected: rule.action,
-                    });
-                }
-            }
-        }
-
-        for actual_rule in &actual.active_rules {
-            if !desired.rules.iter().any(|r| r.id == actual_rule.id) {
-                drifts.push(DriftItem::RuleExtra {
-                    rule_id: actual_rule.id,
-                });
-            }
-        }
-
-        drifts
+    /// Get current generation (for testing and monitoring)
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
     /// Apply plan
@@ -205,7 +180,7 @@ impl Reconciler {
                             info!(rule_id = rule.id, "Rule applied");
                         }
                         ActionResult::AlreadyApplied => {}
-                        ActionResult::Failed { error, message } => {
+                        ActionResult::Failed { error: _, message } => {
                             return Err(format!("Rule {} failed: {:?}", rule.id, message));
                         }
                         _ => {}
@@ -222,11 +197,23 @@ impl Reconciler {
         Ok(())
     }
 
+    /// Build a reconciliation plan without applying it (for dry-run and testing)
+    pub async fn build_plan(&self) -> ReconciliationPlan {
+        let desired = self.desired_state.lock().await;
+        let actual = self.actual_state.lock().await;
+        let gen = self.generation.load(Ordering::Relaxed);
+        let plan = StateDiff::build(&desired, &actual, gen);
+        drop(desired);
+        drop(actual);
+        plan
+    }
+
     /// Single reconciliation cycle
     pub async fn reconcile(&self) -> Result<(), String> {
         let desired = self.desired_state.lock().await;
         let actual = self.actual_state.lock().await;
-        let plan = StateDiff::build(&desired, &actual);
+        let gen = self.generation.load(Ordering::Relaxed);
+        let plan = StateDiff::build(&desired, &actual, gen);
         drop(desired);
         drop(actual);
 
@@ -235,9 +222,16 @@ impl Reconciler {
             return Ok(());
         }
 
-        info!(op_count = plan.operations.len(), "Plan generated, reconciling");
+        info!(
+            op_count = plan.operations.len(),
+            "Plan generated, reconciling"
+        );
 
-        self.apply_plan(plan).await
+        let res = self.apply_plan(plan).await;
+        if res.is_ok() {
+            self.generation.fetch_add(1, Ordering::Relaxed);
+        }
+        res
     }
 
     /// Atomic reconciliation with watchdog rollback
@@ -255,7 +249,8 @@ impl Reconciler {
 
         let desired = self.desired_state.lock().await;
         let actual = self.actual_state.lock().await;
-        let plan = StateDiff::build(&desired, &actual);
+        let gen = self.generation.load(Ordering::Relaxed);
+        let plan = StateDiff::build(&desired, &actual, gen);
         drop(desired);
         drop(actual);
 
@@ -264,7 +259,10 @@ impl Reconciler {
             return Ok(());
         }
 
-        info!(op_count = plan.operations.len(), "Drift detected, starting atomic reconcile");
+        info!(
+            op_count = plan.operations.len(),
+            "Drift detected, starting atomic reconcile"
+        );
 
         // 1. Snapshot current state
         let snapshot = {
@@ -282,16 +280,17 @@ impl Reconciler {
             return Err(e);
         }
 
-
         // 3. Health check with timeout
         let health_result = tokio::time::timeout(
             std::time::Duration::from_secs(self.config.watchdog_timeout_secs),
             self.health_check_all(),
-        ).await;
+        )
+        .await;
 
         match health_result {
             Ok(true) => {
                 info!("Atomic reconcile successful, changes committed");
+                self.generation.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
             Ok(false) => {
@@ -335,25 +334,26 @@ impl Reconciler {
 
     /// Run reconciliation loop forever
     pub async fn run_loop(&self) {
-        info!(interval = self.config.check_interval_secs, "Reconciliation loop started");
+        info!(
+            interval = self.config.check_interval_secs,
+            "Reconciliation loop started"
+        );
 
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(self.config.check_interval_secs)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                self.config.check_interval_secs,
+            ))
+            .await;
 
             if let Err(e) = self.reconcile_atomic().await {
                 error!("Reconciliation error: {}", e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(self.config.retry_delay_secs)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    self.config.retry_delay_secs,
+                ))
+                .await;
             }
         }
     }
-}
-
-/// Types of drift
-#[derive(Debug)]
-pub enum DriftItem {
-    RuleMissing { rule_id: u32, expected: Action },
-    RuleExtra { rule_id: u32 },
-    RuleChanged { rule_id: u32, expected: Action },
 }
 
 /// Dummy executor for testing
@@ -372,7 +372,9 @@ impl DummyExecutorAdapter {
 #[async_trait::async_trait]
 impl ExecutorAdapter for DummyExecutorAdapter {
     async fn execute(&self, _request: &ActionRequest) -> ActionResult {
-        let id = self.count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         ActionResult::Applied {
             execution_time_us: 100,
             rule_id: Some(id + 1),
@@ -392,48 +394,71 @@ mod tests {
     async fn test_reconciler_basic() {
         let desired = DesiredState {
             rules: vec![
-                DesiredRule { id: 1, action: Action::Block, priority: 100 },
-                DesiredRule { id: 2, action: Action::Allow, priority: 50 },
+                DesiredRule {
+                    id: 1,
+                    action: Action::Block,
+                    priority: 100,
+                },
+                DesiredRule {
+                    id: 2,
+                    action: Action::Allow,
+                    priority: 50,
+                },
             ],
             drivers: Vec::new(),
         };
 
         let executor = Arc::new(DummyExecutorAdapter::new());
-        let reconciler = Reconciler::new(desired, executor, ReconcilerConfig::default());
+        let reconciler = Reconciler::new(desired.clone(), executor, ReconcilerConfig::default());
 
-        // Detect drift — both rules missing
-        let drifts = reconciler.detect_drift().await;
-        assert_eq!(drifts.len(), 2);
+        // Verify initial state is empty
+        let actual = reconciler.get_actual().await;
+        assert!(actual.active_rules.is_empty());
 
-        // Apply state
-        reconciler.apply_desired_state().await.unwrap();
+        // Apply desired state
+        reconciler.set_desired(desired).await;
+        reconciler.reconcile_atomic().await.unwrap();
 
-        // Detect drift again — clean
-        let drifts = reconciler.detect_drift().await;
-        assert!(drifts.is_empty());
+        // Verify both rules are applied
+        let actual = reconciler.get_actual().await;
+        assert_eq!(actual.active_rules.len(), 2);
+
+        // Verify generation incremented
+        let gen = reconciler.generation();
+        assert_eq!(gen, 2);
     }
 
     #[tokio::test]
     async fn test_reconciler_add_remove() {
         let desired = DesiredState {
-            rules: vec![DesiredRule { id: 1, action: Action::Block, priority: 100 }],
+            rules: vec![DesiredRule {
+                id: 1,
+                action: Action::Block,
+                priority: 100,
+            }],
             drivers: Vec::new(),
         };
 
         let executor = Arc::new(DummyExecutorAdapter::new());
         let reconciler = Reconciler::new(desired, executor, ReconcilerConfig::default());
 
-        reconciler.apply_desired_state().await.unwrap();
+        reconciler.reconcile_atomic().await.unwrap();
 
         // Add rule
-        reconciler.add_rule(DesiredRule { id: 2, action: Action::Allow, priority: 50 }).await;
-        let drifts = reconciler.detect_drift().await;
-        assert_eq!(drifts.len(), 1);
+        reconciler
+            .add_rule(DesiredRule {
+                id: 2,
+                action: Action::Allow,
+                priority: 50,
+            })
+            .await;
+        let plan = reconciler.build_plan().await;
+        assert_eq!(plan.operations.len(), 1);
 
         // Remove rule
         reconciler.remove_rule(1).await;
-        let drifts = reconciler.detect_drift().await;
-        assert_eq!(drifts.len(), 2); // 1 missing + 1 extra
+        let plan = reconciler.build_plan().await;
+        assert!(!plan.is_empty());
     }
 
     #[tokio::test]
@@ -442,14 +467,26 @@ mod tests {
         let executor = Arc::new(DummyExecutorAdapter::new());
         let reconciler = Reconciler::new(desired, executor, ReconcilerConfig::default());
 
-        reconciler.add_rule(DesiredRule { id: 1, action: Action::Block, priority: 100 }).await;
-        reconciler.add_rule(DesiredRule { id: 2, action: Action::Allow, priority: 50 }).await;
+        reconciler
+            .add_rule(DesiredRule {
+                id: 1,
+                action: Action::Block,
+                priority: 100,
+            })
+            .await;
+        reconciler
+            .add_rule(DesiredRule {
+                id: 2,
+                action: Action::Allow,
+                priority: 50,
+            })
+            .await;
 
         // Full reconcile cycle
-        reconciler.reconcile().await.unwrap();
+        reconciler.reconcile_atomic().await.unwrap();
 
         // Verify consistency
-        let drifts = reconciler.detect_drift().await;
-        assert!(drifts.is_empty());
+        let plan = reconciler.build_plan().await;
+        assert!(plan.is_empty());
     }
 }

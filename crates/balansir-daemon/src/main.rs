@@ -1,4 +1,4 @@
-use balansir_common::ipc::{IpcServerConnection, IpcMessage, MsgType};
+use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
 use balansir_common::Result;
 use std::path::Path;
 use tokio::net::UnixListener;

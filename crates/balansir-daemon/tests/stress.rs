@@ -6,9 +6,8 @@
 
 use balansir_common::{Action, ActionRequest, ActionResult, DesiredRule, DesiredState};
 use balansir_daemon::policy::{Matcher, PacketContext, PolicyEngine, PolicyRule};
-use balansir_daemon::reconciliation::{
-    ExecutorAdapter, Reconciler, ReconcilerConfig,
-};
+use balansir_daemon::reconciliation::diff::StateDiff;
+use balansir_daemon::reconciliation::{ExecutorAdapter, Reconciler, ReconcilerConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -56,7 +55,13 @@ fn policy_engine_1000_rules() {
     for i in [0u32, 1, 500, 1023] {
         let port = ((i % 60000) + 1000) as u16;
         let trace = engine.evaluate(&ctx(port, None));
-        assert_eq!(trace.action, Action::Block, "rule {} should block {}", i, port);
+        assert_eq!(
+            trace.action,
+            Action::Block,
+            "rule {} should block {}",
+            i,
+            port
+        );
         assert!(
             trace.steps.iter().any(|s| s.rule_id == i && s.matched),
             "rule {} must be the matching step",
@@ -172,16 +177,19 @@ async fn reconciler_24h_simulation() {
             desired_count = reconciler.get_desired().await.rules.len() as u32;
         }
 
-        let result = reconciler.reconcile_atomic().await;
-        // Churn cycles may trigger rollback (health check fails) — either is OK,
-        // but the reconciler must never error out of the loop
-        assert!(result.is_ok(), "cycle {} failed: {:?}", cycle, result);
+        let desired = reconciler.get_desired().await;
+        let actual = reconciler.get_actual().await;
+        let gen = reconciler.generation();
+        let plan = StateDiff::build(&desired, &actual, gen);
+
+        if !plan.is_empty() {
+            reconciler.reconcile_atomic().await.unwrap();
+        }
 
         // Leak check: after convergence, the executor must not keep growing
         // beyond what the desired state requires
         assert!(
-            executor.executed.load(Ordering::Relaxed)
-                < (cycle as u64 + 1) * 50,
+            executor.executed.load(Ordering::Relaxed) < (cycle as u64 + 1) * 50,
             "executor call count growing unboundedly at cycle {}",
             cycle
         );

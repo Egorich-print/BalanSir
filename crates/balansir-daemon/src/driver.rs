@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use balansir_common::{Capabilities, DriverId, DriverError, HealthStatus};
+use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 
 /// Component driver trait (base for all drivers)
 #[async_trait]

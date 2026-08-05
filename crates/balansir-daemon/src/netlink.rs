@@ -1,6 +1,6 @@
 use balansir_common::DriverError;
-use rtnetlink::new_connection;
 use netlink_packet_route::link::LinkMessage;
+use rtnetlink::new_connection;
 use std::net::Ipv4Addr;
 
 /// Network interface management via netlink
@@ -28,7 +28,9 @@ impl NetlinkManager {
             .name(name.to_string())
             .execute()
             .await
-            .map_err(|e| DriverError::InterfaceError(format!("Failed to create interface {}: {}", name, e)))?;
+            .map_err(|e| {
+                DriverError::InterfaceError(format!("Failed to create interface {}: {}", name, e))
+            })?;
 
         Ok(())
     }
@@ -41,7 +43,9 @@ impl NetlinkManager {
             .del(link.index())
             .execute()
             .await
-            .map_err(|e| DriverError::InterfaceError(format!("Failed to delete interface {}: {}", name, e)))?;
+            .map_err(|e| {
+                DriverError::InterfaceError(format!("Failed to delete interface {}: {}", name, e))
+            })?;
 
         Ok(())
     }
@@ -55,7 +59,9 @@ impl NetlinkManager {
             .up()
             .execute()
             .await
-            .map_err(|e| DriverError::InterfaceError(format!("Failed to set interface {} up: {}", name, e)))?;
+            .map_err(|e| {
+                DriverError::InterfaceError(format!("Failed to set interface {} up: {}", name, e))
+            })?;
 
         Ok(())
     }
@@ -69,20 +75,29 @@ impl NetlinkManager {
             .down()
             .execute()
             .await
-            .map_err(|e| DriverError::InterfaceError(format!("Failed to set interface {} down: {}", name, e)))?;
+            .map_err(|e| {
+                DriverError::InterfaceError(format!("Failed to set interface {} down: {}", name, e))
+            })?;
 
         Ok(())
     }
 
     /// Add IP address to interface
-    pub async fn add_address(&self, name: &str, addr: Ipv4Addr, prefix_len: u8) -> Result<(), DriverError> {
+    pub async fn add_address(
+        &self,
+        name: &str,
+        addr: Ipv4Addr,
+        prefix_len: u8,
+    ) -> Result<(), DriverError> {
         let link = self.get_link_by_name(name).await?;
         self.handle
             .address()
             .add(link.index(), addr.into(), prefix_len)
             .execute()
             .await
-            .map_err(|e| DriverError::InterfaceError(format!("Failed to add address to {}: {}", name, e)))?;
+            .map_err(|e| {
+                DriverError::InterfaceError(format!("Failed to add address to {}: {}", name, e))
+            })?;
 
         Ok(())
     }
@@ -134,7 +149,9 @@ impl NetlinkManager {
         links
             .try_next()
             .await
-            .map_err(|e| DriverError::InterfaceError(format!("Failed to get link {}: {}", name, e)))?
+            .map_err(|e| {
+                DriverError::InterfaceError(format!("Failed to get link {}: {}", name, e))
+            })?
             .ok_or_else(|| DriverError::InterfaceError(format!("Interface {} not found", name)))
     }
 }

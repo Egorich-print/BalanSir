@@ -1,10 +1,7 @@
-
 #[cfg(test)]
 use balansir_common::ipc::{IpcConnection, IpcMessage, MsgType};
 #[cfg(test)]
-use balansir_common::{
-    Action, ActionResult, DecisionTrace, DriverId, MatcherStep,
-};
+use balansir_common::{Action, ActionResult, DecisionTrace, DriverId, MatcherStep};
 #[cfg(test)]
 use smallvec::SmallVec;
 #[cfg(test)]
@@ -131,8 +128,7 @@ async fn test_error_handling() {
         let request = conn_b.recv().await.unwrap();
         assert_eq!(request.msg_type, MsgType::StartDriver);
 
-        let response =
-            IpcMessage::response_error(request.correlation_id, "Driver not found");
+        let response = IpcMessage::response_error(request.correlation_id, "Driver not found");
         conn_b.send(&response).await.unwrap();
     });
 

@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use balansir_common::{
-    ActionRequest, ActionResult, ActionType, ExecutorCapabilities,
-};
+use balansir_common::{ActionRequest, ActionResult, ActionType, ExecutorCapabilities};
 
 /// Executor trait - defines how actions are applied to the kernel/drivers
 #[async_trait]
@@ -11,9 +9,7 @@ pub trait Executor: Send + Sync {
 
     /// Check if action type is supported
     fn supports(&self, action_type: ActionType) -> bool {
-        self.capabilities()
-            .supported_actions
-            .contains(&action_type)
+        self.capabilities().supported_actions.contains(&action_type)
     }
 
     /// Execute an action (desired state -> actual state)

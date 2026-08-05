@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use balansir_common::{
-    Capabilities, DriverId, DriverError, HealthStatus,
-};
+use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::driver::ComponentDriver;
@@ -77,22 +75,32 @@ impl B4Driver {
             B4Mode::Proxy => "proxy",
         };
 
-        let strategies: Vec<String> = self.config.strategies.iter().map(|s| {
-            match s {
+        let strategies: Vec<String> = self
+            .config
+            .strategies
+            .iter()
+            .map(|s| match s {
                 B4Strategy::Fragmentation { strategy } => {
-                    format!("{{\"type\": \"fragmentation\", \"strategy\": \"{}\"}}", strategy)
+                    format!(
+                        "{{\"type\": \"fragmentation\", \"strategy\": \"{}\"}}",
+                        strategy
+                    )
                 }
-                B4Strategy::TtlDisorientation => {
-                    "{{\"type\": \"ttl_disorientation\"}}".to_string()
-                }
+                B4Strategy::TtlDisorientation => "{{\"type\": \"ttl_disorientation\"}}".to_string(),
                 B4Strategy::FakePacket { seq_offset } => {
-                    format!("{{\"type\": \"fake_packet\", \"seq_offset\": {}}}", seq_offset)
+                    format!(
+                        "{{\"type\": \"fake_packet\", \"seq_offset\": {}}}",
+                        seq_offset
+                    )
                 }
                 B4Strategy::HostReplace { from, to } => {
-                    format!("{{\"type\": \"host_replace\", \"from\": \"{}\", \"to\": \"{}\"}}", from, to)
+                    format!(
+                        "{{\"type\": \"host_replace\", \"from\": \"{}\", \"to\": \"{}\"}}",
+                        from, to
+                    )
                 }
-            }
-        }).collect();
+            })
+            .collect();
 
         format!(
             r#"{{
@@ -102,7 +110,12 @@ impl B4Driver {
   "upstream": "{}"
 }}"#,
             mode,
-            self.config.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "),
+            self.config
+                .ports
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
             strategies.join(", "),
             self.config.upstream.as_deref().unwrap_or(""),
         )
@@ -120,8 +133,7 @@ impl B4Driver {
 
     fn start_process(&self, config_path: &str) -> Result<(), DriverError> {
         // Check if b4 binary exists
-        let b4_path = which::which("b4")
-            .map_err(|_| DriverError::BinaryNotFound("b4".into()))?;
+        let b4_path = which::which("b4").map_err(|_| DriverError::BinaryNotFound("b4".into()))?;
 
         // Start b4 process
         let child = std::process::Command::new(&b4_path)
@@ -233,7 +245,9 @@ mod tests {
         let driver = B4Driver::new(DriverId::Hysteria, config);
         assert_eq!(driver.id(), DriverId::Hysteria);
         assert_eq!(driver.name(), "B4");
-        assert!(driver.capabilities().contains(Capabilities::PACKET_PROCESSOR));
+        assert!(driver
+            .capabilities()
+            .contains(Capabilities::PACKET_PROCESSOR));
     }
 
     #[test]

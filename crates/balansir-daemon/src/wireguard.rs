@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use balansir_common::{
-    Capabilities, DriverId, DriverError, HealthStatus,
-};
+use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::driver::ComponentDriver;
@@ -55,7 +53,9 @@ impl WireGuardDriver {
             .map_err(|e| DriverError::StartFailed(format!("Failed to create interface: {}", e)))?;
 
         if !output.status.success() {
-            return Err(DriverError::InterfaceError(String::from_utf8_lossy(&output.stderr).to_string()));
+            return Err(DriverError::InterfaceError(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
         }
 
         Ok(())
@@ -69,17 +69,23 @@ impl WireGuardDriver {
                 .map_err(|e| DriverError::StartFailed(format!("Failed to set address: {}", e)))?;
 
             if !output.status.success() {
-                return Err(DriverError::InterfaceError(String::from_utf8_lossy(&output.stderr).to_string()));
+                return Err(DriverError::InterfaceError(
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                ));
             }
         }
 
         let output = std::process::Command::new("ip")
             .args(["link", "set", &self.config.interface, "up"])
             .output()
-            .map_err(|e| DriverError::StartFailed(format!("Failed to bring up interface: {}", e)))?;
+            .map_err(|e| {
+                DriverError::StartFailed(format!("Failed to bring up interface: {}", e))
+            })?;
 
         if !output.status.success() {
-            return Err(DriverError::InterfaceError(String::from_utf8_lossy(&output.stderr).to_string()));
+            return Err(DriverError::InterfaceError(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
         }
 
         Ok(())

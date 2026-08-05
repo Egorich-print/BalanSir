@@ -70,11 +70,11 @@ pub struct ResourcesConfig {
 
 impl Profile {
     pub fn load(path: &Path) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read profile: {}", e))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("Failed to read profile: {}", e))?;
 
-        let profile: Profile = toml::from_str(&content)
-            .map_err(|e| format!("Failed to parse profile: {}", e))?;
+        let profile: Profile =
+            toml::from_str(&content).map_err(|e| format!("Failed to parse profile: {}", e))?;
 
         profile.validate()?;
         Ok(profile)

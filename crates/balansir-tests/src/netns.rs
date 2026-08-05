@@ -1,12 +1,9 @@
 //! Network namespace integration tests
-//! 
+//!
 //! These tests verify that the executor can apply real nftables rules
 //! in an isolated network namespace without affecting the host.
 
-use balansir_common::{
-    Action, ActionRequest, ActionResult, ActionType,
-    ExecutorCapabilities,
-};
+use balansir_common::{Action, ActionRequest, ActionResult, ActionType, ExecutorCapabilities};
 
 /// Nftables executor that uses real nft commands
 pub struct NftablesExecutor {
@@ -48,7 +45,14 @@ impl NftablesExecutor {
 
     pub fn setup(&self) -> Result<(), String> {
         self.run_nft(&["add", "table", "inet", &self.table_name])?;
-        self.run_nft(&["add", "chain", "inet", &self.table_name, "forward", "{ type filter hook forward priority 0; }"])?;
+        self.run_nft(&[
+            "add",
+            "chain",
+            "inet",
+            &self.table_name,
+            "forward",
+            "{ type filter hook forward priority 0; }",
+        ])?;
         Ok(())
     }
 
@@ -76,30 +80,47 @@ impl balansir_executor::executor::Executor for NftablesExecutor {
             Action::Block => {
                 let rule = format!(
                     "ip saddr {}.{}.{}.{}/32 ip daddr {}.{}.{}.{}/32 drop",
-                    request.src_ip[0], request.src_ip[1], request.src_ip[2], request.src_ip[3],
-                    request.dst_ip[0], request.dst_ip[1], request.dst_ip[2], request.dst_ip[3]
+                    request.src_ip[0],
+                    request.src_ip[1],
+                    request.src_ip[2],
+                    request.src_ip[3],
+                    request.dst_ip[0],
+                    request.dst_ip[1],
+                    request.dst_ip[2],
+                    request.dst_ip[3]
                 );
                 self.run_nft(&["add", "rule", "inet", &self.table_name, "forward", &rule])
             }
             Action::Reject => {
                 let rule = format!(
                     "ip saddr {}.{}.{}.{}/32 ip daddr {}.{}.{}.{}/32 reject",
-                    request.src_ip[0], request.src_ip[1], request.src_ip[2], request.src_ip[3],
-                    request.dst_ip[0], request.dst_ip[1], request.dst_ip[2], request.dst_ip[3]
+                    request.src_ip[0],
+                    request.src_ip[1],
+                    request.src_ip[2],
+                    request.src_ip[3],
+                    request.dst_ip[0],
+                    request.dst_ip[1],
+                    request.dst_ip[2],
+                    request.dst_ip[3]
                 );
                 self.run_nft(&["add", "rule", "inet", &self.table_name, "forward", &rule])
             }
             Action::Mark { fwmark } => {
                 let rule = format!(
                     "ip saddr {}.{}.{}.{}/32 mark set {}",
-                    request.src_ip[0], request.src_ip[1], request.src_ip[2], request.src_ip[3],
+                    request.src_ip[0],
+                    request.src_ip[1],
+                    request.src_ip[2],
+                    request.src_ip[3],
                     fwmark
                 );
                 self.run_nft(&["add", "rule", "inet", &self.table_name, "forward", &rule])
             }
-            _ => return ActionResult::Unsupported {
-                action_type: request.action.action_type(),
-            },
+            _ => {
+                return ActionResult::Unsupported {
+                    action_type: request.action.action_type(),
+                }
+            }
         };
 
         let elapsed = start.elapsed().as_micros() as u64;

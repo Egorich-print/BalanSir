@@ -108,11 +108,13 @@ mod tests {
             ReconcilerConfig::default(),
         );
 
-        reconciler.add_rule(balansir_common::DesiredRule {
-            id: 1,
-            action: balansir_common::Action::Block,
-            priority: 100,
-        }).await;
+        reconciler
+            .add_rule(balansir_common::DesiredRule {
+                id: 1,
+                action: balansir_common::Action::Block,
+                priority: 100,
+            })
+            .await;
 
         reconciler.save_to_store(&store).await.unwrap();
 

@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use balansir_common::{
-    Capabilities, DriverId, DriverError, HealthStatus,
-};
+use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 use serde::{Deserialize, Serialize};
 use std::process::Child;
 
@@ -98,8 +96,12 @@ impl XrayDriver {
 
     fn stop_process(&mut self) -> Result<(), DriverError> {
         if let Some(mut child) = self.child.take() {
-            child.kill().map_err(|e| DriverError::StopFailed(format!("Failed to kill xray: {}", e)))?;
-            child.wait().map_err(|e| DriverError::StopFailed(format!("Failed to wait xray: {}", e)))?;
+            child
+                .kill()
+                .map_err(|e| DriverError::StopFailed(format!("Failed to kill xray: {}", e)))?;
+            child
+                .wait()
+                .map_err(|e| DriverError::StopFailed(format!("Failed to wait xray: {}", e)))?;
         }
 
         if let Some(ref path) = self.config_path {

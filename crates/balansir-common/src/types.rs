@@ -226,15 +226,10 @@ pub enum ActionResult {
     },
 
     /// Action should be retried later
-    Retry {
-        after_ms: u32,
-        reason: String,
-    },
+    Retry { after_ms: u32, reason: String },
 
     /// Action type is not supported by this executor
-    Unsupported {
-        action_type: ActionType,
-    },
+    Unsupported { action_type: ActionType },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,7 +261,7 @@ pub struct DesiredState {
     pub drivers: Vec<DesiredDriver>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesiredRule {
     pub id: u32,
     pub action: Action,

@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use balansir_common::{
-    Capabilities, DriverId, DriverError, HealthStatus,
-};
+use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::driver::ComponentDriver;
@@ -101,11 +99,17 @@ impl Hysteria2Driver {
             String::new()
         };
 
-        let up_bw = self.config.bandwidth.up_mbps
+        let up_bw = self
+            .config
+            .bandwidth
+            .up_mbps
             .map(|v| format!("{} Mbps", v))
             .unwrap_or_else(|| "obfs".to_string());
 
-        let down_bw = self.config.bandwidth.down_mbps
+        let down_bw = self
+            .config
+            .bandwidth
+            .down_mbps
             .map(|v| format!("{} Mbps", v))
             .unwrap_or_else(|| "obfs".to_string());
 
@@ -162,15 +166,37 @@ impl Hysteria2Driver {
 }}"#,
             self.config.server,
             self.config.password,
-            self.config.obfs.as_ref().map(|o| o.password.as_str()).unwrap_or(""),
+            self.config
+                .obfs
+                .as_ref()
+                .map(|o| o.password.as_str())
+                .unwrap_or(""),
             up_bw,
             down_bw,
             self.config.server.split(':').next().unwrap_or(""),
-            self.config.server.split(':').next_back().unwrap_or("443").parse::<u16>().unwrap_or(443),
+            self.config
+                .server
+                .split(':')
+                .next_back()
+                .unwrap_or("443")
+                .parse::<u16>()
+                .unwrap_or(443),
             self.config.password,
-            self.config.obfs.as_ref().map(|o| o.password.as_str()).unwrap_or(""),
-            self.config.tls.as_ref().and_then(|t| t.sni.as_deref()).unwrap_or(""),
-            self.config.tls.as_ref().map(|t| t.insecure).unwrap_or(false),
+            self.config
+                .obfs
+                .as_ref()
+                .map(|o| o.password.as_str())
+                .unwrap_or(""),
+            self.config
+                .tls
+                .as_ref()
+                .and_then(|t| t.sni.as_deref())
+                .unwrap_or(""),
+            self.config
+                .tls
+                .as_ref()
+                .map(|t| t.insecure)
+                .unwrap_or(false),
         )
     }
 

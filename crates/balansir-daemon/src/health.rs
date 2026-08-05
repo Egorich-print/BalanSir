@@ -84,10 +84,7 @@ impl CircuitBreaker {
 
         if inner.failure_count >= self.config.failure_threshold {
             if inner.state != CircuitState::Open {
-                tracing::warn!(
-                    failures = inner.failure_count,
-                    "Circuit breaker opened"
-                );
+                tracing::warn!(failures = inner.failure_count, "Circuit breaker opened");
             }
             inner.state = CircuitState::Open;
         }

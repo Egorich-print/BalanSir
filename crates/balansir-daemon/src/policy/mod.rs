@@ -32,7 +32,9 @@ impl PolicyEngine {
     pub fn new(rules: Vec<PolicyRule>) -> Self {
         let mut sorted_rules = rules;
         sorted_rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
-        Self { rules: sorted_rules }
+        Self {
+            rules: sorted_rules,
+        }
     }
 
     /// Evaluate packet context and return decision trace

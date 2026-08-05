@@ -88,24 +88,21 @@ impl Metrics {
             health_status.clone(),
         );
 
-        let reconciliation_duration_seconds =
-            Histogram::new(exponential_buckets(0.001, 2.0, 10));
+        let reconciliation_duration_seconds = Histogram::new(exponential_buckets(0.001, 2.0, 10));
         registry.register(
             "balansir_reconciliation_duration_seconds",
             "Duration of reconciliation cycles in seconds",
             reconciliation_duration_seconds.clone(),
         );
 
-        let policy_evaluation_duration_micros =
-            Histogram::new(exponential_buckets(1.0, 2.0, 10));
+        let policy_evaluation_duration_micros = Histogram::new(exponential_buckets(1.0, 2.0, 10));
         registry.register(
             "balansir_policy_evaluation_duration_micros",
             "Duration of policy evaluations in microseconds",
             policy_evaluation_duration_micros.clone(),
         );
 
-        let executor_operation_duration_micros =
-            Histogram::new(exponential_buckets(10.0, 2.0, 10));
+        let executor_operation_duration_micros = Histogram::new(exponential_buckets(10.0, 2.0, 10));
         registry.register(
             "balansir_executor_operation_duration_micros",
             "Duration of executor operations in microseconds",
@@ -188,7 +185,8 @@ impl Metrics {
 
     /// Record executor operation duration
     pub fn record_executor_operation_duration(&self, microseconds: f64) {
-        self.executor_operation_duration_micros.observe(microseconds);
+        self.executor_operation_duration_micros
+            .observe(microseconds);
     }
 }
 

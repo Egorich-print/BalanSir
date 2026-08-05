@@ -11,8 +11,8 @@ use balansir_common::DesiredState;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
@@ -125,13 +125,17 @@ pub async fn get_desired(State(state): State<Arc<ApiState>>) -> impl IntoRespons
         DesiredState::default()
     };
 
-    let rules: Vec<serde_json::Value> = desired.rules.iter().map(|r| {
-        serde_json::json!({
-            "id": r.id,
-            "action": format!("{:?}", r.action),
-            "priority": r.priority,
+    let rules: Vec<serde_json::Value> = desired
+        .rules
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "action": format!("{:?}", r.action),
+                "priority": r.priority,
+            })
         })
-    }).collect();
+        .collect();
 
     Json(serde_json::json!({
         "rules": rules,
@@ -140,14 +144,15 @@ pub async fn get_desired(State(state): State<Arc<ApiState>>) -> impl IntoRespons
 }
 
 /// Set desired state
-pub async fn set_desired(
-    State(state): State<Arc<ApiState>>,
-) -> impl IntoResponse {
+pub async fn set_desired(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     if let Some(ref reconciler) = state.reconciler {
         reconciler.add_event("desired_updated", "via API").await;
     }
 
-    (StatusCode::OK, Json(serde_json::json!({"ok": true, "message": "Use POST with JSON body"})))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "message": "Use POST with JSON body"})),
+    )
 }
 
 /// Get drift status
