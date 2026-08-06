@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/balansir-common",
+    "crates/balansir-control",
     "crates/balansir-daemon",
     "crates/balansir-executor",
     "crates/balansir-api",

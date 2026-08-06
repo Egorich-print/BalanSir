@@ -221,11 +221,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "balansir-control"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "balansir-common",
+ "chrono",
+ "postcard",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "balansir-daemon"
 version = "0.4.0"
 dependencies = [
  "async-trait",
  "balansir-common",
+ "balansir-control",
  "netlink-packet-route",
  "postcard",
  "proptest",
@@ -238,6 +257,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "which",
 ]
 
@@ -2026,6 +2046,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",
