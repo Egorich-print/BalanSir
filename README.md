@@ -5,6 +5,10 @@
 <h1 align="center">BalanSir</h1>
 
 <p align="center">
+  <a href="README.ru.md">Русский</a>
+</p>
+
+<p align="center">
   <strong>Network Policy Engine for Linux Routers and Gateways</strong>
 </p>
 
