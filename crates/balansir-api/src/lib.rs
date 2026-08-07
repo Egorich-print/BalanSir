@@ -1,5 +1,7 @@
 use axum::{
-    response::IntoResponse,
+    extract::{Request, State},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -7,12 +9,14 @@ use serde::Serialize;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
+pub mod auth;
 pub mod handlers;
 
 /// API state
 pub struct ApiState {
     pub metrics: Arc<balansir_common::metrics::SharedMetrics>,
     pub reconciler: Option<Arc<crate::handlers::ReconcilerHandle>>,
+    pub api_token: Option<Arc<str>>,
 }
 
 impl ApiState {
@@ -20,6 +24,7 @@ impl ApiState {
         Self {
             metrics,
             reconciler: None,
+            api_token: auth::token_from_env(),
         }
     }
 }
@@ -93,7 +98,10 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         // Events
         .route("/events", get(handlers::get_events))
         .route("/events/stream", get(handlers::events_stream))
-        .with_state(state)
+        .with_state(state.clone())
+        // Token auth is opt-in: only enforced when BALANSIR_API_TOKEN is set,
+        // so it does not break health probes or local unauthenticated installs.
+        .layer(middleware::from_fn_with_state(state, auth_middleware))
 }
 
 /// Index page
@@ -116,15 +124,29 @@ async fn index() -> impl IntoResponse {
 pub async fn start_server(state: Arc<ApiState>, port: u16) -> Result<(), String> {
     let app = create_router(state);
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
+    // Bind loopback by default; never expose the unauthenticated management
+    // API on all interfaces out of the box.
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
         .await
         .map_err(|e| format!("Failed to bind: {}", e))?;
 
-    tracing::info!("API server listening on port {}", port);
+    tracing::info!("API server listening on 127.0.0.1:{}", port);
 
     axum::serve(listener, app)
         .await
         .map_err(|e| format!("Server error: {}", e))
+}
+
+/// Reject requests without a valid bearer token when auth is enabled.
+async fn auth_middleware(
+    State(state): State<Arc<ApiState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Err(response) = auth::verify_header(request.headers(), &state.api_token) {
+        return *response;
+    }
+    next.run(request).await
 }
 
 #[cfg(test)]
@@ -151,5 +173,44 @@ mod tests {
 
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["name"], "BalanSir API");
+    }
+
+    #[tokio::test]
+    async fn test_auth_rejects_wrong_token() {
+        let mut state = ApiState::new(Arc::new(balansir_common::metrics::SharedMetrics::new()));
+        state.api_token = Some(Arc::from("sekret"));
+        let state = Arc::new(state);
+        let app = create_router(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+
+        let no_auth = client
+            .get(format!("http://{}/", addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_auth.status(), StatusCode::UNAUTHORIZED);
+
+        let bad = client
+            .get(format!("http://{}/", addr))
+            .bearer_auth("wrong")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+
+        let ok = client
+            .get(format!("http://{}/", addr))
+            .bearer_auth("sekret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
     }
 }
