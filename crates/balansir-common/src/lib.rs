@@ -3,6 +3,7 @@ pub mod error;
 pub mod event_bus;
 pub mod ipc;
 pub mod metrics;
+pub mod paths;
 pub mod plan;
 pub mod profile;
 pub mod resources;

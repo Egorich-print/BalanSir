@@ -5,6 +5,10 @@ use std::net::SocketAddr;
 
 use crate::driver::ComponentDriver;
 
+fn ss_bin() -> std::path::PathBuf {
+    balansir_common::paths::resolve_bin_or_default("ss")
+}
+
 /// DNS forwarder configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsForwarderConfig {
@@ -144,7 +148,7 @@ impl ComponentDriver for DnsForwarderDriver {
         }
 
         // Check if port is listening
-        let output = std::process::Command::new("ss")
+        let output = std::process::Command::new(ss_bin())
             .args(["-tlnp", &format!("sport = :{}", self.config.listen.port())])
             .output();
 

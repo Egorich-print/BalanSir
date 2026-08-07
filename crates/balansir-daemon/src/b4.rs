@@ -132,7 +132,8 @@ impl B4Driver {
 
     fn start_process(&self, config_path: &str) -> Result<(), DriverError> {
         // Check if b4 binary exists
-        let b4_path = which::which("b4").map_err(|_| DriverError::BinaryNotFound("b4".into()))?;
+        let b4_path = balansir_common::paths::resolve_bin("b4")
+            .ok_or_else(|| DriverError::BinaryNotFound("b4".into()))?;
 
         // Start b4 process
         let child = std::process::Command::new(&b4_path)
@@ -150,9 +151,10 @@ impl B4Driver {
 
     fn stop_process(&self) -> Result<(), DriverError> {
         // Kill b4 process
-        let output = std::process::Command::new("pkill")
-            .args(["-f", &format!("balansir-b4-{}", self.id.as_u32())])
-            .output();
+        let output =
+            std::process::Command::new(balansir_common::paths::resolve_bin_or_default("pkill"))
+                .args(["-f", &format!("balansir-b4-{}", self.id.as_u32())])
+                .output();
 
         match output {
             Ok(_) => Ok(()),
@@ -216,9 +218,10 @@ impl ComponentDriver for B4Driver {
         }
 
         // Check if process is still running
-        let output = std::process::Command::new("pgrep")
-            .args(["-f", &format!("balansir-b4-{}", self.id.as_u32())])
-            .output();
+        let output =
+            std::process::Command::new(balansir_common::paths::resolve_bin_or_default("pgrep"))
+                .args(["-f", &format!("balansir-b4-{}", self.id.as_u32())])
+                .output();
 
         match output {
             Ok(out) if out.status.success() => HealthStatus::Healthy,

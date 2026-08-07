@@ -72,9 +72,9 @@ impl XrayDriver {
     }
 
     fn start_process(&mut self, config_path: &str) -> Result<(), DriverError> {
-        let xray_path = which::which("xray")
-            .or_else(|_| which::which("xray-core"))
-            .map_err(|_| DriverError::BinaryNotFound("xray".into()))?;
+        let xray_path = balansir_common::paths::resolve_bin("xray")
+            .or_else(|| balansir_common::paths::resolve_bin("xray-core"))
+            .ok_or_else(|| DriverError::BinaryNotFound("xray".into()))?;
 
         // Go runtime memory guardrails
         // GOMEMLIMIT: Hard memory limit (triggers GC before OOM)
@@ -179,9 +179,10 @@ impl ComponentDriver for XrayDriver {
         }
 
         // Check if process is still running
-        let output = std::process::Command::new("pgrep")
-            .args(["-f", &format!("balansir-xray-{}", self.id.as_u32())])
-            .output();
+        let output =
+            std::process::Command::new(balansir_common::paths::resolve_bin_or_default("pgrep"))
+                .args(["-f", &format!("balansir-xray-{}", self.id.as_u32())])
+                .output();
 
         match output {
             Ok(out) if out.status.success() => HealthStatus::Healthy,

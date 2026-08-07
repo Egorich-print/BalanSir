@@ -215,9 +215,9 @@ impl Hysteria2Driver {
 
     fn start_process(&self, config_path: &str) -> Result<(), DriverError> {
         // Check if hysteria binary exists
-        let hysteria_path = which::which("hysteria")
-            .or_else(|_| which::which("hysteria2"))
-            .map_err(|_| DriverError::BinaryNotFound("hysteria".into()))?;
+        let hysteria_path = balansir_common::paths::resolve_bin("hysteria")
+            .or_else(|| balansir_common::paths::resolve_bin("hysteria2"))
+            .ok_or_else(|| DriverError::BinaryNotFound("hysteria".into()))?;
 
         // Go runtime memory guardrails
         // GOMEMLIMIT: Hard memory limit (triggers GC before OOM)
@@ -239,9 +239,10 @@ impl Hysteria2Driver {
 
     fn stop_process(&self) -> Result<(), DriverError> {
         // Kill hysteria process
-        let output = std::process::Command::new("pkill")
-            .args(["-f", &format!("balansir-hysteria-{}", self.id.as_u32())])
-            .output();
+        let output =
+            std::process::Command::new(balansir_common::paths::resolve_bin_or_default("pkill"))
+                .args(["-f", &format!("balansir-hysteria-{}", self.id.as_u32())])
+                .output();
 
         match output {
             Ok(_) => Ok(()),
@@ -306,9 +307,10 @@ impl ComponentDriver for Hysteria2Driver {
         }
 
         // Check if process is still running
-        let output = std::process::Command::new("pgrep")
-            .args(["-f", &format!("balansir-hysteria-{}", self.id.as_u32())])
-            .output();
+        let output =
+            std::process::Command::new(balansir_common::paths::resolve_bin_or_default("pgrep"))
+                .args(["-f", &format!("balansir-hysteria-{}", self.id.as_u32())])
+                .output();
 
         match output {
             Ok(out) if out.status.success() => HealthStatus::Healthy,

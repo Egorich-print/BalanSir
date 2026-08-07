@@ -218,6 +218,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "which",
 ]
 
 [[package]]
@@ -259,7 +260,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "which",
 ]
 
 [[package]]

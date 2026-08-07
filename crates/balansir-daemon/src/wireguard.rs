@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::driver::ComponentDriver;
 
+fn ip_bin() -> std::path::PathBuf {
+    balansir_common::paths::resolve_bin_or_default("ip")
+}
+
 /// WireGuard configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireGuardConfig {
@@ -47,7 +51,7 @@ impl WireGuardDriver {
     }
 
     fn create_interface(&self) -> Result<(), DriverError> {
-        let output = std::process::Command::new("ip")
+        let output = std::process::Command::new(ip_bin())
             .args(["link", "add", &self.config.interface, "type", "wireguard"])
             .output()
             .map_err(|e| DriverError::StartFailed(format!("Failed to create interface: {}", e)))?;
@@ -63,7 +67,7 @@ impl WireGuardDriver {
 
     fn configure_interface(&self) -> Result<(), DriverError> {
         if let Some(ref addr) = self.config.address {
-            let output = std::process::Command::new("ip")
+            let output = std::process::Command::new(ip_bin())
                 .args(["addr", "add", addr, "dev", &self.config.interface])
                 .output()
                 .map_err(|e| DriverError::StartFailed(format!("Failed to set address: {}", e)))?;
@@ -75,7 +79,7 @@ impl WireGuardDriver {
             }
         }
 
-        let output = std::process::Command::new("ip")
+        let output = std::process::Command::new(ip_bin())
             .args(["link", "set", &self.config.interface, "up"])
             .output()
             .map_err(|e| {
@@ -92,7 +96,7 @@ impl WireGuardDriver {
     }
 
     fn delete_interface(&self) -> Result<(), DriverError> {
-        let output = std::process::Command::new("ip")
+        let output = std::process::Command::new(ip_bin())
             .args(["link", "del", &self.config.interface])
             .output()
             .map_err(|e| DriverError::StopFailed(format!("Failed to delete interface: {}", e)))?;

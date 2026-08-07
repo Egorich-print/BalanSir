@@ -1,6 +1,12 @@
-use balansir_common::error::Result;
+use balansir_common::error::{Error, Result};
 use std::process::Command;
 use tracing::{debug, info};
+
+/// Absolute path to the `nft` binary, resolved from standard locations.
+fn nft_bin() -> Result<std::path::PathBuf> {
+    balansir_common::paths::resolve_bin("nft")
+        .ok_or_else(|| Error::Misconfiguration("nft binary not found".into()))
+}
 
 pub struct NftablesBackend {
     table_name: String,
@@ -17,7 +23,7 @@ impl NftablesBackend {
 
     pub fn init(&self) -> Result<()> {
         // Create table if not exists
-        let output = Command::new("nft")
+        let output = Command::new(nft_bin()?)
             .args(["add", "table", "inet", &self.table_name])
             .output();
 
@@ -32,7 +38,7 @@ impl NftablesBackend {
         }
 
         // Create chain if not exists
-        let output = Command::new("nft")
+        let output = Command::new(nft_bin()?)
             .args(["add", "chain", "inet", &self.table_name, &self.chain_name])
             .output();
 
@@ -49,7 +55,7 @@ impl NftablesBackend {
     }
 
     pub fn add_rule(&self, rule: &str) -> Result<()> {
-        let output = Command::new("nft")
+        let output = Command::new(nft_bin()?)
             .args([
                 "add",
                 "rule",
@@ -73,7 +79,7 @@ impl NftablesBackend {
     }
 
     pub fn flush(&self) -> Result<()> {
-        let output = Command::new("nft")
+        let output = Command::new(nft_bin()?)
             .args(["flush", "chain", "inet", &self.table_name, &self.chain_name])
             .output()?;
 
@@ -90,7 +96,7 @@ impl NftablesBackend {
     }
 
     pub fn list_rules(&self) -> Result<Vec<String>> {
-        let output = Command::new("nft")
+        let output = Command::new(nft_bin()?)
             .args(["list", "chain", "inet", &self.table_name, &self.chain_name])
             .output()?;
 
