@@ -6,7 +6,18 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 pub const MAX_PAYLOAD_SIZE: usize = 65536;
-pub const ALLOWED_UIDS: &[u32] = &[0]; // Only root by default
+pub const DEFAULT_ALLOWED_UIDS: &[u32] = &[0]; // Only root by default
+
+/// Allowed peer UIDs, from $BALANSIR_ALLOWED_UIDS (comma-separated) or default.
+pub fn allowed_uids() -> Vec<u32> {
+    match std::env::var("BALANSIR_ALLOWED_UIDS") {
+        Ok(s) => s
+            .split(',')
+            .filter_map(|p| p.trim().parse::<u32>().ok())
+            .collect(),
+        Err(_) => DEFAULT_ALLOWED_UIDS.to_vec(),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MsgType {
@@ -75,11 +86,9 @@ pub fn validate_peer_cred(stream: &UnixStream) -> Result<u32> {
         return Err(Error::IpcViolation("Failed to get peer creds".into()));
     }
 
-    if !ALLOWED_UIDS.contains(&uid) {
-        return Err(Error::Unauthorized {
-            uid,
-            allowed: ALLOWED_UIDS.to_vec(),
-        });
+    let allowed = allowed_uids();
+    if !allowed.contains(&uid) {
+        return Err(Error::Unauthorized { uid, allowed });
     }
 
     Ok(uid)
@@ -115,6 +124,44 @@ impl IpcServerConnection {
     /// Send a message
     pub async fn send(&mut self, msg: &IpcMessage) -> Result<()> {
         self.inner.send(msg).await
+    }
+}
+
+/// Client-side connection wrapper with mutual authentication.
+pub struct IpcClientConnection {
+    inner: IpcConnection,
+    peer_uid: u32,
+}
+
+impl IpcClientConnection {
+    /// Connect to a server and validate its credentials (SO_PEERCRED).
+    pub async fn connect(path: &str) -> Result<Self> {
+        let stream = tokio::net::UnixStream::connect(path).await?;
+        let peer_uid = validate_peer_cred(&stream)?;
+        Ok(Self {
+            inner: IpcConnection::new(stream),
+            peer_uid,
+        })
+    }
+
+    /// Get connected server UID
+    pub fn peer_uid(&self) -> u32 {
+        self.peer_uid
+    }
+
+    /// Receive a message
+    pub async fn recv(&mut self) -> Result<IpcMessage> {
+        self.inner.recv().await
+    }
+
+    /// Send a message
+    pub async fn send(&mut self, msg: &IpcMessage) -> Result<()> {
+        self.inner.send(msg).await
+    }
+
+    /// Send a request and await the matching response.
+    pub async fn request(&mut self, msg_type: MsgType, payload: Vec<u8>) -> Result<IpcMessage> {
+        self.inner.request(msg_type, payload).await
     }
 }
 

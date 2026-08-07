@@ -38,6 +38,11 @@ Daemon создавал IPC-сокет в `/tmp/balansir-test/daemon.sock`, то
    `/run/balansir/<driver>-<id>.json` с `0600` и затиранием содержимого перед
    удалением.
 
+5. **Взаимная аутентификация IPC** (задача 1.4): и server
+   (`IpcServerConnection::accept`), и client (`IpcClientConnection::connect`)
+   проверяют peer creds через `SO_PEERCRED`. Разрешённые UID берутся из
+   `BALANSIR_ALLOWED_UIDS` (env), по умолчанию `[root]`.
+
 ## Consequences
 
 - **Security**: сокет нечитаем/незаписуем для других пользователей; stale-файл

@@ -1,7 +1,6 @@
 use balansir_common::error::Error;
-use balansir_common::ipc::{IpcConnection, MsgType};
+use balansir_common::ipc::{IpcClientConnection, MsgType};
 use balansir_common::Result;
-use tokio::net::UnixStream;
 use tracing::{error, info};
 
 const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
@@ -28,9 +27,12 @@ async fn main() -> Result<()> {
 
     info!("BalanSir Executor starting (UID 0)");
 
-    let stream = UnixStream::connect(SOCKET_PATH).await?;
-    let mut conn = IpcConnection::new(stream);
-    info!("Connected to daemon at {}", SOCKET_PATH);
+    let mut conn = IpcClientConnection::connect(SOCKET_PATH).await?;
+    info!(
+        "Connected to daemon at {} (peer UID {})",
+        SOCKET_PATH,
+        conn.peer_uid()
+    );
 
     let response = conn.request(MsgType::HealthCheck, Vec::new()).await?;
     info!("Health check response: {:?}", response.msg_type);
