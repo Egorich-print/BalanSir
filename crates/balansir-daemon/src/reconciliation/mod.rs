@@ -1,19 +1,17 @@
 pub mod bootstrap;
-pub use balansir_common::diff;
-pub use balansir_common::plan;
-pub use balansir_common::{ActualRule, ActualState};
 
 use balansir_common::plan::{ReconciliationOperation, ReconciliationPlan};
 use balansir_common::{
-    ActionRequest, ActionResult, DesiredRule, DesiredState, Snapshot, StateDiff,
+    ActionRequest, ActionResult, ActualRule, ActualState, DesiredRule, DesiredState, Snapshot,
+    StateDiff,
 };
-use balansir_control::{Coordinator, Rollback};
 use balansir_control::planner::BasicPlanner;
 use balansir_control::snapshot_store::MemorySnapshotStore;
 use balansir_control::traits::{DesiredProvider, EventSink, Executor, StateProvider};
 use balansir_control::{
     ControlEvent, ControlResult, CoordinatorConfig, ExecutionReport, ReconcileReason,
 };
+use balansir_control::{Coordinator, Rollback};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;

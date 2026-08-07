@@ -4,9 +4,9 @@
 //! - 24h reconciliation loop simulation with rule churn
 //! - Memory leak detection (executor call count stability)
 
+use balansir_common::diff::StateDiff;
 use balansir_common::{Action, ActionRequest, ActionResult, DesiredRule, DesiredState};
 use balansir_daemon::policy::{Matcher, PacketContext, PolicyEngine, PolicyRule};
-use balansir_daemon::reconciliation::diff::StateDiff;
 use balansir_daemon::reconciliation::{ExecutorAdapter, Reconciler, ReconcilerConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
