@@ -1,11 +1,14 @@
 use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
 use balansir_common::Result;
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use tokio::net::UnixListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn};
 
-const SOCKET_PATH: &str = "/tmp/balansir-test/daemon.sock";
+const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
+const SOCKET_PERMS: u32 = 0o600;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -20,12 +23,11 @@ async fn main() -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    if socket_path.exists() {
-        tokio::fs::remove_file(socket_path).await?;
-    }
+    remove_stale_socket(socket_path)?;
 
     let listener = UnixListener::bind(socket_path)?;
-    info!("Listening on {}", SOCKET_PATH);
+    tokio::fs::set_permissions(socket_path, Permissions::from_mode(SOCKET_PERMS)).await?;
+    info!("Listening on {} (mode {:#o})", SOCKET_PATH, SOCKET_PERMS);
 
     // Setup signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -108,4 +110,35 @@ fn handle_message(msg: &IpcMessage) -> IpcMessage {
             IpcMessage::response_error(msg.correlation_id, "Unknown message type")
         }
     }
+}
+
+/// Safely remove a stale socket file. Refuses symlinks and sockets owned by
+/// another UID, so an attacker-controlled file cannot be clobbered or trick us
+/// into unlinking an unrelated path.
+fn remove_stale_socket(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let md = match std::fs::symlink_metadata(path) {
+        Ok(md) => md,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+
+    if !md.file_type().is_socket() {
+        return Err(balansir_common::error::Error::Misconfiguration(format!(
+            "refusing to remove non-socket at {}",
+            path.display()
+        )));
+    }
+
+    if md.uid() != unsafe { libc::geteuid() } {
+        return Err(balansir_common::error::Error::IpcViolation(format!(
+            "stale socket at {} owned by different UID",
+            path.display()
+        )));
+    }
+
+    std::fs::remove_file(path)?;
+    warn!("Removed stale socket at {}", path.display());
+    Ok(())
 }

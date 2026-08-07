@@ -245,6 +245,7 @@ dependencies = [
  "async-trait",
  "balansir-common",
  "balansir-control",
+ "libc",
  "netlink-packet-route",
  "postcard",
  "proptest",

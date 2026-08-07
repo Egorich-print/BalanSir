@@ -4,7 +4,7 @@ Documentation=https://github.com/balansir/balansir
 
 [Socket]
 ListenStream=/run/balansir/daemon.sock
-SocketMode=0660
+SocketMode=0600
 SocketUser=balansir
 SocketGroup=balansir
 
