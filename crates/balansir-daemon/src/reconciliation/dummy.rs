@@ -36,4 +36,12 @@ impl ExecutorAdapter for DummyExecutorAdapter {
     async fn rule_count(&self) -> u32 {
         self.count.load(Ordering::Relaxed)
     }
+
+    async fn remove_rule(&self, _rule_id: u32) -> ActionResult {
+        self.count.fetch_sub(1, Ordering::Relaxed);
+        ActionResult::Applied {
+            execution_time_us: 50,
+            rule_id: Some(_rule_id),
+        }
+    }
 }

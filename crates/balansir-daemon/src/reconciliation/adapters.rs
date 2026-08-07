@@ -132,17 +132,137 @@ impl DaemonExecutorAdapter {
     }
 }
 
-/// Restores the shared actual-state handle to its pre-execution snapshot.
+/// Restores the shared actual-state handle to its pre-execution snapshot and
+/// reverts mechanism-level changes by issuing removals for every rule the
+/// failed execution added beyond the snapshot, then restoring the in-memory view.
 pub struct DaemonRollback {
     pub actual: Arc<tokio::sync::Mutex<ActualState>>,
+    pub executor: Arc<dyn ExecutorAdapter>,
 }
 
 #[async_trait::async_trait]
 impl Rollback for DaemonRollback {
     async fn rollback(&self, snapshot: &Snapshot) -> ControlResult<()> {
-        warn!("Restoring actual state from pre-execution snapshot");
+        warn!("Reverting kernel and state to pre-execution snapshot");
+
+        // 1. Rules added during the failed execution: present in live actual,
+        //    absent from the pre-execution snapshot.
+        let live = self.actual.lock().await;
+        let snapshot_ids: Vec<u32> = snapshot.actual.active_rules.iter().map(|r| r.id).collect();
+        let to_revert: Vec<u32> = live
+            .active_rules
+            .iter()
+            .map(|r| r.id)
+            .filter(|id| !snapshot_ids.contains(id))
+            .collect();
+        drop(live);
+
+        // 2. Mechanism-level undo of each appended rule.
+        for rule_id in to_revert {
+            if matches!(
+                self.executor.remove_rule(rule_id).await,
+                ActionResult::Failed { .. }
+            ) {
+                warn!(rule_id, "failed to revert rule via executor");
+            }
+        }
+
+        // 3. Restore the in-memory view from the snapshot.
         let mut actual = self.actual.lock().await;
         *actual = snapshot.actual.clone();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use balansir_common::plan::PlanMetadata;
+    use std::sync::atomic::AtomicU32;
+
+    #[derive(Default)]
+    struct RevertRecorder {
+        executed: AtomicU32,
+        removals: std::sync::Mutex<Vec<u32>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutorAdapter for RevertRecorder {
+        async fn execute(&self, _request: &ActionRequest) -> ActionResult {
+            self.executed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            ActionResult::Applied {
+                execution_time_us: 1,
+                rule_id: None,
+            }
+        }
+
+        async fn rule_count(&self) -> u32 {
+            self.executed.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        async fn remove_rule(&self, rule_id: u32) -> ActionResult {
+            if let Ok(mut removals) = self.removals.try_lock() {
+                removals.push(rule_id);
+            }
+            self.executed
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            ActionResult::Applied {
+                execution_time_us: 1,
+                rule_id: Some(rule_id),
+            }
+        }
+    }
+
+    fn actual_state_single(id: u32) -> ActualState {
+        ActualState {
+            active_rules: vec![ActualRule {
+                id,
+                action: balansir_common::Action::Block,
+                rule_id: None,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn rollback_reverts_added_rules_and_restores_snapshot() {
+        let actual = Arc::new(tokio::sync::Mutex::new(ActualState {
+            active_rules: vec![
+                ActualRule {
+                    id: 1,
+                    action: balansir_common::Action::Block,
+                    rule_id: None,
+                },
+                ActualRule {
+                    id: 2,
+                    action: balansir_common::Action::Allow,
+                    rule_id: Some(10),
+                },
+            ],
+        }));
+        let recorder = Arc::new(RevertRecorder::default());
+        let rollback = DaemonRollback {
+            executor: recorder.clone(),
+            actual: actual.clone(),
+        };
+
+        // Snapshot predates rule 2: it was added mid-execution and must be reverted.
+        let snapshot = Snapshot::new(
+            DesiredState::default(),
+            actual_state_single(1),
+            PlanMetadata::new(0),
+        );
+
+        rollback.rollback(&snapshot).await.unwrap();
+
+        let removals = {
+            let guard = recorder.removals.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clone()
+        };
+        assert_eq!(removals.as_slice(), &[2]);
+
+        let restored = actual.lock().await;
+        assert_eq!(restored.active_rules.len(), 1);
+        assert_eq!(restored.active_rules[0].id, 1);
     }
 }

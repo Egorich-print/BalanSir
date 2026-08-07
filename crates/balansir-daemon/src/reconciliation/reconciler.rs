@@ -60,6 +60,8 @@ impl Default for ReconcilerConfig {
 pub trait ExecutorAdapter: Send + Sync {
     async fn execute(&self, request: &ActionRequest) -> ActionResult;
     async fn rule_count(&self) -> u32;
+    /// Revert a previously applied rule at the kernel/mechanism level.
+    async fn remove_rule(&self, rule_id: u32) -> ActionResult;
 }
 
 impl Reconciler {
@@ -76,6 +78,7 @@ impl Reconciler {
             actual: actual.clone(),
         });
         let rollback = Arc::new(DaemonRollback {
+            executor: executor.clone(),
             actual: actual.clone(),
         });
         let executor = Arc::new(DaemonExecutorAdapter {

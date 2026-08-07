@@ -134,6 +134,15 @@ async fn reconciler_24h_simulation() {
         async fn rule_count(&self) -> u32 {
             self.applied.load(Ordering::Relaxed) as u32
         }
+
+        async fn remove_rule(&self, rule_id: u32) -> ActionResult {
+            let _ = rule_id;
+            self.applied.fetch_sub(1, Ordering::Relaxed);
+            ActionResult::Applied {
+                execution_time_us: 50,
+                rule_id: None,
+            }
+        }
     }
 
     let executor = Arc::new(CountingExecutor::default());
@@ -226,6 +235,15 @@ async fn reconciler_rapid_churn_legacy() {
 
         async fn rule_count(&self) -> u32 {
             self.executed.load(Ordering::Relaxed) as u32
+        }
+
+        async fn remove_rule(&self, rule_id: u32) -> ActionResult {
+            let _ = rule_id;
+            self.executed.fetch_sub(1, Ordering::Relaxed);
+            ActionResult::Applied {
+                execution_time_us: 50,
+                rule_id: None,
+            }
         }
     }
 
