@@ -7,7 +7,7 @@ use balansir_common::plan::{ReconciliationOperation, ReconciliationPlan};
 use balansir_common::{
     ActionRequest, ActionResult, DesiredRule, DesiredState, Snapshot, StateDiff,
 };
-use balansir_control::coordinator::{Coordinator, Rollback};
+use balansir_control::{Coordinator, Rollback};
 use balansir_control::planner::BasicPlanner;
 use balansir_control::snapshot_store::MemorySnapshotStore;
 use balansir_control::traits::{DesiredProvider, EventSink, Executor, StateProvider};

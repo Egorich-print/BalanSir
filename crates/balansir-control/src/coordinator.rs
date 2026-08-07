@@ -5,7 +5,8 @@ use crate::{
     events::{ControlEvent, ReconcileReason},
     state::{ReconcileProgress, ReconcileState, ReconcileTransition},
     traits::{
-        DesiredProvider, EventSink, Executor, NoopEventSink, Planner, SnapshotStore, StateProvider,
+        DesiredProvider, EventSink, Executor, NoopEventSink, NoopRollback, Planner, Rollback,
+        SnapshotStore, StateProvider,
     },
 };
 use balansir_common::plan::PlanMetadata;
@@ -82,27 +83,6 @@ impl CoordinatorState {
             _ => return None,
         };
         Some((next, tr))
-    }
-}
-
-/// Attempts to converge the system back to its previous snapshot when a
-/// reconcile fails mid-execution.
-///
-/// The concrete implementation owns whatever state must be mutated to undo a
-/// partially applied plan (in-memory store, external driver, etc.).
-#[async_trait::async_trait]
-pub trait Rollback: Send + Sync {
-    async fn rollback(&self, snapshot: &Snapshot) -> ControlResult<()>;
-}
-
-/// Default rollback: does nothing. Used when no recovery is actionable.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoopRollback;
-
-#[async_trait::async_trait]
-impl Rollback for NoopRollback {
-    async fn rollback(&self, _snapshot: &Snapshot) -> ControlResult<()> {
-        Ok(())
     }
 }
 

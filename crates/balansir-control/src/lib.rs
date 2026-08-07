@@ -16,8 +16,11 @@ pub mod snapshot_store;
 pub mod state;
 pub mod traits;
 
-pub use crate::coordinator::{Config as CoordinatorConfig, Coordinator, NoopRollback, Rollback};
+pub use crate::coordinator::{Config as CoordinatorConfig, Coordinator};
 pub use crate::error::{ControlError, ControlResult};
 pub use crate::events::{ControlEvent, ReconcileReason};
 pub use crate::state::{ExecutionReport, ReconcileProgress, ReconcileState};
-pub use crate::traits::{DesiredProvider, EventSink, Executor, NoopEventSink, Planner, SnapshotStore, StateProvider};
+pub use crate::traits::{
+    DesiredProvider, EventSink, Executor, NoopEventSink, NoopRollback, Planner, Rollback,
+    SnapshotStore, StateProvider,
+};
