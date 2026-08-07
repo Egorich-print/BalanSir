@@ -16,10 +16,39 @@ WatchdogSec=30
 # Security (needs root for netlink/nftables)
 User=root
 Group=root
-NoNewPrivileges=no
+NoNewPrivileges=yes
 
-# Capabilities
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+# Capabilities: minimal set for network control only.
+# CAP_SYS_ADMIN removed (not needed; reduces kernel attack surface).
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# Filesystem hardening: root fs read-only, exec-only tmp, private /tmp.
+ProtectSystem=strict
+ReadWritePaths=/run/balansir
+ProtectHome=yes
+PrivateTmp=yes
+
+# Kernel hardening
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+PrivateMounts=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+
+# Syscall filtering
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Process/namespace sandboxing
+PrivateUsers=no
+RemoveIPC=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
 
 # Resource limits
 MemoryMax=64M
