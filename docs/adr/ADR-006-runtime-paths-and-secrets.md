@@ -43,6 +43,11 @@ Daemon создавал IPC-сокет в `/tmp/balansir-test/daemon.sock`, то
    проверяют peer creds через `SO_PEERCRED`. Разрешённые UID берутся из
    `BALANSIR_ALLOWED_UIDS` (env), по умолчанию `[root]`.
 
+6. **State Store** (задача 1.5): база (`/var/lib/balansir/state`) создаётся с
+   `0700`; каждый `save` делает `fsync` файла после атомарного rename; ключи
+   проходят allowlist (только `desired_state`); journal ограничен по размеру
+   (`journal_capacity`) и синкается на диск.
+
 ## Consequences
 
 - **Security**: сокет нечитаем/незаписуем для других пользователей; stale-файл
