@@ -60,6 +60,10 @@ Daemon создавал IPC-сокет в `/tmp/balansir-test/daemon.sock`, то
    `BALANSIR_API_TOKEN`; токен хранится в `ApiState` и проверяется
    middleware'ом по заголовку `Authorization: Bearer <token>`.
 
+9. **CI-безопасность** (задача 1.8): отдельный job `security` в GitHub Actions
+   запускает `rustsec/audit-check` (база RustSec) и `cargo deny check`
+   (лицензии, bans, unmaintained). Конфиг политики — в `deny.toml`.
+
 ## Consequences
 
 - **Security**: сокет нечитаем/незаписуем для других пользователей; stale-файл
