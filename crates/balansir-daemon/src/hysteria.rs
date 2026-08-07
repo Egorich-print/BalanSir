@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::driver::ComponentDriver;
 
@@ -202,12 +203,14 @@ impl Hysteria2Driver {
 
     fn write_config(&self) -> Result<String, DriverError> {
         let config = self.generate_config();
-        let path = format!("/tmp/balansir-hysteria-{}.json", self.id.as_u32());
-
-        std::fs::write(&path, config)
-            .map_err(|e| DriverError::StartFailed(format!("Failed to write config: {}", e)))?;
-
-        Ok(path)
+        let path = crate::secrets::write_secret(
+            &self.id.as_u32().to_string(),
+            "hysteria",
+            config.as_bytes(),
+        )?;
+        path.into_os_string()
+            .into_string()
+            .map_err(|_| DriverError::StartFailed("non-UTF8 secret path".into()))
     }
 
     fn start_process(&self, config_path: &str) -> Result<(), DriverError> {
@@ -281,7 +284,7 @@ impl ComponentDriver for Hysteria2Driver {
         self.stop_process()?;
 
         if let Some(ref path) = self.config_path {
-            let _ = std::fs::remove_file(path);
+            crate::secrets::remove_secret(Path::new(path));
         }
 
         self.running = false;

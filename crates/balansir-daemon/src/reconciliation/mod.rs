@@ -173,7 +173,10 @@ impl Reconciler {
         if report.success {
             Ok(())
         } else {
-            Err(format!("{} of {} steps failed", report.failed, report.total))
+            Err(format!(
+                "{} of {} steps failed",
+                report.failed, report.total
+            ))
         }
     }
 

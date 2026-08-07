@@ -123,12 +123,11 @@ impl B4Driver {
 
     fn write_config(&self) -> Result<String, DriverError> {
         let config = self.generate_config();
-        let path = format!("/tmp/balansir-b4-{}.json", self.id.as_u32());
-
-        std::fs::write(&path, config)
-            .map_err(|e| DriverError::StartFailed(format!("Failed to write config: {}", e)))?;
-
-        Ok(path)
+        let path =
+            crate::secrets::write_secret(&self.id.as_u32().to_string(), "b4", config.as_bytes())?;
+        path.into_os_string()
+            .into_string()
+            .map_err(|_| DriverError::StartFailed("non-UTF8 secret path".into()))
     }
 
     fn start_process(&self, config_path: &str) -> Result<(), DriverError> {
@@ -193,6 +192,10 @@ impl ComponentDriver for B4Driver {
         tracing::info!("Stopping B4 driver");
 
         self.stop_process()?;
+        crate::secrets::remove_secret(&crate::secrets::secret_path(
+            &self.id.as_u32().to_string(),
+            "b4",
+        ));
 
         self.running = false;
         self.health = HealthStatus::Unknown;

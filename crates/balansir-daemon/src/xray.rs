@@ -140,10 +140,14 @@ impl ComponentDriver for XrayDriver {
         tracing::info!("Starting Xray driver: {}", self.config.server);
 
         let config_path = self.generate_config();
-        let path = format!("/tmp/balansir-xray-{}.json", self.id.as_u32());
-        std::fs::write(&path, &config_path)
-            .map_err(|e| DriverError::StartFailed(format!("Failed to write config: {}", e)))?;
-
+        let path = crate::secrets::write_secret(
+            &self.id.as_u32().to_string(),
+            "xray",
+            config_path.as_bytes(),
+        )?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| DriverError::StartFailed("non-UTF8 secret path".into()))?;
         self.start_process(&path)?;
 
         self.health = HealthStatus::Healthy;
@@ -154,6 +158,10 @@ impl ComponentDriver for XrayDriver {
     async fn stop(&mut self) -> Result<(), DriverError> {
         tracing::info!("Stopping Xray driver");
         self.stop_process()?;
+        crate::secrets::remove_secret(&crate::secrets::secret_path(
+            &self.id.as_u32().to_string(),
+            "xray",
+        ));
         self.health = HealthStatus::Unknown;
         tracing::info!("Xray driver stopped");
         Ok(())

@@ -12,6 +12,7 @@ pub mod hysteria;
 pub mod netlink;
 pub mod policy;
 pub mod reconciliation;
+pub mod secrets;
 #[cfg(feature = "wireguard")]
 pub mod wireguard;
 #[cfg(feature = "xray")]
