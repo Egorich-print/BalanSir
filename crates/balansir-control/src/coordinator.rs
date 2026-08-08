@@ -53,27 +53,32 @@ impl CoordinatorState {
             (Self::Idle, ControlEvent::ReconciliationRequested(_reason)) => {
                 (Self::ReadDesired, ReconcileTransition::IdleToReadDesired)
             }
-            (Self::ReadDesired, ControlEvent::DesiredReadFinished { .. }) => {
-                (Self::ReadActual, ReconcileTransition::ReadDesiredToReadActual)
-            }
+            (Self::ReadDesired, ControlEvent::DesiredReadFinished { .. }) => (
+                Self::ReadActual,
+                ReconcileTransition::ReadDesiredToReadActual,
+            ),
             (Self::ReadActual, ControlEvent::ActualReadFinished { .. }) => {
                 (Self::BuildPlan, ReconcileTransition::ReadActualToBuildPlan)
             }
-            (Self::BuildPlan, ControlEvent::PlanningFinished { .. }) => {
-                (Self::ExecutePlan, ReconcileTransition::BuildPlanToExecutePlan)
-            }
-            (Self::ExecutePlan, ControlEvent::ExecutionStarted) => {
-                (Self::ExecutePlan, ReconcileTransition::ExecutePlanToExecutePlan)
-            }
-            (Self::ExecutePlan, ControlEvent::StepCompleted { .. }) => {
-                (Self::ExecutePlan, ReconcileTransition::ExecutePlanToExecutePlan)
-            }
+            (Self::BuildPlan, ControlEvent::PlanningFinished { .. }) => (
+                Self::ExecutePlan,
+                ReconcileTransition::BuildPlanToExecutePlan,
+            ),
+            (Self::ExecutePlan, ControlEvent::ExecutionStarted) => (
+                Self::ExecutePlan,
+                ReconcileTransition::ExecutePlanToExecutePlan,
+            ),
+            (Self::ExecutePlan, ControlEvent::StepCompleted { .. }) => (
+                Self::ExecutePlan,
+                ReconcileTransition::ExecutePlanToExecutePlan,
+            ),
             (Self::ExecutePlan, ControlEvent::StepFailed { .. }) => {
                 (Self::Rollback, ReconcileTransition::ExecutePlanToRollback)
             }
-            (Self::ExecutePlan, ControlEvent::CommitCompleted) => {
-                (Self::CommitSnapshot, ReconcileTransition::ExecutePlanToCommitSnapshot)
-            }
+            (Self::ExecutePlan, ControlEvent::CommitCompleted) => (
+                Self::CommitSnapshot,
+                ReconcileTransition::ExecutePlanToCommitSnapshot,
+            ),
             (Self::CommitSnapshot, ControlEvent::Reconciled { .. }) => {
                 (Self::Done, ReconcileTransition::CommitSnapshotToDone)
             }
@@ -184,29 +189,38 @@ impl Coordinator {
     }
 
     async fn fail(&self, err: ControlError) -> ControlResult<()> {
-        self.emit(ControlEvent::Failed { error: err.to_string() }).await;
+        self.emit(ControlEvent::Failed {
+            error: err.to_string(),
+        })
+        .await;
         self.enter(CoordinatorState::Failed);
         Err(err)
     }
 
     /// Execute the plan. On success, commit and return the report.
-    async fn run(&self, plan: &balansir_common::ReconciliationPlan) -> ControlResult<crate::state::ExecutionReport> {
+    async fn run(
+        &self,
+        plan: &balansir_common::ReconciliationPlan,
+    ) -> ControlResult<crate::state::ExecutionReport> {
         self.emit(ControlEvent::ExecutionStarted).await;
         self.advance(ControlEvent::ExecutionStarted);
         self.config.executor.execute(plan).await
     }
 
     /// Roll back to the pre-execution snapshot and fail.
-    async fn rollback_and_fail(
-        &self,
-        snapshot: &Snapshot,
-        err: ControlError,
-    ) -> ControlResult<()> {
+    async fn rollback_and_fail(&self, snapshot: &Snapshot, err: ControlError) -> ControlResult<()> {
         // Move onto the Rollback edge, then complete it.
-        self.advance(ControlEvent::StepFailed { index: 0, error: err.to_string() });
+        self.advance(ControlEvent::StepFailed {
+            index: 0,
+            error: err.to_string(),
+        });
         self.emit(ControlEvent::RollbackStarted).await;
         if let Err(rb_err) = self.config.rollback.rollback(snapshot).await {
-            self.emit(ControlEvent::StepFailed { index: 0, error: rb_err.to_string() }).await;
+            self.emit(ControlEvent::StepFailed {
+                index: 0,
+                error: rb_err.to_string(),
+            })
+            .await;
             return self.fail(rb_err).await;
         }
         self.emit(ControlEvent::RollbackCompleted).await;
@@ -222,7 +236,8 @@ impl Coordinator {
             .map_err(|_| ControlError::ReconcileInProgress)?;
 
         // ----- Idle -> ReadDesired -----
-        self.emit(ControlEvent::ReconciliationRequested(reason.clone())).await;
+        self.emit(ControlEvent::ReconciliationRequested(reason.clone()))
+            .await;
         self.advance(ControlEvent::ReconciliationRequested(reason));
 
         // ----- Read desired state -----
@@ -232,7 +247,8 @@ impl Coordinator {
             Err(e) => return self.fail(e).await,
         };
         let revision = desired.rules.len() as u64;
-        self.emit(ControlEvent::DesiredReadFinished { revision }).await;
+        self.emit(ControlEvent::DesiredReadFinished { revision })
+            .await;
         self.advance(ControlEvent::DesiredReadFinished { revision });
 
         // ----- Read actual state -----
@@ -242,7 +258,8 @@ impl Coordinator {
             Err(e) => return self.fail(e).await,
         };
         let rule_count = actual.active_rules.len();
-        self.emit(ControlEvent::ActualReadFinished { rule_count }).await;
+        self.emit(ControlEvent::ActualReadFinished { rule_count })
+            .await;
         self.advance(ControlEvent::ActualReadFinished { rule_count });
 
         // ----- Build plan -----
@@ -301,9 +318,15 @@ impl Coordinator {
         // ----- Commit -----
         self.emit(ControlEvent::CommitCompleted).await;
         self.advance(ControlEvent::CommitCompleted);
-        self.generation.store(plan.generation_after, Ordering::Relaxed);
-        self.emit(ControlEvent::Reconciled { plan_id: report.execution_id }).await;
-        self.advance(ControlEvent::Reconciled { plan_id: report.execution_id });
+        self.generation
+            .store(plan.generation_after, Ordering::Relaxed);
+        self.emit(ControlEvent::Reconciled {
+            plan_id: report.execution_id,
+        })
+        .await;
+        self.advance(ControlEvent::Reconciled {
+            plan_id: report.execution_id,
+        });
         self.enter(CoordinatorState::Done);
         Ok(())
     }
@@ -323,8 +346,16 @@ mod tests {
     fn desired() -> DesiredState {
         DesiredState {
             rules: vec![
-                DesiredRule { id: 1, action: Action::Block, priority: 100 },
-                DesiredRule { id: 2, action: Action::Allow, priority: 50 },
+                DesiredRule {
+                    id: 1,
+                    action: Action::Block,
+                    priority: 100,
+                },
+                DesiredRule {
+                    id: 2,
+                    action: Action::Allow,
+                    priority: 50,
+                },
             ],
             drivers: vec![],
         }
@@ -338,11 +369,15 @@ mod tests {
     fn fsm_transitions() {
         let s = CoordinatorState::Idle;
         assert_eq!(
-            s.transition(ControlEvent::ReconciliationRequested(ReconcileReason::Manual))
-                .map(|(n, _)| n),
+            s.transition(ControlEvent::ReconciliationRequested(
+                ReconcileReason::Manual
+            ))
+            .map(|(n, _)| n),
             Some(CoordinatorState::ReadDesired)
         );
-        assert!(s.transition(ControlEvent::DesiredReadFinished { revision: 0 }).is_none());
+        assert!(s
+            .transition(ControlEvent::DesiredReadFinished { revision: 0 })
+            .is_none());
     }
 
     #[tokio::test]
