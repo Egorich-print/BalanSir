@@ -10,12 +10,13 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 pub mod auth;
+pub mod control;
 pub mod handlers;
 
 /// API state
 pub struct ApiState {
     pub metrics: Arc<balansir_common::metrics::SharedMetrics>,
-    pub reconciler: Option<Arc<crate::handlers::ReconcilerHandle>>,
+    pub control: Option<Arc<crate::control::ControlPlane>>,
     pub api_token: Option<Arc<str>>,
 }
 
@@ -23,7 +24,7 @@ impl ApiState {
     pub fn new(metrics: Arc<balansir_common::metrics::SharedMetrics>) -> Self {
         Self {
             metrics,
-            reconciler: None,
+            control: None,
             api_token: auth::token_from_env(),
         }
     }
@@ -212,5 +213,92 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_real_handlers_with_control_plane() {
+        use crate::control::ControlPlane;
+        use balansir_common::{Action, DesiredDriver, DesiredRule, DesiredState, DriverAction};
+        use balansir_control::executor::MockExecutor;
+        use balansir_control::planner::BasicPlanner;
+        use balansir_control::provider::{MemoryDesiredProvider, MemoryStateProvider};
+        use balansir_control::snapshot_store::MemorySnapshotStore;
+        use balansir_control::NoopRollback;
+
+        let desired = DesiredState {
+            rules: vec![DesiredRule {
+                id: 7,
+                action: Action::Block,
+                priority: 50,
+            }],
+            drivers: vec![DesiredDriver {
+                id: balansir_common::DriverId::Hysteria,
+                action: DriverAction::Start,
+            }],
+        };
+
+        let plane = ControlPlane::assemble(
+            Arc::new(MemoryDesiredProvider::new(desired)),
+            Arc::new(MemoryStateProvider::default()),
+            Arc::new(BasicPlanner),
+            Arc::new(MockExecutor::new()),
+            Arc::new(MemorySnapshotStore::new()),
+            Arc::new(NoopRollback),
+            32,
+        );
+
+        let mut state = ApiState::new(Arc::new(balansir_common::metrics::SharedMetrics::new()));
+        state.control = Some(plane);
+        let app = create_router(Arc::new(state));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+
+        // Desired reflects the configured rule and drivers.
+        let resp = client
+            .get(format!("http://{}/desired", addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["rule_count"], 1);
+        assert_eq!(body["rules"][0]["id"], 7);
+
+        // Drivers list comes from desired config.
+        let resp = client
+            .get(format!("http://{}/drivers", addr))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["count"], 1, "drivers: {body}");
+        assert_eq!(body["drivers"][0]["name"], "Hysteria");
+
+        // Reconcile actually converges: generation bumps and events are recorded.
+        let resp = client
+            .post(format!("http://{}/reconcile", addr))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["ok"], true, "reconcile response: {body}");
+
+        let resp = client
+            .get(format!("http://{}/events", addr))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let events = body["events"].as_array().unwrap();
+        assert!(
+            events.iter().any(|e| e["event_type"] == "reconciled"),
+            "missing reconciled event in {events:?}"
+        );
     }
 }

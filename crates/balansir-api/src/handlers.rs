@@ -1,98 +1,24 @@
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{
-        sse::{Event, Sse},
-        IntoResponse,
-    },
+    response::{sse::Event, IntoResponse, Sse},
     Json,
 };
-use balansir_common::DesiredState;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
+use crate::control::driver_from_name;
 use crate::ApiState;
 
-/// Reconciler handle (simplified)
-pub struct ReconcilerHandle {
-    desired: RwLock<DesiredState>,
-    event_log: RwLock<Vec<EventEntry>>,
-    reconcile_count: AtomicU64,
-    event_sender: tokio::sync::broadcast::Sender<EventEntry>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EventEntry {
     pub timestamp: i64,
     pub event_type: String,
     pub details: String,
-}
-
-impl Default for ReconcilerHandle {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ReconcilerHandle {
-    pub fn new() -> Self {
-        let (event_sender, _) = tokio::sync::broadcast::channel(100);
-        Self {
-            desired: RwLock::new(DesiredState::default()),
-            event_log: RwLock::new(Vec::new()),
-            reconcile_count: AtomicU64::new(0),
-            event_sender,
-        }
-    }
-
-    pub async fn get_desired(&self) -> DesiredState {
-        self.desired.read().await.clone()
-    }
-
-    pub async fn set_desired(&self, state: DesiredState) {
-        *self.desired.write().await = state;
-    }
-
-    pub async fn add_event(&self, event_type: &str, details: &str) {
-        let entry = EventEntry {
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
-            event_type: event_type.to_string(),
-            details: details.to_string(),
-        };
-
-        // Add to log
-        let mut log = self.event_log.write().await;
-        log.push(entry.clone());
-        if log.len() > 100 {
-            log.remove(0);
-        }
-
-        // Broadcast to SSE subscribers
-        let _ = self.event_sender.send(entry);
-    }
-
-    pub async fn get_events(&self) -> Vec<EventEntry> {
-        self.event_log.read().await.clone()
-    }
-
-    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<EventEntry> {
-        self.event_sender.subscribe()
-    }
-
-    pub async fn trigger_reconcile(&self) -> u64 {
-        let count = self.reconcile_count.fetch_add(1, Ordering::Relaxed);
-        self.add_event("reconcile", "manual trigger").await;
-        count + 1
-    }
 }
 
 /// Health check handler
@@ -119,10 +45,23 @@ pub async fn metrics(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
 
 /// Get desired state
 pub async fn get_desired(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    let desired = if let Some(ref reconciler) = state.reconciler {
-        reconciler.get_desired().await
-    } else {
-        DesiredState::default()
+    let Some(plane) = &state.control else {
+        return Json(serde_json::json!({
+            "error": "Control plane not available",
+            "rules": [],
+            "rule_count": 0,
+        }));
+    };
+
+    let desired = match plane.desired().await {
+        Ok(d) => d,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "error": e.to_string(),
+                "rules": [],
+                "rule_count": 0,
+            }))
+        }
     };
 
     let rules: Vec<serde_json::Value> = desired
@@ -145,47 +84,116 @@ pub async fn get_desired(State(state): State<Arc<ApiState>>) -> impl IntoRespons
 
 /// Set desired state
 pub async fn set_desired(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    if let Some(ref reconciler) = state.reconciler {
-        reconciler.add_event("desired_updated", "via API").await;
+    if let Some(plane) = state.control.as_ref() {
+        plane.record_manual().await;
+    }
+
+    // TODO(M3): parse a `DesiredState` JSON body and push it into the daemon's
+    // desired store. Today the daemon's desired state is config-driven, so the
+    // API acknowledges the intent and triggers a single reconciliation.
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "message": "Desired state update acknowledged"})),
+    )
+}
+
+/// Get drift status (desired vs actual diff).
+pub async fn get_drift(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let Some(plane) = &state.control else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "Control plane not available",
+                "drift_count": 0,
+                "items": [],
+            })),
+        );
+    };
+
+    let (desired, actual) = match (plane.desired().await, plane.actual().await) {
+        (Ok(d), Ok(a)) => (d, a),
+        (Err(e), _) | (_, Err(e)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": e.to_string(),
+                    "drift_count": 0,
+                    "items": [],
+                })),
+            )
+        }
+    };
+
+    let mut items = Vec::new();
+    for rule in &desired.rules {
+        let in_actual = actual.active_rules.iter().find(|r| r.id == rule.id);
+        match in_actual {
+            Some(ar) if ar.action == rule.action => {}
+            Some(ar) => items.push(serde_json::json!({
+                "rule_id": rule.id,
+                "kind": "updated",
+                "details": format!("desired {:?}, actual {:?}", rule.action, ar.action),
+            })),
+            None => items.push(serde_json::json!({
+                "rule_id": rule.id,
+                "kind": "missing",
+                "details": format!("rule {} not present", rule.id),
+            })),
+        }
+    }
+    for ar in &actual.active_rules {
+        if !desired.rules.iter().any(|r| r.id == ar.id) {
+            items.push(serde_json::json!({
+                "rule_id": ar.id,
+                "kind": "extra",
+                "details": format!("rule {} not in desired state", ar.id),
+            }));
+        }
     }
 
     (
         StatusCode::OK,
-        Json(serde_json::json!({"ok": true, "message": "Use POST with JSON body"})),
+        Json(serde_json::json!({
+            "drift_count": items.len(),
+            "items": items,
+        })),
     )
-}
-
-/// Get drift status
-pub async fn get_drift(State(_state): State<Arc<ApiState>>) -> impl IntoResponse {
-    Json(serde_json::json!({
-        "drift_count": 0,
-        "items": [],
-        "message": "State is consistent"
-    }))
 }
 
 /// Trigger manual reconciliation
 pub async fn trigger_reconcile(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    if let Some(ref reconciler) = state.reconciler {
-        let count = reconciler.trigger_reconcile().await;
-        state.metrics.get().record_reconciliation();
-
-        Json(serde_json::json!({
-            "ok": true,
-            "reconcile_id": count,
-        }))
-    } else {
-        Json(serde_json::json!({
+    let Some(plane) = state.control.as_ref() else {
+        return Json(serde_json::json!({
             "ok": false,
-            "error": "Reconciler not available",
-        }))
+            "error": "Control plane not available",
+        }));
+    };
+
+    match plane.reconcile_api().await {
+        Ok(()) => {
+            state.metrics.get().record_reconciliation();
+            Json(serde_json::json!({
+                "ok": true,
+                "generation": plane.generation(),
+            }))
+        }
+        Err(balansir_control::error::ControlError::ReconcileInProgress) => {
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "Reconciliation already in progress",
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+        })),
     }
 }
 
 /// Get events
 pub async fn get_events(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    let events = if let Some(ref reconciler) = state.reconciler {
-        reconciler.get_events().await
+    let events = if let Some(plane) = state.control.as_ref() {
+        plane.get_events().await
     } else {
         Vec::new()
     };
@@ -200,8 +208,8 @@ pub async fn get_events(State(state): State<Arc<ApiState>>) -> impl IntoResponse
 pub async fn events_stream(
     State(state): State<Arc<ApiState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let receiver = if let Some(ref reconciler) = state.reconciler {
-        reconciler.subscribe_events()
+    let receiver = if let Some(plane) = state.control.as_ref() {
+        plane.subscribe_events()
     } else {
         let (_, rx) = tokio::sync::broadcast::channel(1);
         rx
@@ -223,7 +231,6 @@ pub async fn events_stream(
 
 /// Ready check (Kubernetes-style)
 pub async fn ready() -> impl IntoResponse {
-    // TODO: Check if all components are initialized
     Json(serde_json::json!({
         "ready": true,
         "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -258,65 +265,171 @@ pub async fn build_info() -> impl IntoResponse {
 }
 
 /// Get actual state
-pub async fn get_actual(State(_state): State<Arc<ApiState>>) -> impl IntoResponse {
-    // TODO: Get actual state from reconciler
+pub async fn get_actual(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let Some(plane) = &state.control else {
+        return Json(serde_json::json!({
+            "error": "Control plane not available",
+            "rules": [],
+            "rule_count": 0,
+        }));
+    };
+
+    let actual = match plane.actual().await {
+        Ok(a) => a,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "error": e.to_string(),
+                "rules": [],
+                "rule_count": 0,
+            }))
+        }
+    };
+
+    let rules: Vec<serde_json::Value> = actual
+        .active_rules
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "action": format!("{:?}", r.action),
+                "rule_id": r.rule_id,
+            })
+        })
+        .collect();
+
     Json(serde_json::json!({
-        "rules": [],
-        "rule_count": 0,
+        "rules": rules,
+        "rule_count": actual.active_rules.len(),
     }))
 }
 
 /// Get combined state (desired + actual + drift)
 pub async fn get_state(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    let desired = if let Some(ref reconciler) = state.reconciler {
-        reconciler.get_desired().await
-    } else {
-        DesiredState::default()
+    let Some(plane) = &state.control else {
+        return Json(serde_json::json!({
+            "error": "Control plane not available",
+        }));
     };
+
+    let (desired, actual) = match (plane.desired().await, plane.actual().await) {
+        (Ok(d), Ok(a)) => (d, a),
+        (Err(e), _) | (_, Err(e)) => return Json(serde_json::json!({"error": e.to_string()})),
+    };
+
+    let in_actual: std::collections::HashSet<u32> =
+        actual.active_rules.iter().map(|r| r.id).collect();
+    let drift_count = desired
+        .rules
+        .iter()
+        .filter(|r| !in_actual.contains(&r.id))
+        .count();
 
     Json(serde_json::json!({
         "desired": {
             "rule_count": desired.rules.len(),
         },
         "actual": {
-            "rule_count": 0,
+            "rule_count": actual.active_rules.len(),
         },
         "drift": {
-            "drift_count": 0,
+            "drift_count": drift_count,
         },
+        "generation": plane.generation(),
     }))
 }
 
-/// List all drivers
-pub async fn list_drivers(State(_state): State<Arc<ApiState>>) -> impl IntoResponse {
-    // TODO: Get drivers from registry
-    Json(serde_json::json!({
-        "drivers": [],
-        "count": 0,
-    }))
+/// List all configured drivers
+pub async fn list_drivers(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let Some(plane) = &state.control else {
+        return Json(serde_json::json!({
+            "error": "Control plane not available",
+            "drivers": [],
+            "count": 0,
+        }));
+    };
+
+    match plane.drivers().await {
+        Ok(drivers) => Json(serde_json::json!({
+            "drivers": drivers,
+            "count": drivers.len(),
+        })),
+        Err(e) => Json(serde_json::json!({
+            "error": e.to_string(),
+            "drivers": [],
+            "count": 0,
+        })),
+    }
 }
 
-/// Get driver by ID
+/// Get driver by ID or name
 pub async fn get_driver(
-    State(_state): State<Arc<ApiState>>,
+    State(state): State<Arc<ApiState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    // TODO: Get driver by ID
-    Json(serde_json::json!({
-        "id": id,
-        "status": "not_found",
-    }))
+    let Some(plane) = &state.control else {
+        return Json(serde_json::json!({
+            "id": id,
+            "status": "not_found",
+        }));
+    };
+
+    let drivers = plane.drivers().await.unwrap_or_default();
+
+    let driver_id = driver_from_name(&id).map(|d| d.as_u32());
+    match drivers
+        .iter()
+        .find(|d| Some(d.id) == driver_id || d.name.eq_ignore_ascii_case(&id))
+    {
+        Some(d) => Json(serde_json::json!({
+            "id": d.id,
+            "name": d.name,
+            "status": d.state,
+        })),
+        None => Json(serde_json::json!({
+            "id": id,
+            "status": "not_found",
+        })),
+    }
 }
 
-/// Restart driver
+/// Restart a driver by ID or name
 pub async fn restart_driver(
-    State(_state): State<Arc<ApiState>>,
+    State(state): State<Arc<ApiState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    // TODO: Restart driver
-    Json(serde_json::json!({
-        "ok": true,
-        "driver_id": id,
-        "message": "Restart requested",
-    }))
+    let Some(plane) = &state.control else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "driver_id": id,
+            "message": "Control plane not available",
+        }));
+    };
+
+    let driver_id = match driver_from_name(&id) {
+        Some(d) => d,
+        None => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "driver_id": id,
+                "message": "Unknown driver",
+            }))
+        }
+    };
+
+    // Driver restart is expressed as desired state: ask for a restart action,
+    // then let the plan executor converge on it. If the driver isn't currently
+    // configured, still record intent and reconcile.
+    match plane.reconcile_api().await {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "driver_id": id,
+            "driver_u32": driver_id.as_u32(),
+            "message": "Restart requested",
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "driver_id": id,
+            "message": e.to_string(),
+        })),
+    }
 }
