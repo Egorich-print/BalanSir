@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
@@ -68,33 +69,53 @@ pub struct ResourcesConfig {
     pub max_route_tables: u32,
 }
 
-impl Profile {
-    pub fn load(path: &Path) -> Result<Self, String> {
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("Failed to read profile: {}", e))?;
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum ProfileError {
+    #[error("failed to read profile {path}: {reason}")]
+    Io { path: String, reason: String },
 
-        let profile: Profile =
-            toml::from_str(&content).map_err(|e| format!("Failed to parse profile: {}", e))?;
+    #[error("failed to parse profile {path}: {reason}")]
+    Parse { path: String, reason: String },
+
+    #[error("invalid profile: {0}")]
+    Validation(String),
+}
+
+impl Profile {
+    pub fn load(path: &Path) -> Result<Self, ProfileError> {
+        let content = std::fs::read_to_string(path).map_err(|e| ProfileError::Io {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })?;
+
+        let profile: Profile = toml::from_str(&content).map_err(|e| ProfileError::Parse {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })?;
 
         profile.validate()?;
         Ok(profile)
     }
 
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> Result<(), ProfileError> {
         if self.device.ram_mb == 0 {
-            return Err("ram_mb must be > 0".to_string());
+            return Err(ProfileError::Validation("ram_mb must be > 0".into()));
         }
 
         if self.device.cpu_cores == 0 {
-            return Err("cpu_cores must be > 0".to_string());
+            return Err(ProfileError::Validation("cpu_cores must be > 0".into()));
         }
 
         if self.memory.daemon_rss_max_mb == 0 {
-            return Err("daemon_rss_max_mb must be > 0".to_string());
+            return Err(ProfileError::Validation(
+                "daemon_rss_max_mb must be > 0".into(),
+            ));
         }
 
         if self.drivers.max_active == 0 {
-            return Err("max_active drivers must be > 0".to_string());
+            return Err(ProfileError::Validation(
+                "max_active drivers must be > 0".into(),
+            ));
         }
 
         Ok(())

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::error::{PolicyError, PolicyResult};
 use super::matcher::Matcher;
 use balansir_common::Action;
 
@@ -52,28 +53,41 @@ fn hash_domain(domain: &str) -> u32 {
     hasher.finish() as u32
 }
 
-fn parse_cidr(cidr: &str) -> Result<([u8; 4], u8), String> {
+fn parse_cidr(cidr: &str) -> PolicyResult<([u8; 4], u8)> {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 {
-        return Err(format!("Invalid CIDR format: {}", cidr));
+        return Err(PolicyError::InvalidCidr {
+            cidr: cidr.to_string(),
+            reason: "expected `ip/prefix`".into(),
+        });
     }
 
     let ip_parts: Vec<u8> = parts[0]
         .split('.')
         .map(|s| s.parse::<u8>())
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Invalid IP address: {}", e))?;
+        .map_err(|e| PolicyError::InvalidCidr {
+            cidr: cidr.to_string(),
+            reason: format!("invalid IP address: {e}"),
+        })?;
 
     if ip_parts.len() != 4 {
-        return Err(format!("Invalid IP address: {}", parts[0]));
+        return Err(PolicyError::InvalidCidr {
+            cidr: cidr.to_string(),
+            reason: format!("invalid IP address: {}", parts[0]),
+        });
     }
 
-    let mask: u8 = parts[1]
-        .parse()
-        .map_err(|e| format!("Invalid prefix length: {}", e))?;
+    let mask: u8 = parts[1].parse().map_err(|e| PolicyError::InvalidCidr {
+        cidr: cidr.to_string(),
+        reason: format!("invalid prefix length: {e}"),
+    })?;
 
     if mask > 32 {
-        return Err(format!("Prefix length must be <= 32: {}", mask));
+        return Err(PolicyError::InvalidCidr {
+            cidr: cidr.to_string(),
+            reason: format!("prefix length must be <= 32: {mask}"),
+        });
     }
 
     Ok(([ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3]], mask))
@@ -81,7 +95,7 @@ fn parse_cidr(cidr: &str) -> Result<([u8; 4], u8), String> {
 
 impl PolicyRuleToml {
     /// Convert TOML rule to internal representation
-    pub fn to_rule(&self, id: u32) -> Result<super::PolicyRule, String> {
+    pub fn to_rule(&self, id: u32) -> PolicyResult<super::PolicyRule> {
         let matcher = match &self.matcher {
             MatcherToml::Any => Matcher::Any,
             MatcherToml::None => Matcher::None,
@@ -130,16 +144,20 @@ impl PolicyRuleToml {
 
 impl PolicyFile {
     /// Load policy file from TOML
-    pub fn load(path: &str) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read policy file: {}", e))?;
-        let policy: PolicyFile =
-            toml::from_str(&content).map_err(|e| format!("Failed to parse policy file: {}", e))?;
+    pub fn load(path: &str) -> PolicyResult<Self> {
+        let content = std::fs::read_to_string(path).map_err(|e| PolicyError::Io {
+            path: path.to_string(),
+            reason: e.to_string(),
+        })?;
+        let policy: PolicyFile = toml::from_str(&content).map_err(|e| PolicyError::Parse {
+            path: path.to_string(),
+            reason: e.to_string(),
+        })?;
         Ok(policy)
     }
 
     /// Convert TOML rules to internal representation
-    pub fn to_rules(&self) -> Result<Vec<super::PolicyRule>, String> {
+    pub fn to_rules(&self) -> PolicyResult<Vec<super::PolicyRule>> {
         self.rules
             .iter()
             .enumerate()

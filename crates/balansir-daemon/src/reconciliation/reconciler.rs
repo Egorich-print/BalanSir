@@ -4,6 +4,7 @@ use crate::reconciliation::adapters::{
     DaemonActualStore, DaemonDesiredProvider, DaemonExecutorAdapter, DaemonRollback,
 };
 use crate::reconciliation::sinks::TracingEventSink;
+use crate::reconciliation::{ReconciliationError, ReconciliationResult};
 use balansir_common::plan::ReconciliationPlan;
 use balansir_common::{
     ActionRequest, ActionResult, ActualState, DesiredRule, DesiredState, StateDiff,
@@ -112,13 +113,12 @@ impl Reconciler {
     /// Create reconciler from state store.
     pub async fn from_state_store(
         state_store: &impl balansir_common::state::StateStore,
-    ) -> Result<Self, String> {
+    ) -> ReconciliationResult<Self> {
         let desired = match state_store.load("desired_state").await {
-            Ok(Some(data)) => {
-                postcard::from_bytes(&data).map_err(|e| format!("Deserialize: {}", e))?
-            }
+            Ok(Some(data)) => postcard::from_bytes(&data)
+                .map_err(|e| ReconciliationError::Deserialize(e.to_string()))?,
             Ok(None) => DesiredState::default(),
-            Err(e) => return Err(format!("Load: {}", e)),
+            Err(e) => return Err(ReconciliationError::StateLoad(e.to_string())),
         };
 
         let executor = Arc::new(crate::reconciliation::dummy::DummyExecutorAdapter::new());
@@ -129,13 +129,14 @@ impl Reconciler {
     pub async fn save_to_store(
         &self,
         state_store: &impl balansir_common::state::StateStore,
-    ) -> Result<(), String> {
+    ) -> ReconciliationResult<()> {
         let state = self.desired_state.lock().await;
-        let data = postcard::to_allocvec(&*state).map_err(|e| format!("Serialize: {}", e))?;
+        let data = postcard::to_allocvec(&*state)
+            .map_err(|e| ReconciliationError::Serialize(e.to_string()))?;
         state_store
             .save("desired_state", &data)
             .await
-            .map_err(|e| format!("Save: {}", e))?;
+            .map_err(|e| ReconciliationError::StateSave(e.to_string()))?;
         Ok(())
     }
 
@@ -170,19 +171,19 @@ impl Reconciler {
     }
 
     /// Apply plan (delegates to the daemon's plan runner).
-    pub async fn apply_plan(&self, plan: ReconciliationPlan) -> Result<(), String> {
+    pub async fn apply_plan(&self, plan: ReconciliationPlan) -> ReconciliationResult<()> {
         let report = self
             .runner
             .execute(&plan)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ReconciliationError::Config(e.to_string()))?;
         if report.success {
             Ok(())
         } else {
-            Err(format!(
+            Err(ReconciliationError::Reconcile(format!(
                 "{} of {} steps failed",
                 report.failed, report.total
-            ))
+            )))
         }
     }
 
@@ -195,15 +196,15 @@ impl Reconciler {
     }
 
     /// Trigger a single reconciliation cycle.
-    pub async fn reconcile(&self) -> Result<(), String> {
+    pub async fn reconcile(&self) -> ReconciliationResult<()> {
         self.coordinator
             .reconcile(ReconcileReason::Scheduled)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| ReconciliationError::Reconcile(e.to_string()))
     }
 
     /// Trigger an atomic reconciliation (rollback handled by the coordinator).
-    pub async fn reconcile_atomic(&self) -> Result<(), String> {
+    pub async fn reconcile_atomic(&self) -> ReconciliationResult<()> {
         self.reconcile().await
     }
 

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::error::{PolicyError, PolicyResult};
 use super::PacketContext;
 
 /// Maximum recursion depth for matcher evaluation
@@ -71,13 +72,13 @@ impl Matcher {
     }
 
     /// Validate matcher doesn't exceed max depth
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> PolicyResult<()> {
         let depth = self.depth();
         if depth > MAX_MATCHER_DEPTH {
-            Err(format!(
-                "Matcher depth {} exceeds maximum {}",
-                depth, MAX_MATCHER_DEPTH
-            ))
+            Err(PolicyError::MatcherTooDeep {
+                depth,
+                max: MAX_MATCHER_DEPTH,
+            })
         } else {
             Ok(())
         }

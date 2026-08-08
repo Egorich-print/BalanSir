@@ -1,6 +1,8 @@
 use tracing::{error, info, warn};
 
-use crate::reconciliation::{ExecutorAdapter, Reconciler, ReconcilerConfig};
+use crate::reconciliation::{
+    ExecutorAdapter, Reconciler, ReconcilerConfig, ReconciliationError, ReconciliationResult,
+};
 use balansir_common::state::StateStore;
 use balansir_common::DesiredState;
 
@@ -8,7 +10,7 @@ use balansir_common::DesiredState;
 pub async fn bootstrap(
     state_store: &impl StateStore,
     executor: std::sync::Arc<dyn ExecutorAdapter>,
-) -> Result<Reconciler, String> {
+) -> ReconciliationResult<Reconciler> {
     info!("Bootstrapping system from persisted state...");
 
     // 1. Load desired state
@@ -41,11 +43,11 @@ pub async fn bootstrap(
 }
 
 /// Load desired state from state store
-async fn load_desired_state(state_store: &impl StateStore) -> Result<DesiredState, String> {
+async fn load_desired_state(state_store: &impl StateStore) -> ReconciliationResult<DesiredState> {
     match state_store.load("desired_state").await {
         Ok(Some(data)) => {
             let state: DesiredState = postcard::from_bytes(&data)
-                .map_err(|e| format!("Failed to deserialize desired state: {}", e))?;
+                .map_err(|e| ReconciliationError::Deserialize(e.to_string()))?;
             Ok(state)
         }
         Ok(None) => {

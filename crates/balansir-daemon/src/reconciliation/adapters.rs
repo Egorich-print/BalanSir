@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::reconciliation::error::{ReconciliationError, ReconciliationResult};
 use crate::reconciliation::reconciler::ExecutorAdapter;
 
 /// Reads the mutable desired-state handle for the coordinator.
@@ -93,7 +94,7 @@ impl Executor for DaemonExecutorAdapter {
 }
 
 impl DaemonExecutorAdapter {
-    async fn apply_rule(&self, rule: &DesiredRule) -> Result<(), String> {
+    async fn apply_rule(&self, rule: &DesiredRule) -> ReconciliationResult<()> {
         let request = ActionRequest {
             action: rule.action,
             src_ip: [0; 4],
@@ -124,10 +125,13 @@ impl DaemonExecutorAdapter {
                 Ok(())
             }
             ActionResult::AlreadyApplied => Ok(()),
-            ActionResult::Failed { message, .. } => {
-                Err(message.unwrap_or_else(|| "rule failed".to_string()))
-            }
-            other => Err(format!("unexpected result: {:?}", other)),
+            ActionResult::Failed { message, .. } => Err(ReconciliationError::ApplyRule(
+                message.unwrap_or_else(|| "rule failed".to_string()),
+            )),
+            other => Err(ReconciliationError::ApplyRule(format!(
+                "unexpected result: {:?}",
+                other
+            ))),
         }
     }
 }
