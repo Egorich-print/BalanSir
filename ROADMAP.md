@@ -53,6 +53,8 @@ policy ↔ health. Подготовка v0.5+.
 
 **ADR-007** `API-control-plane-port.md` (API зависит только от `balansir-control`).
 **ADR-008** `policy-health-fallback.md` (failover через `rule.fallback` + health).
+**ADR-009** `typed-errors.md` (typed PolicyError/ProfileError/ReconciliationError).
+**Статус:** ✅ выполнено (2.1–2.10), коммиты `0651834..959fe81`.
 **Проверка:** test+clippy+fmt после каждого шага.
 
 ---

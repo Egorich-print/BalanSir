@@ -42,13 +42,13 @@
 |----|-------|---------|
 | M1 | `coordinator.rs:180,184,188,194` | `std::sync::Mutex::lock().unwrap()` — poison panic риск; заменить на `unwrap_or_else(\|e\| e.into_inner())` или `Atomic` для `CoordinatorState`. |
 | M2 | `reconciliation/mod.rs:143,158,236,251,299,319` | Hot-path клон `DesiredState`/`ActualState` целиком при каждом reconcile; `Arc<DesiredState>` end-to-end убрал бы клоны. |
-| M3 | `reconciliation/mod.rs:107,123,167,192,200`, `policy/rules.rs:55,84,133,142`, `profile.rs:72`, `api/lib.rs:116`, `tests/netns.rs:33+` | `Result<_, String>` вместо typed error — потеря структуры; внедрить `ControlError`/`PolicyError`/`ApiError`. |
-| M4 | `wireguard.rs:11`, `amneziawg.rs:11`, `xray.rs:13`, `hysteria.rs:11-13,31-33` | Секреты в plain `String`; нет `secrecy::SecretString`/`zeroize`; нет `#[serde(skip_serializing)]` → риск случайного логирования `Debug`. |
-| M5 | `nftables.rs:11-16` | `table_name`/`chain_name` — `String` без валидации `[A-Za-z0-9_-]`; валидировать на construction. |
+| M3 | ✅ `reconciliation/*`, `policy/rules.rs`, `profile.rs` | TYPED (M2.7): typed `PolicyError`/`ProfileError`/`ReconciliationError` вместо `String`. |
+| M4 | ✅ `wireguard.rs`, `amneziawg.rs`, `xray.rs`, `hysteria.rs` | DONE (M2.8): `secrecy::SecretString` + `#[serde(skip_serializing)]` + zeroize. |
+| M5 | ✅ `nftables.rs` | DONE (M2.9): `[$A-Za-z0-9_-$]{1,64}`-валидация на `NftablesBackend::new`. |
 | M6 | `state/file.rs:18`, `reconciliation/mod.rs:104` | StateStore directory создаётся с umask 0755 — world-readable; `DesiredState` содержит security-relevant policy. `DirBuilder::mode(0o700)`. |
 | M7 | `xray.rs:174`, `hysteria.rs:239,306`, `b4.rs:154,216` | `pkill -f`/`pgrep -f` regex-match по всему cmdline системы; pgrep-matches-itself; убийство чужих процессов с тем же substr. Хранить `Child`, использовать `child.kill()`. |
 | M8 | `xray.rs:116` vs `hysteria.rs`/`b4.rs` | `XrayDriver::Drop` чистит child; у Hysteria/B4 — нет, утечка child если не позвать `stop()`. |
-| M9 | `rules.rs:108-113` | TOML `Action::Forward{driver}` → `DriverId::Custom(hash_domain(driver))` — никогда не матчит `DriverId::WireGuard` и т.д. Latent bug при подключении политик к execution. |
+| M9 | ✅ `rules.rs:108-113`, `types.rs` | DONE (M2.10): `DriverId::from_name` registry — известные имена матчат варианты, unknown → стабильный `Custom(hash)`. |
 | M10 | `xray.rs:62-71`, `hysteria.rs:177-201` | JSON-конфиг через `format!` без эскейпинга — malformed JSON / config-injection при `"`,`\`. `serde_json::to_string` typed struct. |
 | M11 | `version.rs:2` `check_state_compatibility` | Объявлен, не используется при load `desired_state` (`mod.rs:111-114`). Prepend `STATE_VERSION` в blob. |
 | M12 | `state/file.rs:103` | Journal `len: u32` → `vec![0u8; len]` до 4 GiB allocation. Cap, как `MAX_PAYLOAD_SIZE`. |
