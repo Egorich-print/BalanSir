@@ -1,11 +1,15 @@
 use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
-use balansir_common::Result;
+use balansir_common::{DriverId, Result};
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn};
+
+use balansir_daemon::driver::factory::NotYetWiredFactory;
+use balansir_daemon::driver::lifecycle::{DriverIntent, DriverLifecycleManager};
 
 const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
 const SOCKET_PERMS: u32 = 0o600;
@@ -29,6 +33,12 @@ async fn main() -> Result<()> {
     tokio::fs::set_permissions(socket_path, Permissions::from_mode(SOCKET_PERMS)).await?;
     info!("Listening on {} (mode {:#o})", SOCKET_PATH, SOCKET_PERMS);
 
+    // Driver lifecycle state machine (ADR-011). Real driver configs are wired
+    // in M3.4/M3.5; the factory keeps tracked-Failed slots until then.
+    let lifecycle: Arc<tokio::sync::Mutex<DriverLifecycleManager>> = Arc::new(
+        tokio::sync::Mutex::new(DriverLifecycleManager::new(Box::new(NotYetWiredFactory))),
+    );
+
     // Setup signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -42,7 +52,8 @@ async fn main() -> Result<()> {
                         match IpcServerConnection::accept(stream).await {
                             Ok(conn) => {
                                 info!("Executor connected (UID: {})", conn.peer_uid());
-                                tokio::spawn(handle_connection(conn));
+                                let lifecycle = Arc::clone(&lifecycle);
+                                tokio::spawn(handle_connection(conn, lifecycle));
                             }
                             Err(e) => {
                                 warn!("Authentication failed: {}", e);
@@ -77,11 +88,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(mut conn: IpcServerConnection) {
+async fn handle_connection(
+    mut conn: IpcServerConnection,
+    lifecycle: Arc<tokio::sync::Mutex<DriverLifecycleManager>>,
+) {
     loop {
         match conn.recv().await {
             Ok(msg) => {
-                let response = handle_message(&msg);
+                let response = handle_message(&msg, Arc::clone(&lifecycle)).await;
                 if let Err(e) = conn.send(&response).await {
                     error!("Send error: {}", e);
                     break;
@@ -95,7 +109,15 @@ async fn handle_connection(mut conn: IpcServerConnection) {
     }
 }
 
-fn handle_message(msg: &IpcMessage) -> IpcMessage {
+/// Payload of a driver message: a postcard-encoded `DriverId`.
+fn driver_id_from_payload(msg: &IpcMessage) -> Option<DriverId> {
+    postcard::from_bytes(&msg.payload).ok()
+}
+
+async fn handle_message(
+    msg: &IpcMessage,
+    lifecycle: Arc<tokio::sync::Mutex<DriverLifecycleManager>>,
+) -> IpcMessage {
     match msg.msg_type {
         MsgType::HealthCheck => {
             info!("Health check requested");
@@ -103,6 +125,46 @@ fn handle_message(msg: &IpcMessage) -> IpcMessage {
         }
         MsgType::GetMetrics => {
             info!("Metrics requested");
+            IpcMessage::response_ok(msg.correlation_id)
+        }
+        MsgType::StartDriver | MsgType::RestartDriver => {
+            let Some(id) = driver_id_from_payload(msg) else {
+                return IpcMessage::response_error(msg.correlation_id, "Invalid driver id");
+            };
+            let fingerprint = id.as_u32() as u64;
+            let intent = DriverIntent {
+                id,
+                action: if msg.msg_type == MsgType::RestartDriver {
+                    balansir_common::DriverAction::Restart
+                } else {
+                    balansir_common::DriverAction::Start
+                },
+                fingerprint,
+            };
+            let events = {
+                let mut g = lifecycle.lock().await;
+                g.reconcile(vec![intent]).await
+            };
+            if events.iter().any(|e| {
+                matches!(
+                    e.outcome,
+                    balansir_daemon::driver::lifecycle::DriverOutcome::Failed { .. }
+                )
+            }) {
+                info!(?id, "driver failed to start");
+                IpcMessage::response_error(msg.correlation_id, "Driver failed to start")
+            } else {
+                info!(?id, "driver started");
+                IpcMessage::response_ok(msg.correlation_id)
+            }
+        }
+        MsgType::StopDriver => {
+            let Some(id) = driver_id_from_payload(msg) else {
+                return IpcMessage::response_error(msg.correlation_id, "Invalid driver id");
+            };
+            let mut g = lifecycle.lock().await;
+            g.reconcile(vec![DriverIntent::stop(id)]).await;
+            info!(?id, "driver stopped");
             IpcMessage::response_ok(msg.correlation_id)
         }
         _ => {

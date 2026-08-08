@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 
+pub mod factory;
+pub mod lifecycle;
+
 /// Component driver trait (base for all drivers)
 #[async_trait]
 pub trait ComponentDriver: Send + Sync {

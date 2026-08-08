@@ -64,7 +64,7 @@ policy ↔ health. Подготовка v0.5+.
 | # | Фича | Декомпозиция |
 |---|------|--------------|
 | 3.1 | **Hot Reload** `/reload` без рестарта daemon | `DaemonDesiredProvider` следит за `DesiredState`源的 (file watcher → EventBus `ConfigReload`); Coordinator `ReconcileReason::ConfigReload`; API `/reload`. |
-| 3.2 | **Runtime Driver Lifecycle** | `MsgType::{Start,Stop,Restart}Driver` wired в `daemon/main.rs::handle_message` → `ComponentDriver::{start,stop,restart}`; планировщик жизненного цикла через Coordinator. |
+| 3.2 | **Runtime Driver Lifecycle** | ✅ `driver/lifecycle.rs`: state machine `Absent→Initializing→Active / Replacing / Stopping / Degraded/Failed→Recovering`; two-phase atomic reconcile (stage→commit, failure keeps old runtime — failure ≠ removal); no-op on unchanged fingerprint; recovery without touching desired; secrets wiped on slot drop (M2.8); `MsgType::{Start,Stop,Restart}Driver` wired в `daemon/main.rs` через `DriverLifecycleManager` + `NotYetWiredFactory` (real configs в M3.4/M3.5); structured `DriverLifecycleEvent` data for M3.3. ADR-011. |
 | 3.3 | **Observability** (расширение) | Унифицировать metrics через `prometheus-client` (уже в `common/src/metrics.rs`); health tiers `Healthy→Degraded→Failing→Disabled` в `ControlEvent`; OpenTelemetry tracing export; `/metrics`+`/events/stream` (SSE уже есть). |
 | 3.4 | **Plan Engine Refactor** | `Current State → Desired State → Execution Plan` интерфейсный split; в `balansir-control` уже есть `Planner` порт + `BasicPlanner` + `StateDiff::build` в `common/src/diff.rs`; добавить dry-run/explain endpoint (`plan.rs`+`executor.rs` семантика). |
 | 3.5 | **Async drivers** | `tokio::process::Command` + `tokio::fs` во всех `ComponentDriver` (H5); хранить `Child` (M8). |
