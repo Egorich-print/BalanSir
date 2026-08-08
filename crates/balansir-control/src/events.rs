@@ -1,5 +1,6 @@
 // crates/balansir-control/src/events.rs
 
+use balansir_common::{DriverId, HealthTier};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -47,6 +48,13 @@ pub enum ControlEvent {
     RollbackCompleted,
     /// Reconciliation failed.
     Failed { error: String },
+    /// A driver's coarse health tier changed (observability tier, see `HealthTier`).
+    ///
+    /// Emitted **only** when the tier actually changes (not on every health
+    /// report) to keep the SSE stream free of duplicate noise. `DriverLifecycleState`
+    /// is a mechanism concept; this tier is the observed health derived from it
+    /// plus `HealthStatus` (ADR-012).
+    DriverHealthTierChanged { id: DriverId, tier: HealthTier },
 }
 
 impl ControlEvent {
@@ -69,6 +77,7 @@ impl ControlEvent {
             Self::RollbackStarted => "rollback_started",
             Self::RollbackCompleted => "rollback_completed",
             Self::Failed { .. } => "failed",
+            Self::DriverHealthTierChanged { .. } => "driver_health_tier_changed",
         }
     }
 }
@@ -92,5 +101,20 @@ impl ReconcileReason {
             Self::Plugin(name) => format!("plugin:{name}"),
             other => format!("{other:?}").to_lowercase(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use balansir_common::DriverId;
+
+    #[test]
+    fn driver_health_tier_event_names() {
+        let ev = ControlEvent::DriverHealthTierChanged {
+            id: DriverId::WireGuard,
+            tier: HealthTier::Degraded,
+        };
+        assert_eq!(ev.name(), "driver_health_tier_changed");
     }
 }

@@ -27,6 +27,58 @@ pub enum HealthStatus {
     Unknown,
 }
 
+/// Coarse health tier used by observability and control-plane events.
+///
+/// Deliberately coarser than `HealthStatus` so consumers (metrics, SSE,
+/// OpenTelemetry later) do not need to interpret per-reason codes. Ordering:
+/// `Healthy < Degraded < Failing < Disabled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum HealthTier {
+    Healthy = 0,
+    Degraded = 1,
+    Failing = 2,
+    Disabled = 3,
+}
+
+impl HealthTier {
+    /// Numeric value for wire/metrics encoding.
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Restore a tier from its numeric value (`HealthTier::as_u8`).
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Healthy),
+            1 => Some(Self::Degraded),
+            2 => Some(Self::Failing),
+            3 => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+
+    /// Short stable label for metrics/events.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Failing => "failing",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// Fold a `HealthStatus` into a tier for uniform reporting.
+    pub const fn from_health_status(status: &HealthStatus) -> Self {
+        match status {
+            HealthStatus::Healthy => Self::Healthy,
+            HealthStatus::Degraded { .. } => Self::Degraded,
+            HealthStatus::Unhealthy { .. } => Self::Failing,
+            HealthStatus::Unknown => Self::Disabled,
+        }
+    }
+}
+
 /// A point-in-time view of driver health for policy evaluation.
 ///
 /// The policy engine consults this to fail over `Forward { driver }` actions

@@ -1,4 +1,6 @@
+use balansir_common::event_bus::BoundedEventBus;
 use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
+use balansir_common::metrics::SharedMetrics;
 use balansir_common::{DriverId, Result};
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
@@ -9,6 +11,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn};
 
 use balansir_daemon::driver::factory::NotYetWiredFactory;
+use balansir_daemon::driver::health::TierTracker;
 use balansir_daemon::driver::lifecycle::{DriverIntent, DriverLifecycleManager};
 
 const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
@@ -39,6 +42,12 @@ async fn main() -> Result<()> {
         tokio::sync::Mutex::new(DriverLifecycleManager::new(Box::new(NotYetWiredFactory))),
     );
 
+    // M3.3 observability: shared metrics + event bus + tier tracker, fed by the
+    // orchestration layer (NOT by the lifecycle manager itself, per ADR-012).
+    let metrics = Arc::new(SharedMetrics::new());
+    let events: Arc<BoundedEventBus> = Arc::new(BoundedEventBus::new(1024));
+    let tracker = Arc::new(tokio::sync::Mutex::new(TierTracker::default()));
+
     // Setup signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -53,7 +62,12 @@ async fn main() -> Result<()> {
                             Ok(conn) => {
                                 info!("Executor connected (UID: {})", conn.peer_uid());
                                 let lifecycle = Arc::clone(&lifecycle);
-                                tokio::spawn(handle_connection(conn, lifecycle));
+                                let metrics = Arc::clone(&metrics);
+                                let events = Arc::clone(&events);
+                                let tracker = Arc::clone(&tracker);
+                                tokio::spawn(handle_connection(
+                                    conn, lifecycle, metrics, events, tracker,
+                                ));
                             }
                             Err(e) => {
                                 warn!("Authentication failed: {}", e);
@@ -91,11 +105,15 @@ async fn main() -> Result<()> {
 async fn handle_connection(
     mut conn: IpcServerConnection,
     lifecycle: Arc<tokio::sync::Mutex<DriverLifecycleManager>>,
+    metrics: Arc<SharedMetrics>,
+    events: Arc<BoundedEventBus>,
+    tracker: Arc<tokio::sync::Mutex<TierTracker>>,
 ) {
     loop {
         match conn.recv().await {
             Ok(msg) => {
-                let response = handle_message(&msg, Arc::clone(&lifecycle)).await;
+                let response =
+                    handle_message(&msg, Arc::clone(&lifecycle), &metrics, &events, &tracker).await;
                 if let Err(e) = conn.send(&response).await {
                     error!("Send error: {}", e);
                     break;
@@ -114,9 +132,26 @@ fn driver_id_from_payload(msg: &IpcMessage) -> Option<DriverId> {
     postcard::from_bytes(&msg.payload).ok()
 }
 
+/// Reconcile tier tracking after any lifecycle-affecting operation. Emits
+/// `ComponentHealthChanged` on the bus and updates gauges; tier changes are
+/// pushed only when the tier actually differs (ADR-012).
+async fn refresh_tiers(
+    lifecycle: &tokio::sync::Mutex<DriverLifecycleManager>,
+    metrics: &SharedMetrics,
+    events: &BoundedEventBus,
+    tracker: &tokio::sync::Mutex<TierTracker>,
+) {
+    let mut tracker_guard = tracker.lock().await;
+    let manager = lifecycle.lock().await;
+    tracker_guard.reconcile(&manager, metrics, events);
+}
+
 async fn handle_message(
     msg: &IpcMessage,
     lifecycle: Arc<tokio::sync::Mutex<DriverLifecycleManager>>,
+    metrics: &SharedMetrics,
+    events: &BoundedEventBus,
+    tracker: &tokio::sync::Mutex<TierTracker>,
 ) -> IpcMessage {
     match msg.msg_type {
         MsgType::HealthCheck => {
@@ -124,8 +159,8 @@ async fn handle_message(
             IpcMessage::response_ok(msg.correlation_id)
         }
         MsgType::GetMetrics => {
-            info!("Metrics requested");
-            IpcMessage::response_ok(msg.correlation_id)
+            let body = metrics.encode_metrics().into_bytes();
+            IpcMessage::response_data(msg.correlation_id, body)
         }
         MsgType::StartDriver | MsgType::RestartDriver => {
             let Some(id) = driver_id_from_payload(msg) else {
@@ -141,16 +176,18 @@ async fn handle_message(
                 },
                 fingerprint,
             };
-            let events = {
+            let failed = {
                 let mut g = lifecycle.lock().await;
-                g.reconcile(vec![intent]).await
+                let emitted = g.reconcile(vec![intent]).await;
+                emitted.iter().any(|e| {
+                    matches!(
+                        e.outcome,
+                        balansir_daemon::driver::lifecycle::DriverOutcome::Failed { .. }
+                    )
+                })
             };
-            if events.iter().any(|e| {
-                matches!(
-                    e.outcome,
-                    balansir_daemon::driver::lifecycle::DriverOutcome::Failed { .. }
-                )
-            }) {
+            refresh_tiers(&lifecycle, metrics, events, tracker).await;
+            if failed {
                 info!(?id, "driver failed to start");
                 IpcMessage::response_error(msg.correlation_id, "Driver failed to start")
             } else {
@@ -162,8 +199,11 @@ async fn handle_message(
             let Some(id) = driver_id_from_payload(msg) else {
                 return IpcMessage::response_error(msg.correlation_id, "Invalid driver id");
             };
-            let mut g = lifecycle.lock().await;
-            g.reconcile(vec![DriverIntent::stop(id)]).await;
+            {
+                let mut g = lifecycle.lock().await;
+                g.reconcile(vec![DriverIntent::stop(id)]).await;
+            }
+            refresh_tiers(&lifecycle, metrics, events, tracker).await;
             info!(?id, "driver stopped");
             IpcMessage::response_ok(msg.correlation_id)
         }

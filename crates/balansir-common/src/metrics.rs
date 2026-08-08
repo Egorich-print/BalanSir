@@ -1,9 +1,19 @@
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
 use prometheus_client::registry::Registry;
 use std::sync::RwLock;
+
+/// Label for the aggregated `balansir_drivers` gauge: the health tier name.
+/// Keeps Prometheus cardinality bounded to exactly four label values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, prometheus_client::encoding::EncodeLabelSet)]
+pub(crate) struct TierLabel {
+    tier: &'static str,
+}
+
+const TIER_NAMES: [&str; 4] = ["healthy", "degraded", "failing", "disabled"];
 
 /// BalanSir metrics collector
 pub struct Metrics {
@@ -20,6 +30,10 @@ pub struct Metrics {
     pub active_rules: Gauge,
     pub desired_rules: Gauge,
     pub health_status: Gauge,
+
+    // Driver observability
+    drivers: Family<TierLabel, Gauge>,
+    pub driver_lifecycle_transitions: Counter,
 
     // Histograms
     pub reconciliation_duration_seconds: Histogram,
@@ -88,6 +102,20 @@ impl Metrics {
             health_status.clone(),
         );
 
+        let drivers = Family::<TierLabel, Gauge>::default();
+        registry.register(
+            "balansir_drivers",
+            "Drivers per health tier",
+            drivers.clone(),
+        );
+
+        let driver_lifecycle_transitions = Counter::default();
+        registry.register(
+            "balansir_driver_lifecycle_transitions",
+            "Total driver lifecycle transitions",
+            driver_lifecycle_transitions.clone(),
+        );
+
         let reconciliation_duration_seconds = Histogram::new(exponential_buckets(0.001, 2.0, 10));
         registry.register(
             "balansir_reconciliation_duration_seconds",
@@ -119,6 +147,8 @@ impl Metrics {
             active_rules,
             desired_rules,
             health_status,
+            drivers,
+            driver_lifecycle_transitions,
             reconciliation_duration_seconds,
             policy_evaluation_duration_micros,
             executor_operation_duration_micros,
@@ -171,6 +201,23 @@ impl Metrics {
     /// Set health status gauge
     pub fn set_health_status(&self, status: i64) {
         self.health_status.set(status);
+    }
+
+    /// Set per-tier driver counts. `counts` is indexed by `HealthTier::as_u8`
+    /// (Healthy=0, Degraded=1, Failing=2, Disabled=3).
+    pub fn set_driver_tiers(&self, counts: [i64; 4]) {
+        for (idx, &count) in counts.iter().enumerate() {
+            self.drivers
+                .get_or_create(&TierLabel {
+                    tier: TIER_NAMES[idx],
+                })
+                .set(count);
+        }
+    }
+
+    /// Record a driver lifecycle transition (state change).
+    pub fn record_driver_lifecycle_transition(&self) {
+        self.driver_lifecycle_transitions.inc();
     }
 
     /// Record reconciliation duration
@@ -270,5 +317,51 @@ mod tests {
         let shared = SharedMetrics::new();
         let output = shared.encode_metrics();
         assert!(output.contains("balansir_reconciliations_total"));
+    }
+
+    #[test]
+    fn test_driver_tier_gauges_encoded() {
+        let metrics = Metrics::new();
+        metrics.set_health_status(2);
+        metrics.set_driver_tiers([1, 2, 3, 4]);
+        metrics.record_driver_lifecycle_transition();
+        metrics.record_driver_lifecycle_transition();
+
+        let output = metrics.encode_metrics();
+        assert!(output.contains("balansir_drivers{tier=\"healthy\"} 1"));
+        assert!(output.contains("balansir_drivers{tier=\"degraded\"} 2"));
+        assert!(output.contains("balansir_drivers{tier=\"failing\"} 3"));
+        assert!(output.contains("balansir_drivers{tier=\"disabled\"} 4"));
+        assert!(output.contains("balansir_driver_lifecycle_transitions_total 2"));
+    }
+
+    #[test]
+    fn test_health_tier_roundtrip() {
+        use crate::types::HealthTier;
+        for tier in [
+            HealthTier::Healthy,
+            HealthTier::Degraded,
+            HealthTier::Failing,
+            HealthTier::Disabled,
+        ] {
+            assert_eq!(HealthTier::from_u8(tier.as_u8()), Some(tier));
+        }
+        assert_eq!(HealthTier::from_u8(9), None);
+        assert_eq!(
+            HealthTier::from_health_status(&crate::types::HealthStatus::Healthy),
+            HealthTier::Healthy
+        );
+        assert_eq!(
+            HealthTier::from_health_status(&crate::types::HealthStatus::Degraded { reason: 1 }),
+            HealthTier::Degraded
+        );
+        assert_eq!(
+            HealthTier::from_health_status(&crate::types::HealthStatus::Unhealthy { reason: 2 }),
+            HealthTier::Failing
+        );
+        assert_eq!(
+            HealthTier::from_health_status(&crate::types::HealthStatus::Unknown),
+            HealthTier::Disabled
+        );
     }
 }
