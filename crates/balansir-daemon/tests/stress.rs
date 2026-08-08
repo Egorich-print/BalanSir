@@ -5,12 +5,17 @@
 //! - Memory leak detection (executor call count stability)
 
 use balansir_common::diff::StateDiff;
-use balansir_common::{Action, ActionRequest, ActionResult, DesiredRule, DesiredState};
+use balansir_common::{Action, ActionRequest, ActionResult, DesiredRule, DesiredState, HealthView};
 use balansir_daemon::policy::{Matcher, PacketContext, PolicyEngine, PolicyRule};
 use balansir_daemon::reconciliation::{ExecutorAdapter, Reconciler, ReconcilerConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Empty health view: no tracked driver is unhealthy, so routing is untouched.
+fn healthy() -> HealthView {
+    HealthView::new()
+}
 
 /// Build a packet context with given dst port/domain
 fn ctx(dst_port: u16, domain_hash: Option<u32>) -> PacketContext {
@@ -49,12 +54,12 @@ fn policy_engine_1000_rules() {
     let engine = PolicyEngine::new(gen_rules(rule_count));
 
     // Warmup
-    let _ = engine.evaluate(&ctx(443, None));
+    let _ = engine.evaluate(&ctx(443, None), &healthy());
 
     // Correctness: rule i matches port (i%60000)+1000, blocks
     for i in [0u32, 1, 500, 1023] {
         let port = ((i % 60000) + 1000) as u16;
-        let trace = engine.evaluate(&ctx(port, None));
+        let trace = engine.evaluate(&ctx(port, None), &healthy());
         assert_eq!(
             trace.action,
             Action::Block,
@@ -70,7 +75,7 @@ fn policy_engine_1000_rules() {
     }
 
     // Non-matching port falls through to default Allow
-    let trace = engine.evaluate(&ctx(1, None));
+    let trace = engine.evaluate(&ctx(1, None), &healthy());
     assert_eq!(trace.action, Action::Allow);
 
     // Timing: 10k evaluations over 1024 rules (ports cycle through rules)
@@ -79,7 +84,7 @@ fn policy_engine_1000_rules() {
     let mut decisions = 0;
     for i in 0..iterations {
         let port = (((i % rule_count) % 60000) + 1000) as u16;
-        decisions += (engine.evaluate(&ctx(port, None)).action == Action::Block) as u32;
+        decisions += (engine.evaluate(&ctx(port, None), &healthy()).action == Action::Block) as u32;
     }
     let elapsed = start.elapsed();
     let per_eval_ns = elapsed.as_nanos() / iterations as u128;
@@ -104,7 +109,7 @@ fn policy_engine_duplicate_priorities() {
         r.priority = 42;
     }
     let engine = PolicyEngine::new(rules);
-    let trace = engine.evaluate(&ctx(1000, None));
+    let trace = engine.evaluate(&ctx(1000, None), &healthy());
     assert_eq!(trace.action, Action::Block);
     assert_eq!(trace.steps.len(), 1);
 }
@@ -297,7 +302,7 @@ fn policy_engine_rule_churn() {
     }
     assert_eq!(engine.rules().len(), 1000);
 
-    let trace = engine.evaluate(&ctx(9001, None));
+    let trace = engine.evaluate(&ctx(9001, None), &healthy());
     // port 9001 = rule 9000 (rejected), still present after churn
     assert_eq!(trace.action, Action::Reject);
 }

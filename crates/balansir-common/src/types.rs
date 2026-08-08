@@ -27,6 +27,52 @@ pub enum HealthStatus {
     Unknown,
 }
 
+/// A point-in-time view of driver health for policy evaluation.
+///
+/// The policy engine consults this to fail over `Forward { driver }` actions
+/// when the target tunnel is `Unhealthy`. Implementations are expected to be
+/// cheap and recently refreshed (the daemon refreshes it on a health-check
+/// cycle; tests and simulators can build fixed snapshots).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HealthView {
+    inner: std::collections::HashMap<DriverId, HealthStatus>,
+}
+
+impl HealthView {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a driver's current health status.
+    pub fn set(&mut self, driver: DriverId, health: HealthStatus) {
+        self.inner.insert(driver, health);
+    }
+
+    /// Bulk-update from an iterator of `(DriverId, HealthStatus)` pairs.
+    pub fn extend(&mut self, iter: impl IntoIterator<Item = (DriverId, HealthStatus)>) {
+        self.inner.extend(iter);
+    }
+
+    /// Health of the given driver, or `Unknown` when not tracked.
+    pub fn status(&self, driver: DriverId) -> HealthStatus {
+        self.inner
+            .get(&driver)
+            .copied()
+            .unwrap_or(HealthStatus::Unknown)
+    }
+
+    /// Whether a driver is healthy enough to route through it.
+    ///
+    /// Only `Healthy` and `Unknown` are considered routable: `Degraded` and
+    /// `Unhealthy` are not. This keeps the policy bail-out conservative.
+    pub fn is_routable(&self, driver: DriverId) -> bool {
+        matches!(
+            self.status(driver),
+            HealthStatus::Healthy | HealthStatus::Unknown
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DriverAction {
     Start,
