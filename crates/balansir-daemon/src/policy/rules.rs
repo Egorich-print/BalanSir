@@ -119,12 +119,9 @@ impl PolicyRuleToml {
 
         let action = match &self.action {
             ActionToml::Route { table } => Action::Route { table: *table },
-            ActionToml::Forward { driver } => {
-                let driver_hash = hash_domain(driver);
-                Action::Forward {
-                    driver: balansir_common::DriverId::Custom(driver_hash),
-                }
-            }
+            ActionToml::Forward { driver } => Action::Forward {
+                driver: balansir_common::DriverId::from_name(driver),
+            },
             ActionToml::Block => Action::Block,
             ActionToml::Reject => Action::Reject,
             ActionToml::Allow => Action::Allow,
@@ -204,5 +201,45 @@ driver = "hysteria-primary"
         assert!(parse_cidr("invalid").is_err());
         assert!(parse_cidr("192.168.1.0/33").is_err());
         assert!(parse_cidr("999.999.999.999/24").is_err());
+    }
+
+    #[test]
+    fn test_forward_resolves_known_driver() {
+        let rule = PolicyRuleToml {
+            name: "wg-fwd".into(),
+            priority: 10,
+            enabled: true,
+            matcher: MatcherToml::Any,
+            action: ActionToml::Forward {
+                driver: "wireguard".into(),
+            },
+        };
+        let converted = rule.to_rule(1).unwrap();
+        assert!(matches!(
+            converted.action,
+            Action::Forward {
+                driver: balansir_common::DriverId::WireGuard
+            }
+        ));
+    }
+
+    #[test]
+    fn test_forward_unknown_driver_is_custom() {
+        let rule = PolicyRuleToml {
+            name: "custom-fwd".into(),
+            priority: 10,
+            enabled: true,
+            matcher: MatcherToml::Any,
+            action: ActionToml::Forward {
+                driver: "some.third.party.vpn".into(),
+            },
+        };
+        let converted = rule.to_rule(2).unwrap();
+        assert!(matches!(
+            converted.action,
+            Action::Forward {
+                driver: balansir_common::DriverId::Custom(_)
+            }
+        ));
     }
 }

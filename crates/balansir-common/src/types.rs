@@ -119,6 +119,46 @@ impl DriverId {
             n => Self::Custom(n),
         }
     }
+
+    /// Resolve a driver name (as written in TOML/config) to a `DriverId`.
+    ///
+    /// Known drivers are matched case-insensitively by their canonical name
+    /// (e.g. `wireguard`, `amneziawg`, `xray`, `hysteria`, `b4`,
+    /// `dnsforwarder`). Unknown driver names resolve to `Custom`.
+    pub fn from_name(name: &str) -> Self {
+        match name.to_ascii_lowercase().as_str() {
+            "wireguard" | "wg" => Self::WireGuard,
+            "amneziawg" | "awg" => Self::AmneziaWG,
+            "xray" | "xray-core" => Self::Xray,
+            "hysteria" | "hysteria2" => Self::Hysteria,
+            "b4" => Self::B4,
+            "dnsforwarder" | "dns" => Self::DnsForwarder,
+            _ => Self::Custom(hash_name(name)),
+        }
+    }
+
+    /// Human-friendly driver identifier as used for routing/config.
+    pub fn canonical_name(&self) -> &'static str {
+        match self {
+            Self::WireGuard => "wireguard",
+            Self::AmneziaWG => "amneziawg",
+            Self::Xray => "xray",
+            Self::Hysteria => "hysteria",
+            Self::B4 => "b4",
+            Self::DnsForwarder => "dnsforwarder",
+            Self::Custom(_) => "custom",
+        }
+    }
+}
+
+/// Stable FNV-1a hash used for custom driver names.
+fn hash_name(name: &str) -> u32 {
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in name.bytes() {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash
 }
 
 impl std::fmt::Display for DriverId {
@@ -334,4 +374,35 @@ pub struct ActualRule {
     pub id: u32,
     pub action: Action,
     pub rule_id: Option<u32>,
+}
+
+#[cfg(test)]
+mod driver_id_tests {
+    use super::DriverId;
+
+    #[test]
+    fn known_names_resolve_to_variants() {
+        assert_eq!(DriverId::from_name("wireguard"), DriverId::WireGuard);
+        assert_eq!(DriverId::from_name("WIREGUARD"), DriverId::WireGuard);
+        assert_eq!(DriverId::from_name("wg"), DriverId::WireGuard);
+        assert_eq!(DriverId::from_name("amneziawg"), DriverId::AmneziaWG);
+        assert_eq!(DriverId::from_name("xray"), DriverId::Xray);
+        assert_eq!(DriverId::from_name("hysteria2"), DriverId::Hysteria);
+        assert_eq!(DriverId::from_name("b4"), DriverId::B4);
+        assert_eq!(DriverId::from_name("dns"), DriverId::DnsForwarder);
+    }
+
+    #[test]
+    fn unknown_names_become_custom() {
+        let id = DriverId::from_name("my-vpn");
+        assert!(matches!(id, DriverId::Custom(_)));
+        assert_eq!(DriverId::from_name("my-vpn"), id, "hash must be stable");
+    }
+
+    #[test]
+    fn u32_roundtrip() {
+        for id in [DriverId::WireGuard, DriverId::B4, DriverId::Custom(99)] {
+            assert_eq!(DriverId::from_u32(id.as_u32()), id);
+        }
+    }
 }
