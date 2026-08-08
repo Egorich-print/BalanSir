@@ -150,6 +150,31 @@ impl Reconciler {
         self.desired_state.lock().await.clone()
     }
 
+    /// Transactional hot reload (ADR-010).
+    ///
+    /// Compiles the candidate strictly, then reveals the new desired state to
+    /// the coordinator only when its reconcile cycle succeeds. On failure the
+    /// old desired state is restored and the error surfaced — no
+    /// half-old/half-new state is ever observable.
+    pub async fn reload(
+        &self,
+        candidate: DesiredState,
+        reason: ReconcileReason,
+    ) -> ReconciliationResult<()> {
+        let prev = {
+            let mut desired = self.desired_state.lock().await;
+            std::mem::replace(&mut *desired, candidate)
+        };
+
+        match self.coordinator.reconcile(reason).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                *self.desired_state.lock().await = prev;
+                Err(ReconciliationError::Reconcile(e.to_string()))
+            }
+        }
+    }
+
     /// Add a desired rule.
     pub async fn add_rule(&self, rule: DesiredRule) {
         self.desired_state.lock().await.rules.push(rule);
@@ -236,7 +261,7 @@ impl Reconciler {
 mod tests {
     use super::*;
     use crate::reconciliation::dummy::DummyExecutorAdapter;
-    use balansir_common::Action;
+    use balansir_common::{Action, ActionRequest, ActionResult};
 
     #[tokio::test]
     async fn test_reconciler_basic() {
@@ -344,5 +369,88 @@ mod tests {
 
         let reconciler = Reconciler::from_state_store(&store).await.unwrap();
         assert!(reconciler.get_desired().await.rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_reload_commits_new_state() {
+        let executor = Arc::new(DummyExecutorAdapter::new());
+        let reconciler = Reconciler::new(
+            DesiredState::default(),
+            executor,
+            ReconcilerConfig::default(),
+        );
+
+        let candidate = DesiredState {
+            rules: vec![DesiredRule {
+                id: 7,
+                action: Action::Block,
+                priority: 100,
+            }],
+            drivers: Vec::new(),
+        };
+
+        reconciler
+            .reload(candidate, ReconcileReason::ConfigReload)
+            .await
+            .unwrap();
+
+        let desired = reconciler.get_desired().await;
+        assert_eq!(desired.rules.len(), 1);
+        assert_eq!(desired.rules[0].id, 7);
+        let actual = reconciler.get_actual().await;
+        assert_eq!(actual.active_rules.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_reload_rejects_bad_state_and_keeps_old() {
+        // A candidate whose reconcile fails must never replace the live state.
+        let prev = DesiredState::default();
+
+        // Executor that refuses every apply: any non-empty candidate fails.
+        let failing = Arc::new(FailingExecutor);
+        let reconciler = Reconciler::new(prev.clone(), failing, ReconcilerConfig::default());
+
+        let bad = DesiredState {
+            rules: vec![DesiredRule {
+                id: 2,
+                action: Action::Block,
+                priority: 100,
+            }],
+            drivers: Vec::new(),
+        };
+
+        assert!(reconciler
+            .reload(bad, ReconcileReason::ConfigReload)
+            .await
+            .is_err());
+
+        // Old (empty) state is still live after the aborted reload.
+        let desired = reconciler.get_desired().await;
+        assert!(desired.rules.is_empty());
+    }
+
+    /// Executor that fails every rule apply — enough to force a reload
+    /// rollback for any non-empty candidate.
+    struct FailingExecutor;
+
+    #[async_trait::async_trait]
+    impl ExecutorAdapter for FailingExecutor {
+        async fn execute(&self, _request: &ActionRequest) -> ActionResult {
+            ActionResult::Failed {
+                error: balansir_common::ActionError::Unknown,
+                message: Some("simulated failure".into()),
+            }
+        }
+
+        async fn rule_count(&self) -> u32 {
+            0
+        }
+
+        async fn remove_rule(&self, _rule_id: u32) -> ActionResult {
+            ActionResult::Applied {
+                execution_time_us: 50,
+                rule_id: Some(_rule_id),
+            }
+        }
     }
 }

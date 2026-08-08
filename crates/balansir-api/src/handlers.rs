@@ -83,18 +83,43 @@ pub async fn get_desired(State(state): State<Arc<ApiState>>) -> impl IntoRespons
 }
 
 /// Set desired state
-pub async fn set_desired(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    if let Some(plane) = state.control.as_ref() {
-        plane.record_manual().await;
-    }
+pub async fn set_desired(
+    State(state): State<Arc<ApiState>>,
+    Json(candidate): Json<balansir_common::DesiredState>,
+) -> impl IntoResponse {
+    let Some(plane) = state.control.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "Control plane not available",
+            })),
+        );
+    };
 
-    // TODO(M3): parse a `DesiredState` JSON body and push it into the daemon's
-    // desired store. Today the daemon's desired state is config-driven, so the
-    // API acknowledges the intent and triggers a single reconciliation.
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"ok": true, "message": "Desired state update acknowledged"})),
-    )
+    // Transactional hot reload (ADR-010): the candidate is staged through the
+    // coordinator's reconcile cycle; on failure the previous state remains live.
+    match plane.reload_api(candidate).await {
+        Ok(()) => {
+            state.metrics.get().record_reconciliation();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "generation": plane.generation(),
+                    "message": "Desired state applied",
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": e.to_string(),
+                "message": "Desired state rejected; previous state kept",
+            })),
+        ),
+    }
 }
 
 /// Get drift status (desired vs actual diff).

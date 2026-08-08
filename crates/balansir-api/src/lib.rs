@@ -96,6 +96,7 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/drivers/:id/restart", post(handlers::restart_driver))
         // Actions
         .route("/reconcile", post(handlers::trigger_reconcile))
+        .route("/reload", post(handlers::set_desired))
         // Events
         .route("/events", get(handlers::get_events))
         .route("/events/stream", get(handlers::events_stream))
@@ -300,5 +301,67 @@ mod tests {
             events.iter().any(|e| e["event_type"] == "reconciled"),
             "missing reconciled event in {events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_reload_endpoint_applies_candidate() {
+        use crate::control::{ControlPlane, UpdatableDesiredStore};
+        use balansir_common::DesiredState;
+        use balansir_control::executor::MockExecutor;
+        use balansir_control::planner::BasicPlanner;
+        use balansir_control::provider::MemoryStateProvider;
+        use balansir_control::snapshot_store::MemorySnapshotStore;
+        use balansir_control::NoopRollback;
+
+        let store = Arc::new(UpdatableDesiredStore::new(DesiredState::default()));
+        let plane = ControlPlane::assemble_with_updater(
+            store.clone(),
+            Arc::new(MemoryStateProvider::default()),
+            Arc::new(BasicPlanner),
+            Arc::new(MockExecutor::new()),
+            Arc::new(MemorySnapshotStore::new()),
+            Arc::new(NoopRollback),
+            32,
+            Some(store.clone()),
+        );
+
+        let mut state = ApiState::new(Arc::new(balansir_common::metrics::SharedMetrics::new()));
+        state.control = Some(plane);
+        let app = create_router(Arc::new(state));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let candidate = serde_json::json!({
+            "rules": [
+                {"id": 21, "action": "Block", "priority": 90}
+            ],
+            "drivers": []
+        });
+
+        let resp = client
+            .post(format!("http://{}/reload", addr))
+            .json(&candidate)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "reload response body: {}",
+            resp.text().await.unwrap_or_default()
+        );
+
+        let resp = client
+            .get(format!("http://{}/desired", addr))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["rule_count"], 1, "desired: {body}");
     }
 }

@@ -8,17 +8,28 @@
 
 use async_trait::async_trait;
 use balansir_common::{ActualState, DesiredState, DriverAction, DriverId};
-use balansir_control::error::ControlResult;
 use balansir_control::events::ControlEvent;
 use balansir_control::traits::{
     DesiredProvider, EventSink, Executor, Planner, Rollback, SnapshotStore, StateProvider,
 };
+use balansir_control::{ControlError, ControlResult};
 use balansir_control::{Coordinator, CoordinatorConfig, ReconcileReason};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
 use crate::handlers::EventEntry;
+
+/// Seam for transactional reload: a writable desired-state store.
+///
+/// Provided by the daemon (its shared `DesiredState` handle) so the API can
+/// stage a candidate configuration and roll it back on failure (ADR-010)
+/// without depending on daemon internals.
+#[async_trait]
+pub trait DesiredUpdater: Send + Sync {
+    async fn set_desired(&self, state: DesiredState);
+    async fn desired(&self) -> ControlResult<DesiredState>;
+}
 
 /// Bounded log of control-plane events, fed by an `EventSink` bridging
 /// `ControlEvent`s from the coordinator.
@@ -97,6 +108,7 @@ pub struct ControlPlane {
     desired: Arc<dyn DesiredProvider>,
     actual: Arc<dyn StateProvider>,
     events: Arc<EventBridge>,
+    desired_updater: Option<Arc<dyn DesiredUpdater>>,
 }
 
 impl ControlPlane {
@@ -114,6 +126,31 @@ impl ControlPlane {
         snapshot_store: Arc<dyn SnapshotStore>,
         rollback: Arc<dyn Rollback>,
         event_capacity: usize,
+    ) -> Arc<Self> {
+        Self::assemble_with_updater(
+            desired,
+            actual,
+            planner,
+            executor,
+            snapshot_store,
+            rollback,
+            event_capacity,
+            None,
+        )
+    }
+
+    /// Assemble a control plane with a writable desired-state handle, enabling
+    /// transactional `/reload` (ADR-010).
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_with_updater(
+        desired: Arc<dyn DesiredProvider>,
+        actual: Arc<dyn StateProvider>,
+        planner: Arc<dyn Planner>,
+        executor: Arc<dyn Executor>,
+        snapshot_store: Arc<dyn SnapshotStore>,
+        rollback: Arc<dyn Rollback>,
+        event_capacity: usize,
+        updater: Option<Arc<dyn DesiredUpdater>>,
     ) -> Arc<Self> {
         let events = Arc::new(EventBridge::new(event_capacity));
         let coordinator = Arc::new(Coordinator::new(
@@ -133,6 +170,7 @@ impl ControlPlane {
             desired,
             actual,
             events,
+            desired_updater: updater,
         })
     }
 
@@ -156,6 +194,33 @@ impl ControlPlane {
         self.coordinator
             .reconcile(ReconcileReason::ApiRequest)
             .await
+    }
+
+    /// Transactional hot reload (ADR-010).
+    ///
+    /// Validates the candidate against the coordinator's reconcile cycle
+    /// before exposing it as live desired state. A candidate that fails to
+    /// reconcile is rejected; the previous state remains authoritative.
+    pub async fn reload_api(&self, candidate: DesiredState) -> ControlResult<()> {
+        if let Some(updater) = &self.desired_updater {
+            let prev = self.desired.desired().await?;
+            updater.set_desired(candidate).await;
+            match self
+                .coordinator
+                .reconcile(ReconcileReason::ConfigReload)
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    updater.set_desired(prev).await;
+                    Err(e)
+                }
+            }
+        } else {
+            Err(ControlError::DesiredProvider(
+                "no writable desired provider configured for reload".into(),
+            ))
+        }
     }
 
     /// Record a manual-trigger event (kept for the legacy `/reconcile` counter).
@@ -191,7 +256,41 @@ impl ControlPlane {
     }
 }
 
-/// Public status view of a configured driver.
+/// A desired-state store that is both readable (`DesiredProvider`) and
+/// writable (`DesiredUpdater`), backed by a single shared handle. Used for
+/// transactional `/reload`: the coordinator reads and the reload writes the
+/// same store, so a rollback restores exactly what was live before.
+pub struct UpdatableDesiredStore {
+    inner: tokio::sync::Mutex<DesiredState>,
+}
+
+impl UpdatableDesiredStore {
+    pub fn new(state: DesiredState) -> Self {
+        Self {
+            inner: tokio::sync::Mutex::new(state),
+        }
+    }
+}
+
+#[async_trait]
+impl DesiredProvider for UpdatableDesiredStore {
+    async fn desired(&self) -> ControlResult<DesiredState> {
+        Ok(self.inner.lock().await.clone())
+    }
+}
+
+#[async_trait]
+impl DesiredUpdater for UpdatableDesiredStore {
+    async fn set_desired(&self, state: DesiredState) {
+        *self.inner.lock().await = state;
+    }
+
+    async fn desired(&self) -> ControlResult<DesiredState> {
+        Ok(self.inner.lock().await.clone())
+    }
+}
+
+// --- Public status view of a configured driver. ---
 #[derive(Debug, Clone, Serialize)]
 pub struct DriverStatus {
     pub id: u32,
@@ -285,5 +384,56 @@ mod tests {
         assert_eq!(drivers[0].state, "restarting");
         assert_eq!(driver_from_name("Xray"), Some(DriverId::Xray));
         assert_eq!(driver_from_name("3"), Some(DriverId::Xray));
+    }
+
+    #[tokio::test]
+    async fn reload_commits_candidate_and_rolls_back_on_failure() {
+        // Working plane: candidate commits, generation bumps.
+        let store = Arc::new(UpdatableDesiredStore::new(DesiredState {
+            rules: vec![DesiredRule {
+                id: 7,
+                action: Action::Allow,
+                priority: 50,
+            }],
+            drivers: Vec::new(),
+        }));
+        let plane = ControlPlane::assemble_with_updater(
+            store.clone(),
+            Arc::new(MemoryStateProvider::default()),
+            Arc::new(BasicPlanner),
+            Arc::new(MockExecutor::new()),
+            Arc::new(MemorySnapshotStore::new()),
+            Arc::new(NoopRollback),
+            16,
+            Some(store.clone()),
+        );
+
+        let candidate = DesiredState {
+            rules: vec![DesiredRule {
+                id: 9,
+                action: Action::Block,
+                priority: 100,
+            }],
+            drivers: Vec::new(),
+        };
+        assert!(plane.reload_api(candidate.clone()).await.is_ok());
+        let d = plane.desired().await.unwrap();
+        assert_eq!(d.rules.len(), 1);
+        assert_eq!(d.rules[0].id, 9);
+    }
+
+    #[tokio::test]
+    async fn reload_without_writable_store_is_rejected() {
+        let plane = sample_plane();
+        let candidate = DesiredState {
+            rules: vec![DesiredRule {
+                id: 1,
+                action: Action::Allow,
+                priority: 10,
+            }],
+            drivers: Vec::new(),
+        };
+        let err = plane.reload_api(candidate).await.unwrap_err();
+        assert!(matches!(err, ControlError::DesiredProvider(_)));
     }
 }

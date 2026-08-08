@@ -94,29 +94,37 @@ fn parse_driver_action(s: &str) -> ControlResult<DriverAction> {
     }
 }
 
-impl From<DesiredConfig> for DesiredState {
-    fn from(config: DesiredConfig) -> Self {
+/// Compile a `DesiredConfig` into a `DesiredState`, rejecting any entry that
+/// does not parse. A single malformed rule or driver aborts the whole compile
+/// so a malformed reload is always rejected atomically (ADR-010).
+impl TryFrom<DesiredConfig> for DesiredState {
+    type Error = ControlError;
+
+    fn try_from(config: DesiredConfig) -> Result<Self, Self::Error> {
         let rules = config
             .rules
             .into_iter()
-            .map(|r| DesiredRule {
-                id: r.id,
-                action: parse_action(&r.action).unwrap_or(Action::Allow),
-                priority: r.priority,
+            .map(|r| {
+                Ok(DesiredRule {
+                    id: r.id,
+                    action: parse_action(&r.action)?,
+                    priority: r.priority,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ControlError>>()?;
 
         let drivers = config
             .drivers
             .into_iter()
-            .filter_map(|d| {
-                let id = parse_driver_id(&d.id).ok()?;
-                let action = parse_driver_action(&d.action).ok()?;
-                Some(DesiredDriver { id, action })
+            .map(|d| {
+                Ok(DesiredDriver {
+                    id: parse_driver_id(&d.id)?,
+                    action: parse_driver_action(&d.action)?,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ControlError>>()?;
 
-        Self { rules, drivers }
+        Ok(Self { rules, drivers })
     }
 }
 
@@ -134,7 +142,7 @@ impl DesiredProvider for ConfigDesiredProvider {
             ControlError::DesiredProvider(format!("parse {}: {e}", self.path.display()))
         })?;
 
-        Ok(config.into())
+        DesiredState::try_from(config)
     }
 }
 
@@ -185,5 +193,72 @@ impl MemoryStateProvider {
 impl StateProvider for MemoryStateProvider {
     async fn actual(&self) -> ControlResult<ActualState> {
         Ok(self.state.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lenient_config_compiles_fully() {
+        let config = DesiredConfig {
+            rules: vec![
+                RuleConfig {
+                    id: 1,
+                    action: "block".into(),
+                    priority: 100,
+                },
+                RuleConfig {
+                    id: 2,
+                    action: "allow".into(),
+                    priority: 50,
+                },
+            ],
+            drivers: vec![DriverConfig {
+                id: "wireguard".into(),
+                action: "start".into(),
+            }],
+        };
+        let state = DesiredState::try_from(config).unwrap();
+        assert_eq!(state.rules.len(), 2);
+        assert_eq!(state.drivers.len(), 1);
+    }
+
+    #[test]
+    fn single_bad_action_rejects_whole_config() {
+        let config = DesiredConfig {
+            rules: vec![
+                RuleConfig {
+                    id: 1,
+                    action: "block".into(),
+                    priority: 100,
+                },
+                RuleConfig {
+                    id: 2,
+                    action: "nonsense".into(),
+                    priority: 50,
+                },
+            ],
+            drivers: vec![],
+        };
+        let err = DesiredState::try_from(config).unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("unknown action"));
+    }
+
+    #[test]
+    fn bad_driver_rejects_whole_config() {
+        let config = DesiredConfig {
+            rules: vec![RuleConfig {
+                id: 1,
+                action: "allow".into(),
+                priority: 10,
+            }],
+            drivers: vec![DriverConfig {
+                id: "not-a-driver".into(),
+                action: "start".into(),
+            }],
+        };
+        assert!(DesiredState::try_from(config).is_err());
     }
 }
