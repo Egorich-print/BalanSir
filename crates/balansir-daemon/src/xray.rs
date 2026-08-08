@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::process::Child;
 
@@ -10,7 +11,8 @@ use crate::driver::ComponentDriver;
 pub struct XrayConfig {
     pub server: String,
     pub port: u16,
-    pub uuid: String,
+    #[serde(skip_serializing)]
+    pub uuid: SecretString,
     pub flow: Option<String>,
     pub transport: XrayTransport,
     pub tls: Option<XrayTls>,
@@ -66,7 +68,7 @@ impl XrayDriver {
 }}"#,
             self.config.server,
             self.config.port,
-            self.config.uuid,
+            self.config.uuid.expose_secret(),
             self.config.flow.as_deref().unwrap_or("")
         )
     }
@@ -139,15 +141,12 @@ impl ComponentDriver for XrayDriver {
     async fn start(&mut self) -> Result<(), DriverError> {
         tracing::info!("Starting Xray driver: {}", self.config.server);
 
-        let config_path = self.generate_config();
-        let path = crate::secrets::write_secret(
-            &self.id.as_u32().to_string(),
-            "xray",
-            config_path.as_bytes(),
-        )?
-        .into_os_string()
-        .into_string()
-        .map_err(|_| DriverError::StartFailed("non-UTF8 secret path".into()))?;
+        let config = zeroize::Zeroizing::new(self.generate_config());
+        let path =
+            crate::secrets::write_secret(&self.id.as_u32().to_string(), "xray", config.as_bytes())?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| DriverError::StartFailed("non-UTF8 secret path".into()))?;
         self.start_process(&path)?;
 
         self.health = HealthStatus::Healthy;
@@ -200,7 +199,7 @@ mod tests {
         let config = XrayConfig {
             server: "proxy.example.com".to_string(),
             port: 443,
-            uuid: "test-uuid".to_string(),
+            uuid: secrecy::SecretString::from("test-uuid"),
             flow: Some("xtls-rprx-vision".to_string()),
             transport: XrayTransport::Tcp,
             tls: None,

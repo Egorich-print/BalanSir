@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 use crate::driver::ComponentDriver;
@@ -16,7 +17,8 @@ fn lsmod_bin() -> std::path::PathBuf {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AmneziaWGConfig {
     pub interface: String,
-    pub private_key: Option<String>,
+    #[serde(skip_serializing)]
+    pub private_key: Option<SecretString>,
     pub listen_port: Option<u16>,
     pub address: Option<String>,
     pub peers: Vec<AmneziaWGPeer>,
@@ -228,7 +230,7 @@ mod tests {
     fn test_amneziawg_config() {
         let config = AmneziaWGConfig {
             interface: "awg0".to_string(),
-            private_key: Some("test-key".to_string()),
+            private_key: Some(secrecy::SecretString::from("test-key")),
             listen_port: Some(48243),
             address: Some("10.0.0.1/24".to_string()),
             peers: vec![AmneziaWGPeer {

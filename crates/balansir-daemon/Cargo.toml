@@ -33,6 +33,8 @@ postcard.workspace = true
 uuid.workspace = true
 libc.workspace = true
 thiserror.workspace = true
+secrecy.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink.workspace = true

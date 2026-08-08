@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -11,7 +12,8 @@ pub struct Hysteria2Config {
     /// Server address (host:port)
     pub server: String,
     /// Authentication password
-    pub password: String,
+    #[serde(skip_serializing)]
+    pub password: SecretString,
     /// Optional obfuscation
     pub obfs: Option<ObfsConfig>,
     /// Bandwidth settings
@@ -30,7 +32,8 @@ pub struct ObfsConfig {
     /// Obfuscation mode ("salamander")
     pub mode: String,
     /// Obfuscation password
-    pub password: String,
+    #[serde(skip_serializing)]
+    pub password: SecretString,
 }
 
 /// Bandwidth configuration
@@ -81,7 +84,8 @@ impl Hysteria2Driver {
                 "type": "{}",
                 "password": "{}"
             }},"#,
-                obfs.mode, obfs.password
+                obfs.mode,
+                obfs.password.expose_secret()
             )
         } else {
             String::new()
@@ -166,11 +170,11 @@ impl Hysteria2Driver {
   }}
 }}"#,
             self.config.server,
-            self.config.password,
+            self.config.password.expose_secret(),
             self.config
                 .obfs
                 .as_ref()
-                .map(|o| o.password.as_str())
+                .map(|o| o.password.expose_secret())
                 .unwrap_or(""),
             up_bw,
             down_bw,
@@ -182,11 +186,11 @@ impl Hysteria2Driver {
                 .unwrap_or("443")
                 .parse::<u16>()
                 .unwrap_or(443),
-            self.config.password,
+            self.config.password.expose_secret(),
             self.config
                 .obfs
                 .as_ref()
-                .map(|o| o.password.as_str())
+                .map(|o| o.password.expose_secret())
                 .unwrap_or(""),
             self.config
                 .tls
@@ -202,7 +206,7 @@ impl Hysteria2Driver {
     }
 
     fn write_config(&self) -> Result<String, DriverError> {
-        let config = self.generate_config();
+        let config = zeroize::Zeroizing::new(self.generate_config());
         let path = crate::secrets::write_secret(
             &self.id.as_u32().to_string(),
             "hysteria",
@@ -327,10 +331,10 @@ mod tests {
     fn test_hysteria2_config() {
         let config = Hysteria2Config {
             server: "proxy.example.com:443".to_string(),
-            password: "test-password".to_string(),
+            password: secrecy::SecretString::from("test-password"),
             obfs: Some(ObfsConfig {
                 mode: "salamander".to_string(),
-                password: "obfs-password".to_string(),
+                password: secrecy::SecretString::from("obfs-password"),
             }),
             bandwidth: BandwidthConfig {
                 up_mbps: Some(50),
@@ -355,10 +359,10 @@ mod tests {
     fn test_hysteria2_config_generation() {
         let config = Hysteria2Config {
             server: "proxy.example.com:443".to_string(),
-            password: "test-password".to_string(),
+            password: secrecy::SecretString::from("test-password"),
             obfs: Some(ObfsConfig {
                 mode: "salamander".to_string(),
-                password: "obfs-password".to_string(),
+                password: secrecy::SecretString::from("obfs-password"),
             }),
             bandwidth: BandwidthConfig {
                 up_mbps: Some(50),
@@ -375,5 +379,32 @@ mod tests {
         assert!(config_str.contains("proxy.example.com"));
         assert!(config_str.contains("test-password"));
         assert!(config_str.contains("salamander"));
+    }
+
+    #[test]
+    fn test_config_debug_redacts_secrets() {
+        let config = Hysteria2Config {
+            server: "proxy.example.com:443".to_string(),
+            password: secrecy::SecretString::from("super-secret-pw"),
+            obfs: Some(ObfsConfig {
+                mode: "salamander".to_string(),
+                password: secrecy::SecretString::from("obfs-secret-pw"),
+            }),
+            bandwidth: BandwidthConfig {
+                up_mbps: Some(50),
+                down_mbps: Some(100),
+            },
+            up_proxy: None,
+            down_proxy: None,
+            tls: None,
+        };
+
+        let dbg = format!("{:?}", config);
+        assert!(!dbg.contains("super-secret-pw"));
+        assert!(!dbg.contains("obfs-secret-pw"));
+        assert!(dbg.contains("proxy.example.com"));
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("password"));
     }
 }
