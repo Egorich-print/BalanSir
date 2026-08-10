@@ -230,6 +230,28 @@ impl Reconciler {
         self.planner.build_plan(&desired, &actual, gen)
     }
 
+    /// Dry-run (M3.4.3): compute the reconciliation plan exactly as a real
+    /// reconcile would, without executing it.
+    ///
+    /// Same single `Planner` authority as normal reconciliation; no side
+    /// effects — no execution, no state mutation, no event emission, no
+    /// generation bump. The returned plan is identical to what `reconcile`
+    /// would attempt.
+    pub async fn dry_run(&self) -> ReconciliationPlan {
+        self.build_plan().await
+    }
+
+    /// Explain (M3.4.3): describe the operations the current dry-run plan
+    /// would perform.
+    ///
+    /// Derived from the *same* plan produced by the single `Planner` authority,
+    /// so the explanation always matches what normal reconciliation would
+    /// attempt. No second planning path.
+    pub async fn explain(&self) -> String {
+        let plan = self.build_plan().await;
+        plan.to_string()
+    }
+
     /// Trigger a single reconciliation cycle.
     pub async fn reconcile(&self) -> ReconciliationResult<()> {
         self.coordinator
@@ -514,6 +536,89 @@ mod tests {
         assert_eq!(
             plan_via_reconciler.generation_after,
             plan_via_stored_planner.generation_after
+        );
+    }
+
+    /// M3.4.3: dry_run returns the same plan as the single planner authority
+    /// and performs no side effects (no execution, no state mutation, no
+    /// generation bump).
+    #[tokio::test]
+    async fn dry_run_produces_plan_without_side_effects() {
+        let desired = DesiredState {
+            rules: vec![
+                DesiredRule {
+                    id: 1,
+                    action: Action::Block,
+                    priority: 100,
+                },
+                DesiredRule {
+                    id: 2,
+                    action: Action::Allow,
+                    priority: 50,
+                },
+            ],
+            drivers: Vec::new(),
+        };
+        let executor = Arc::new(DummyExecutorAdapter::new());
+        let reconciler = Reconciler::new(desired.clone(), executor, ReconcilerConfig::default());
+        reconciler.set_desired(desired).await;
+
+        let plan = reconciler.dry_run().await;
+
+        // The plan requests the two desired rules to be applied.
+        assert_eq!(plan.operations.len(), 2);
+        assert!(plan.operations.iter().any(|op| matches!(
+            op,
+            balansir_common::plan::ReconciliationOperation::UpdatePolicy(rule)
+                if rule.id == 1
+        )));
+        assert!(plan.operations.iter().any(|op| matches!(
+            op,
+            balansir_common::plan::ReconciliationOperation::UpdatePolicy(rule)
+                if rule.id == 2
+        )));
+
+        // Dry-run must not mutate actual state, bump generation, or execute.
+        let actual = reconciler.get_actual().await;
+        assert!(
+            actual.active_rules.is_empty(),
+            "dry-run must not apply rules"
+        );
+        assert_eq!(
+            reconciler.generation(),
+            1,
+            "dry-run must not bump generation"
+        );
+    }
+
+    /// M3.4.3: explain describes exactly the operations in the dry-run plan
+    /// (same single planning authority), and a second call yields the same
+    /// deterministic description.
+    #[tokio::test]
+    async fn explain_describes_dry_run_plan_operations() {
+        let desired = DesiredState {
+            rules: vec![DesiredRule {
+                id: 7,
+                action: Action::Block,
+                priority: 100,
+            }],
+            drivers: Vec::new(),
+        };
+        let executor = Arc::new(DummyExecutorAdapter::new());
+        let reconciler = Reconciler::new(desired, executor, ReconcilerConfig::default());
+
+        let plan = reconciler.dry_run().await;
+        let explanation = reconciler.explain().await;
+
+        // Explain mentions the plan's generation and the policy operation.
+        assert!(explanation.contains("Update policy"), "{explanation}");
+        assert!(explanation.contains("generation:"), "{explanation}");
+
+        // Deterministic: same inputs -> same explanation.
+        assert_eq!(explanation, reconciler.explain().await);
+        assert!(
+            plan.to_string().contains("Update policy"),
+            "plan display matches explain"
         );
     }
 }
