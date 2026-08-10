@@ -55,6 +55,13 @@ jobs:
   security:
     name: Security audit
     runs-on: ubuntu-latest
+    # rustsec/audit-check posts a check-run annotation via the GitHub REST API;
+    # the default read-only GITHUB_TOKEN on a public repo cannot do that and the
+    # job (and therefore the whole workflow) fails with "Resource not accessible
+    # by integration". Grant checks:write so the annotation step succeeds.
+    permissions:
+      contents: read
+      checks: write
     steps:
     - uses: actions/checkout@v4
 
