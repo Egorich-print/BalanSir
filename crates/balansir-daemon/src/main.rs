@@ -10,7 +10,7 @@ use tokio::net::UnixListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn};
 
-use balansir_daemon::driver::factory::NotYetWiredFactory;
+use balansir_daemon::driver::factory::ConfiguredFactory;
 use balansir_daemon::driver::health::TierTracker;
 use balansir_daemon::driver::lifecycle::{DriverIntent, DriverLifecycleManager};
 use balansir_daemon::reconciliation::{PendingMechanismAdapter, Reconciler, ReconcilerConfig};
@@ -38,10 +38,13 @@ async fn main() -> Result<()> {
     info!("Listening on {} (mode {:#o})", SOCKET_PATH, SOCKET_PERMS);
 
     // Driver lifecycle state machine (ADR-011). Real driver configs are wired
-    // in M3.4/M3.5; the factory keeps tracked-Failed slots until then.
-    let lifecycle: Arc<tokio::sync::Mutex<DriverLifecycleManager>> = Arc::new(
-        tokio::sync::Mutex::new(DriverLifecycleManager::new(Box::new(NotYetWiredFactory))),
-    );
+    // via the typed ConfiguredFactory (M3.5); until a config source is loaded
+    // the registry is empty and every Start fails honestly as a tracked Failed
+    // slot.
+    let lifecycle: Arc<tokio::sync::Mutex<DriverLifecycleManager>> =
+        Arc::new(tokio::sync::Mutex::new(DriverLifecycleManager::new(
+            Box::new(ConfiguredFactory::empty()),
+        )));
 
     // M3.3 observability: shared metrics + event bus + tier tracker, fed by the
     // orchestration layer (NOT by the lifecycle manager itself, per ADR-012).

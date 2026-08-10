@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 
+pub mod config;
 pub mod factory;
 pub mod health;
 pub mod lifecycle;

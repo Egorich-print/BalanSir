@@ -662,4 +662,40 @@ mod tests {
         assert!(Recovering.transition(Active));
         assert!(Recovering.transition(Failed));
     }
+
+    /// M3.5 end-to-end: a driver configured through the real `ConfiguredFactory`
+    /// enters the lifecycle. In ordinary CI there is no `b4` binary, so the
+    /// transition must honestly end in tracked `Failed` — never a fabricated
+    /// Active, and never a removal.
+    #[cfg(feature = "b4")]
+    #[tokio::test]
+    async fn configured_b4_driver_fails_truthfully_in_lifecycle() {
+        use crate::driver::config::{DriverConfig, DriverConfigRegistry};
+        use crate::driver::factory::ConfiguredFactory;
+
+        let mut registry = DriverConfigRegistry::new();
+        registry.insert(
+            DriverId::B4,
+            DriverConfig::B4(crate::b4::B4Config {
+                mode: crate::b4::B4Mode::Transparent,
+                ports: vec![80, 443],
+                strategies: vec![crate::b4::B4Strategy::TtlDisorientation],
+                upstream: None,
+            }),
+        );
+        let factory = ConfiguredFactory::new(registry);
+        let mut m = DriverLifecycleManager::new(Box::new(factory));
+
+        let events = m
+            .reconcile(vec![DriverIntent::start(DriverId::B4, 5)])
+            .await;
+
+        // Construction succeeded (config present) but start failed honestly.
+        assert!(events
+            .iter()
+            .any(|e| { matches!(e.outcome, DriverOutcome::Failed { .. }) }));
+        assert_eq!(m.state(DriverId::B4), DriverLifecycleState::Failed);
+        // Failure is not removal: the driver stays tracked.
+        assert!(m.snapshot().iter().any(|(id, _, _)| *id == DriverId::B4));
+    }
 }
