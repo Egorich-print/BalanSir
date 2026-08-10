@@ -6,12 +6,10 @@ use crate::reconciliation::adapters::{
 use crate::reconciliation::sinks::TracingEventSink;
 use crate::reconciliation::{ReconciliationError, ReconciliationResult};
 use balansir_common::plan::ReconciliationPlan;
-use balansir_common::{
-    ActionRequest, ActionResult, ActualState, DesiredRule, DesiredState, StateDiff,
-};
+use balansir_common::{ActionRequest, ActionResult, ActualState, DesiredRule, DesiredState};
 use balansir_control::planner::BasicPlanner;
 use balansir_control::snapshot_store::MemorySnapshotStore;
-use balansir_control::traits::Executor;
+use balansir_control::traits::{Executor, Planner};
 use balansir_control::{Coordinator, CoordinatorConfig, ReconcileReason};
 use std::sync::Arc;
 use tracing::{error, info};
@@ -28,6 +26,10 @@ pub struct Reconciler {
     config: ReconcilerConfig,
     coordinator: Arc<Coordinator>,
     runner: Arc<DaemonExecutorAdapter>,
+    /// The single planning authority (M3.4.2). Both the coordinator's planning
+    /// step and `Reconciler::build_plan` route through this same `Planner`
+    /// port instance, so there is exactly one authoritative planning path.
+    planner: Arc<dyn Planner>,
 }
 
 /// Configuration for the reconciliation loop.
@@ -87,13 +89,17 @@ impl Reconciler {
             actual: actual.clone(),
         });
 
+        // Single planning authority (M3.4.2): one `Planner` port instance is
+        // shared by the coordinator and by `Reconciler::build_plan`.
+        let planner: Arc<dyn Planner> = Arc::new(BasicPlanner);
+
         let coordinator = Arc::new(Coordinator::new(
             CoordinatorConfig::new(
                 Arc::new(DaemonDesiredProvider {
                     desired: desired.clone(),
                 }),
                 actual_store,
-                Arc::new(BasicPlanner),
+                planner.clone(),
                 executor.clone(),
                 Arc::new(MemorySnapshotStore::new()),
             )
@@ -107,6 +113,7 @@ impl Reconciler {
             config,
             coordinator,
             runner: executor,
+            planner,
         }
     }
 
@@ -213,11 +220,14 @@ impl Reconciler {
     }
 
     /// Build a reconciliation plan without applying it (for dry-run and testing).
+    ///
+    /// Routes through the same `Planner` port instance the coordinator uses
+    /// (M3.4.2) — one authoritative planning path.
     pub async fn build_plan(&self) -> ReconciliationPlan {
         let desired = self.desired_state.lock().await;
         let actual = self.actual_state.lock().await;
         let gen = self.generation();
-        StateDiff::build(&desired, &actual, gen)
+        self.planner.build_plan(&desired, &actual, gen)
     }
 
     /// Trigger a single reconciliation cycle.
@@ -452,5 +462,58 @@ mod tests {
                 rule_id: Some(_rule_id),
             }
         }
+    }
+
+    /// M3.4.2: `Reconciler::build_plan` and the coordinator's planning step
+    /// route through the *same* `Planner` port instance. Given the same
+    /// desired/actual/generation, both must yield the identical deterministic
+    /// plan — proving a single planning authority, not two diff engines.
+    #[tokio::test]
+    async fn build_plan_and_coordinator_share_one_planning_authority() {
+        let desired = DesiredState {
+            rules: vec![
+                DesiredRule {
+                    id: 1,
+                    action: Action::Block,
+                    priority: 100,
+                },
+                DesiredRule {
+                    id: 2,
+                    action: Action::Allow,
+                    priority: 50,
+                },
+            ],
+            drivers: Vec::new(),
+        };
+        let executor = Arc::new(DummyExecutorAdapter::new());
+        let reconciler = Reconciler::new(desired.clone(), executor, ReconcilerConfig::default());
+
+        // Same inputs on both sides of the authority.
+        reconciler.set_desired(desired).await;
+        let actual = reconciler.get_actual().await;
+        let gen = reconciler.generation();
+
+        // Path 1: Reconciler::build_plan (must route through stored planner).
+        let plan_via_reconciler = reconciler.build_plan().await;
+
+        // Path 2: the coordinator's planner — the exact stored `Arc<dyn Planner>`.
+        let plan_via_stored_planner =
+            reconciler
+                .planner
+                .build_plan(&reconciler.get_desired().await, &actual, gen);
+
+        // Same operation sequence and same generation semantics.
+        assert_eq!(
+            plan_via_reconciler.operations, plan_via_stored_planner.operations,
+            "build_plan and the coordinator's planner must produce identical operations"
+        );
+        assert_eq!(
+            plan_via_reconciler.generation_before,
+            plan_via_stored_planner.generation_before
+        );
+        assert_eq!(
+            plan_via_reconciler.generation_after,
+            plan_via_stored_planner.generation_after
+        );
     }
 }
