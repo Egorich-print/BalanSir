@@ -98,4 +98,123 @@ mod tests {
             _ => panic!("Expected UpdatePolicy"),
         }
     }
+
+    /// M3.4.4: golden plan fixture. Given fixed desired/actual state, the
+    /// operation sequence is exact and deterministic — this pins the diff
+    /// contract so a future planner change that alters operation ordering or
+    /// identity fails loudly.
+    #[test]
+    fn golden_plan_fixture_is_deterministic() {
+        let desired = DesiredState {
+            rules: vec![
+                DesiredRule {
+                    id: 1,
+                    action: Action::Block,
+                    priority: 100,
+                },
+                DesiredRule {
+                    id: 2,
+                    action: Action::Allow,
+                    priority: 50,
+                },
+            ],
+            drivers: Vec::new(),
+        };
+        // Actual already carries rule 2 (Allow); rule 3 is stale and must be
+        // removed.
+        let actual = ActualState {
+            active_rules: vec![
+                ActualRule {
+                    id: 2,
+                    action: Action::Allow,
+                    rule_id: Some(20),
+                },
+                ActualRule {
+                    id: 3,
+                    action: Action::Block,
+                    rule_id: Some(30),
+                },
+            ],
+        };
+
+        let plan = StateDiff::build(&desired, &actual, 42);
+        let golden: Vec<ReconciliationOperation> = vec![
+            // Rule 1 missing from actual -> apply.
+            ReconciliationOperation::UpdatePolicy(DesiredRule {
+                id: 1,
+                action: Action::Block,
+                priority: 100,
+            }),
+            // Rule 3 in actual but not desired -> remove.
+            ReconciliationOperation::RemovePolicy(3),
+        ];
+
+        assert_eq!(plan.operations, golden);
+        assert_eq!(plan.generation_before, 42);
+        assert_eq!(plan.generation_after, 43);
+
+        // Deterministic: rebuilding yields the identical plan.
+        let again = StateDiff::build(&desired, &actual, 42);
+        assert_eq!(again.operations, plan.operations);
+        assert_eq!(again.generation_before, plan.generation_before);
+        assert_eq!(again.generation_after, plan.generation_after);
+    }
+
+    /// M3.4.4: operation ordering is stable — desired rules are visited in
+    /// declaration order and removals in actual order, so identical inputs
+    /// always produce identical operation sequences (no HashMap iteration).
+    #[test]
+    fn operation_order_is_stable_and_repeatable() {
+        let desired = DesiredState {
+            rules: vec![
+                DesiredRule {
+                    id: 10,
+                    action: Action::Allow,
+                    priority: 10,
+                },
+                DesiredRule {
+                    id: 20,
+                    action: Action::Block,
+                    priority: 20,
+                },
+                DesiredRule {
+                    id: 30,
+                    action: Action::Reject,
+                    priority: 30,
+                },
+            ],
+            drivers: Vec::new(),
+        };
+        let actual = ActualState {
+            active_rules: vec![
+                ActualRule {
+                    id: 40,
+                    action: Action::Allow,
+                    rule_id: None,
+                },
+                ActualRule {
+                    id: 10,
+                    action: Action::Allow,
+                    rule_id: Some(10),
+                },
+            ],
+        };
+
+        let a = StateDiff::build(&desired, &actual, 1);
+        let b = StateDiff::build(&desired, &actual, 1);
+        assert_eq!(a.operations, b.operations);
+
+        // Expect: add rule 20, add rule 30 (rule 10 matches actual, no-op),
+        // remove rule 40 (not desired). Order reflects desired-then-actual.
+        assert_eq!(a.operations.len(), 3);
+        assert!(matches!(
+            &a.operations[0],
+            ReconciliationOperation::UpdatePolicy(r) if r.id == 20
+        ));
+        assert!(matches!(
+            &a.operations[1],
+            ReconciliationOperation::UpdatePolicy(r) if r.id == 30
+        ));
+        assert!(matches!(&a.operations[2], ReconciliationOperation::RemovePolicy(40)));
+    }
 }
