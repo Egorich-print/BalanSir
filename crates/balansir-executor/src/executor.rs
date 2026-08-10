@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use balansir_common::Result;
 use balansir_common::{ActionRequest, ActionResult, ActionType, ExecutorCapabilities};
 
 /// Executor trait - defines how actions are applied to the kernel/drivers
@@ -30,6 +31,15 @@ pub trait Executor: Send + Sync {
     /// Get current rule count
     async fn rule_count(&self) -> u32 {
         0
+    }
+
+    /// Flush all rules in the executor's mechanism.
+    ///
+    /// Default is `Unsupported`-free success so in-memory/test executors that
+    /// track no kernel state are a no-op; the privileged nftables executor
+    /// overrides this to actually flush the chain.
+    async fn flush(&self) -> Result<()> {
+        Ok(())
     }
 }
 

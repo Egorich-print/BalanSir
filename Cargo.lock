@@ -275,6 +275,7 @@ dependencies = [
  "async-trait",
  "balansir-common",
  "libc",
+ "postcard",
  "serde",
  "serde_json",
  "smallvec",

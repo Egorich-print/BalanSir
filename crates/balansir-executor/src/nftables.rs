@@ -9,6 +9,7 @@ fn nft_bin() -> Result<std::path::PathBuf> {
         .ok_or_else(|| Error::Misconfiguration("nft binary not found".into()))
 }
 
+#[derive(Debug)]
 pub struct NftablesBackend {
     table_name: String,
     chain_name: String,
