@@ -69,14 +69,37 @@ impl IpcMessage {
     }
 }
 
-/// Validate peer credentials on Unix socket
-/// Returns Ok(uid) if peer is authorized, Err otherwise
-pub fn validate_peer_cred(stream: &UnixStream) -> Result<u32> {
-    use std::os::unix::io::AsRawFd;
+/// Fetch the peer's UID via the OS-native Unix socket credential mechanism.
+///
+/// Linux: `SO_PEERCRED` via `getsockopt` with a `ucred` struct (glibc and
+/// musl both expose it through `libc`). Other Unixes (macOS/BSD, AIX, ...):
+/// `getpeereid`. The returned value is the peer socket UID as reported by the
+/// OS; the caller applies `allowed_uids()` unchanged.
+#[cfg(target_os = "linux")]
+fn peer_uid(fd: i32) -> Result<u32> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
 
-    let fd = stream.as_raw_fd();
+    let ret = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
 
-    // Get peer credentials via getpeereid (POSIX)
+    if ret != 0 {
+        return Err(Error::IpcViolation("Failed to get peer creds".into()));
+    }
+
+    Ok(cred.uid)
+}
+
+/// Non-Linux variant: `getpeereid` (POSIX/BSD-derived).
+#[cfg(not(target_os = "linux"))]
+fn peer_uid(fd: i32) -> Result<u32> {
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
 
@@ -85,6 +108,17 @@ pub fn validate_peer_cred(stream: &UnixStream) -> Result<u32> {
     if ret != 0 {
         return Err(Error::IpcViolation("Failed to get peer creds".into()));
     }
+
+    Ok(uid)
+}
+
+/// Validate peer credentials on Unix socket
+/// Returns Ok(uid) if peer is authorized, Err otherwise
+pub fn validate_peer_cred(stream: &UnixStream) -> Result<u32> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = stream.as_raw_fd();
+    let uid = peer_uid(fd)?;
 
     let allowed = allowed_uids();
     if !allowed.contains(&uid) {

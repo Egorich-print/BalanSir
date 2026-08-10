@@ -1,4 +1,5 @@
 use balansir_common::DriverError;
+use futures::TryStreamExt;
 use netlink_packet_route::link::LinkMessage;
 use rtnetlink::new_connection;
 use std::net::Ipv4Addr;
@@ -40,7 +41,7 @@ impl NetlinkManager {
         let link = self.get_link_by_name(name).await?;
         self.handle
             .link()
-            .del(link.index())
+            .del(link.header.index)
             .execute()
             .await
             .map_err(|e| {
@@ -55,7 +56,7 @@ impl NetlinkManager {
         let link = self.get_link_by_name(name).await?;
         self.handle
             .link()
-            .set(link.index())
+            .set(link.header.index)
             .up()
             .execute()
             .await
@@ -71,7 +72,7 @@ impl NetlinkManager {
         let link = self.get_link_by_name(name).await?;
         self.handle
             .link()
-            .set(link.index())
+            .set(link.header.index)
             .down()
             .execute()
             .await
@@ -92,7 +93,7 @@ impl NetlinkManager {
         let link = self.get_link_by_name(name).await?;
         self.handle
             .address()
-            .add(link.index(), addr.into(), prefix_len)
+            .add(link.header.index, addr.into(), prefix_len)
             .execute()
             .await
             .map_err(|e| {
@@ -109,19 +110,19 @@ impl NetlinkManager {
         gateway: Option<Ipv4Addr>,
         interface: Option<&str>,
     ) -> Result<(), DriverError> {
-        let mut request = self.handle.route().add();
+        let mut request = self.handle.route().add().v4();
 
         if let Some((addr, prefix)) = dest {
-            request = request.destination(addr, prefix);
+            request = request.destination_prefix(addr, prefix);
         }
 
         if let Some(gw) = gateway {
-            request = request.gateway(gw.into());
+            request = request.gateway(gw);
         }
 
         if let Some(iface) = interface {
             let link = self.get_link_by_name(iface).await?;
-            request = request.output_interface(link.index());
+            request = request.output_interface(link.header.index);
         }
 
         request
