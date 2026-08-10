@@ -1,6 +1,11 @@
 [advisories]
 db-path = "~/.cargo/advisory-db"
 yanked = "deny"
+# cargo-deny 0.15+ flattened the old `[maintenance]` table into `[advisories]`
+# and `unmaintained`/`unsound` are now scopes (all/workspace/transitive/none)
+# rather than severities; the top-level `[maintenance]` key is rejected by
+# current cargo-deny and would fail `cargo deny check` in CI.
+unmaintained = "workspace"
 
 [licenses]
 allow = [
@@ -17,6 +22,3 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-
-[maintenance]
-unmaintained = "deny"
