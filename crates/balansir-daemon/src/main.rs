@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 use balansir_daemon::driver::factory::NotYetWiredFactory;
 use balansir_daemon::driver::health::TierTracker;
 use balansir_daemon::driver::lifecycle::{DriverIntent, DriverLifecycleManager};
+use balansir_daemon::reconciliation::{PendingMechanismAdapter, Reconciler, ReconcilerConfig};
 
 const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
 const SOCKET_PERMS: u32 = 0o600;
@@ -47,6 +48,25 @@ async fn main() -> Result<()> {
     let metrics = Arc::new(SharedMetrics::new());
     let events: Arc<BoundedEventBus> = Arc::new(BoundedEventBus::new(1024));
     let tracker = Arc::new(tokio::sync::Mutex::new(TierTracker::default()));
+
+    // M3.4.1 production control plane: the daemon binary now drives the real
+    // Coordinator -> BasicPlanner -> plan -> execution-adapter -> ActualState
+    // path. The privileged mechanism (nftables/netlink) is wired in M3.6; until
+    // then the PendingMechanismAdapter honestly reports Unsupported, so any
+    // reconcile that needs execution fails and rolls back — ActualState is
+    // never faked. Driver lifecycle (above) remains a separate path.
+    let reconciler = Arc::new(Reconciler::new(
+        balansir_common::DesiredState::default(),
+        Arc::new(PendingMechanismAdapter),
+        ReconcilerConfig::default(),
+    ));
+    match reconciler.reconcile().await {
+        Ok(()) => info!("Initial reconcile: no changes required"),
+        Err(e) => warn!(
+            "Initial reconcile incomplete (mechanism pending M3.6): {}",
+            e
+        ),
+    }
 
     // Setup signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;

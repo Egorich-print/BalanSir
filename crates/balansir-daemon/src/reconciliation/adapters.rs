@@ -3,8 +3,8 @@
 
 use balansir_common::plan::{ReconciliationOperation, ReconciliationPlan};
 use balansir_common::{
-    ActionRequest, ActionResult, ActualRule, ActualState, DecisionTrace, DesiredRule, DesiredState,
-    Snapshot,
+    ActionRequest, ActionResult, ActionType, ActualRule, ActualState, DecisionTrace, DesiredRule,
+    DesiredState, Snapshot,
 };
 use balansir_control::traits::{DesiredProvider, Executor, Rollback, StateProvider};
 use balansir_control::{ControlResult, ExecutionReport};
@@ -132,6 +132,35 @@ impl DaemonExecutorAdapter {
                 "unexpected result: {:?}",
                 other
             ))),
+        }
+    }
+}
+
+/// Production executor adapter placeholder until the privileged mechanism is
+/// wired (M3.6: nftables/netlink command loop).
+///
+/// Every action is honestly reported as `Unsupported` — no rule is claimed
+/// applied, `ActualState` is never mutated, and any reconcile that needs
+/// execution fails and flows through the coordinator's rollback path. This
+/// keeps the control plane production-wired without faking enforcement.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PendingMechanismAdapter;
+
+#[async_trait::async_trait]
+impl ExecutorAdapter for PendingMechanismAdapter {
+    async fn execute(&self, request: &ActionRequest) -> ActionResult {
+        ActionResult::Unsupported {
+            action_type: request.action.action_type(),
+        }
+    }
+
+    async fn rule_count(&self) -> u32 {
+        0
+    }
+
+    async fn remove_rule(&self, _rule_id: u32) -> ActionResult {
+        ActionResult::Unsupported {
+            action_type: ActionType::Block,
         }
     }
 }
