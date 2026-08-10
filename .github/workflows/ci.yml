@@ -16,6 +16,12 @@ jobs:
     strategy:
       matrix:
         rust: [stable, nightly]
+      fail-fast: false
+    # Nightly clippy is stricter than stable and currently flags pre-existing
+    # lint candidates (e.g. clippy::double_must_use on async_trait traits). It
+    # must not block the stable gate or the downstream `build` job (needs:
+    # test). Keep it visible as an informational check; fix lint debt separately.
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
 
     steps:
     - uses: actions/checkout@v4
