@@ -215,6 +215,9 @@ mod tests {
             &a.operations[1],
             ReconciliationOperation::UpdatePolicy(r) if r.id == 30
         ));
-        assert!(matches!(&a.operations[2], ReconciliationOperation::RemovePolicy(40)));
+        assert!(matches!(
+            &a.operations[2],
+            ReconciliationOperation::RemovePolicy(40)
+        ));
     }
 }
