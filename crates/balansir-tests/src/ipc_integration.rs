@@ -110,26 +110,29 @@ async fn test_concurrent_requests() {
     }
 }
 
-/// Test error handling
+/// Test error handling — daemon (commander) sends a non-allowlisted operation
+/// to the executor (server); the executor rejects it with ResponseError
+/// (ADR-013 direction: daemon → executor).
 #[tokio::test]
 async fn test_error_handling() {
-    let (a_stream, b_stream) = UnixStream::pair().unwrap();
-    let mut conn_a = IpcConnection::new(a_stream);
-    let mut conn_b = IpcConnection::new(b_stream);
+    let (daemon_stream, executor_stream) = UnixStream::pair().unwrap();
+    let mut daemon_conn = IpcConnection::new(daemon_stream);
+    let mut executor_conn = IpcConnection::new(executor_stream);
 
     let daemon_handle = tokio::spawn(async move {
-        conn_a
+        daemon_conn
             .request(MsgType::StartDriver, vec![1, 2, 3])
             .await
             .unwrap()
     });
 
     let executor_handle = tokio::spawn(async move {
-        let request = conn_b.recv().await.unwrap();
+        let request = executor_conn.recv().await.unwrap();
         assert_eq!(request.msg_type, MsgType::StartDriver);
 
-        let response = IpcMessage::response_error(request.correlation_id, "Driver not found");
-        conn_b.send(&response).await.unwrap();
+        // The executor rejects a non-allowlisted privileged operation.
+        let response = IpcMessage::response_error(request.correlation_id, "operation not allowed");
+        executor_conn.send(&response).await.unwrap();
     });
 
     let (daemon_result, _) = tokio::join!(daemon_handle, executor_handle);
@@ -137,7 +140,7 @@ async fn test_error_handling() {
 
     assert_eq!(response.msg_type, MsgType::ResponseError);
     let error_msg = String::from_utf8(response.payload).unwrap();
-    assert_eq!(error_msg, "Driver not found");
+    assert_eq!(error_msg, "operation not allowed");
 }
 
 /// Test DriverId type safety

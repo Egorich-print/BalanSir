@@ -171,6 +171,11 @@ impl IpcClientConnection {
     /// Connect to a server and validate its credentials (SO_PEERCRED).
     pub async fn connect(path: &str) -> Result<Self> {
         let stream = tokio::net::UnixStream::connect(path).await?;
+        Self::from_stream(stream).await
+    }
+
+    /// Wrap an already-connected stream and validate the server's credentials.
+    pub async fn from_stream(stream: UnixStream) -> Result<Self> {
         let peer_uid = validate_peer_cred(&stream)?;
         Ok(Self {
             inner: IpcConnection::new(stream),

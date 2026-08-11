@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 use balansir_daemon::driver::factory::ConfiguredFactory;
 use balansir_daemon::driver::health::TierTracker;
 use balansir_daemon::driver::lifecycle::{DriverIntent, DriverLifecycleManager};
-use balansir_daemon::reconciliation::{PendingMechanismAdapter, Reconciler, ReconcilerConfig};
+use balansir_daemon::reconciliation::{ExecutorClient, Reconciler, ReconcilerConfig};
 
 const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
 const SOCKET_PERMS: u32 = 0o600;
@@ -54,19 +54,19 @@ async fn main() -> Result<()> {
 
     // M3.4.1 production control plane: the daemon binary now drives the real
     // Coordinator -> BasicPlanner -> plan -> execution-adapter -> ActualState
-    // path. The privileged mechanism (nftables/netlink) is wired in M3.6; until
-    // then the PendingMechanismAdapter honestly reports Unsupported, so any
-    // reconcile that needs execution fails and rolls back — ActualState is
-    // never faked. Driver lifecycle (above) remains a separate path.
+    // path. Per ADR-013 the daemon is the commander: it sends operations to
+    // the privileged executor server via ExecutorClient. If the executor is
+    // unreachable the reconcile fails and rolls back — ActualState is never
+    // faked. Driver lifecycle (above) remains a separate path.
     let reconciler = Arc::new(Reconciler::new(
         balansir_common::DesiredState::default(),
-        Arc::new(PendingMechanismAdapter),
+        Arc::new(ExecutorClient::default()),
         ReconcilerConfig::default(),
     ));
     match reconciler.reconcile().await {
         Ok(()) => info!("Initial reconcile: no changes required"),
         Err(e) => warn!(
-            "Initial reconcile incomplete (mechanism pending M3.6): {}",
+            "Initial reconcile incomplete (executor unreachable or op failed): {}",
             e
         ),
     }

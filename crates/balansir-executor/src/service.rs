@@ -12,7 +12,7 @@
 //!   mechanism call.
 
 use async_trait::async_trait;
-use balansir_common::ipc::{IpcClientConnection, IpcMessage, MsgType};
+use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
 use balansir_common::{ActionRequest, ActionResult, Result};
 
 use crate::executor::Executor;
@@ -125,11 +125,13 @@ fn is_allowlisted(msg_type: MsgType) -> bool {
 
 /// Serve a single authenticated executor connection until EOF.
 ///
-/// Each message is validated against the allowlist, dispatched to the
-/// mechanism, and answered with an explicit response. The daemon pushes
-/// privileged operations; the executor never initiates them.
+/// The executor is the privileged server (ADR-013). It accepts the daemon's
+/// connection, then processes the daemon-pushed allowlisted command set. Each
+/// message is validated against the allowlist, dispatched to the mechanism,
+/// and answered with an explicit response. The executor never initiates
+/// control.
 pub async fn serve_connection(
-    conn: &mut IpcClientConnection,
+    conn: &mut IpcServerConnection,
     executor: &dyn Executor,
 ) -> Result<()> {
     loop {
