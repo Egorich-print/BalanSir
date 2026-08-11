@@ -294,7 +294,13 @@ mod tests {
             conn: tokio::sync::Mutex::new(Some(conn)),
         };
         let result = client.remove_rule(7).await;
-        assert!(matches!(result, ActionResult::Applied { rule_id: Some(7), .. }));
+        assert!(matches!(
+            result,
+            ActionResult::Applied {
+                rule_id: Some(7),
+                ..
+            }
+        ));
         server_task.await.unwrap();
     }
 }
