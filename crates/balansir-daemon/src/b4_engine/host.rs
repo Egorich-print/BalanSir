@@ -110,6 +110,7 @@ impl B4Observer for CompositeObserver {
 mod tests {
     use super::*;
     use crate::reconciliation::DnsRegistry;
+    use std::sync::Arc;
 
     #[test]
     fn composite_observes_dns_status() {
@@ -122,6 +123,62 @@ mod tests {
         let no_dns = CompositeObserver::new(Some(std::sync::Arc::new(DnsRegistry::new())));
         let obs2 = futures_test_observe(&no_dns, "missing.example.com");
         assert_eq!(obs2.dns_ok, Some(false));
+    }
+
+    /// P7.2.2 (ADR-028): ONE shared DnsRegistry is the single DNS observation
+    /// truth. A change written to the registry is seen identically by the P6
+    /// flow compiler (domain → IP compilation) and by the B4 observer (dns_ok)
+    /// — there is no way for the two consumers to observe different DNS truth.
+    #[test]
+    fn shared_registry_is_single_observation_truth() {
+        use crate::reconciliation::FlowCompiler;
+        use balansir_common::{Action, DesiredRule, FlowCriteria};
+
+        // One registry, shared by both consumers (this mirrors main.rs's
+        // composition: FlowCompiler::new((*registry).clone()) + CompositeObserver).
+        let registry = std::sync::Arc::new(DnsRegistry::new());
+        let compiler = FlowCompiler::new((*registry).clone());
+        let observer = CompositeObserver::new(Some(Arc::clone(&registry)));
+
+        // The P6 consumer sees no domain yet -> compiles nothing.
+        let rule = DesiredRule {
+            id: 7,
+            action: Action::Block,
+            priority: 100,
+            flow: Some(FlowCriteria {
+                dst_domain: Some("api.example.com".to_string()),
+                ..Default::default()
+            }),
+        };
+        assert!(
+            compiler.compile_rule(&rule).is_empty(),
+            "P6 sees unresolved domain before observation"
+        );
+        // B4 sees dns_ok = false (same unresolved truth).
+        let before = futures_test_observe(&observer, "api.example.com");
+        assert_eq!(before.dns_ok, Some(false));
+
+        // A single DNS observation lands in the shared registry.
+        registry.insert(
+            "api.example.com",
+            vec![
+                "203.0.113.5".parse().unwrap(),
+                "203.0.113.6".parse().unwrap(),
+            ],
+        );
+
+        // P6 now compiles one rule per resolved IP (same observation).
+        let compiled = compiler.compile_rule(&rule);
+        assert_eq!(compiled.len(), 2);
+        // B4 now sees dns_ok = true (the same observation).
+        let after = futures_test_observe(&observer, "api.example.com");
+        assert_eq!(after.dns_ok, Some(true));
+
+        // Removing the observation is again visible to both.
+        registry.remove("api.example.com");
+        assert!(compiler.compile_rule(&rule).is_empty());
+        let removed = futures_test_observe(&observer, "api.example.com");
+        assert_eq!(removed.dns_ok, Some(false));
     }
 
     fn futures_test_observe(observer: &CompositeObserver, key: &str) -> B4Observation {

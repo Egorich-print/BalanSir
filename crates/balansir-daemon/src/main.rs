@@ -115,11 +115,11 @@ async fn main() -> Result<()> {
         loop_reconciler.run_loop().await;
     });
 
-    // P6 (ADR-023) DNS plane: a shared DNS registry (populated by the DNS
-    // forwarder/observation feed) feeds the flow compiler, which expands
-    // domain rules into per-IP rules. The compiler is registered on the
-    // reconciler so set_desired/reload expand domains, and the dns_loop
-    // re-compiles on DNS changes without a manual reload.
+    // P6 (ADR-023) DNS plane + P7.2.2 (ADR-028) shared DNS observation
+    // authority: ONE registry is the single DNS observation truth. It feeds
+    // both the flow compiler (DNS resync / domain → IP compilation) and the
+    // B4 observer — so a DNS observation change seen by P6 is the same change
+    // B4 sees. There is no second `DnsRegistry` in the production path.
     let dns_registry = std::sync::Arc::new(balansir_daemon::reconciliation::DnsRegistry::new());
     let compiler = balansir_daemon::reconciliation::FlowCompiler::new((*dns_registry).clone());
     reconciler.with_flow_compiler(compiler).await;
@@ -142,12 +142,12 @@ async fn main() -> Result<()> {
             Ok(b4_cfg) => match b4_cfg.policy() {
                 Ok(policy) => {
                     let engine_cfg = b4_cfg.engine_config();
-                    let dns_registry_for_observer =
-                        std::sync::Arc::new(balansir_daemon::reconciliation::DnsRegistry::new());
+                    // P7.2.2 (ADR-028): reuse the SAME shared registry that
+                    // feeds the P6 flow compiler — one DNS observation truth.
                     let observer: std::sync::Arc<dyn balansir_daemon::b4_engine::B4Observer> =
                         std::sync::Arc::new(
                             balansir_daemon::b4_engine::host::CompositeObserver::new(Some(
-                                dns_registry_for_observer,
+                                Arc::clone(&dns_registry),
                             )),
                         );
                     let mut controller = balansir_daemon::b4_engine::controller::B4Controller::new(
