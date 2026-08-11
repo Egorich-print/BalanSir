@@ -101,6 +101,37 @@ async fn main() -> Result<()> {
         dns_loop_reconciler.dns_loop().await;
     });
 
+    // P7.1 (ADR-024) B4 runtime loop: policy-controlled connectivity
+    // adaptation. Loads the optional B4 config (BALANSIR_B4_CONFIG) and runs
+    // the engine with a host-stack observer. The observer is the Noop source
+    // until a real TCP_INFO/DNS observer is wired (P7.2); the engine is fully
+    // testable regardless. Decisions are logged; execution of MTU/DNS-path
+    // changes is the P7.2 mechanism step.
+    if let Ok(b4_path) = std::env::var("BALANSIR_B4_CONFIG") {
+        match balansir_daemon::b4_engine::config::B4Toml::from_file(&b4_path) {
+            Ok(b4_cfg) => match b4_cfg.policy() {
+                Ok(policy) => {
+                    let engine_cfg = b4_cfg.engine_config();
+                    let observer: std::sync::Arc<dyn balansir_daemon::b4_engine::B4Observer> =
+                        std::sync::Arc::new(balansir_daemon::b4_engine::observe::NoopObserver);
+                    let mut engine = balansir_daemon::b4_engine::B4Engine::with_config(
+                        policy, observer, engine_cfg,
+                    );
+                    tokio::spawn(async move {
+                        engine
+                            .run_loop(10, |flow, decision| async move {
+                                info!(flow, decision = ?decision, "B4 decision");
+                            })
+                            .await;
+                    });
+                    info!("B4 engine started from {b4_path}");
+                }
+                Err(e) => warn!("B4 config {b4_path} policy rejected: {e} (engine disabled)"),
+            },
+            Err(e) => warn!("B4 config {b4_path} rejected: {e} (engine disabled)"),
+        }
+    }
+
     // Setup signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;

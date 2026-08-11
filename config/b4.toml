@@ -1,0 +1,36 @@
+# B4 policy (P7.1, ADR-024) — example.
+# Load with BALANSIR_B4_CONFIG=/etc/balansir/b4.toml (or this path).
+#
+# B4 is the policy-controlled connectivity adaptation layer: it decides HOW
+# to deliver a flow the policy already admitted, never WHAT should happen.
+# The daemon (authority) owns policy; B4 executes within these bounds.
+#
+# fail semantics:
+#   STRICT  — no secure mechanism -> the connection fails (default)
+#   SAFE    — secure preferred; restricted fallback only when explicitly allowed
+#   DEFAULT — best available connectivity; direct may be used
+#
+# capabilities (P7.1 first slice):
+#   mtu       — adjust effective MTU/MSS of the direct path
+#   dns_path  — prefer a different DNS path for resolution
+
+[engine]
+enabled = true
+max_attempts = 3
+
+# Example: a flow that may tune the direct path, but never tunnels.
+[[flows]]
+domain = "example.com"
+capabilities = ["mtu", "dns_path"]
+fail = "STRICT"
+allow_direct = true
+allow_tunnel = false
+
+# Example: a flow allowed a restricted fallback when a secure path is
+# temporarily unavailable.
+[[flows]]
+domain = "streaming.example.net"
+capabilities = ["mtu"]
+fail = "SAFE"
+allow_direct = true
+allow_tunnel = false
