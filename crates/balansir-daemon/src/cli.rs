@@ -24,7 +24,9 @@ use std::env;
 const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
 
 fn usage() -> ! {
-    eprintln!("usage: balansir-cli {{status|plan|explain|desired|actual|reload <config.toml>}}");
+    eprintln!(
+        "usage: balansir-cli {{status|plan|explain|desired|actual|fingerprint|reload <config.toml>}}"
+    );
     std::process::exit(2);
 }
 
@@ -43,6 +45,31 @@ async fn main() -> Result<()> {
             println!("plan payload bytes: {}", plan.payload.len());
             let actual = conn.request(MsgType::GetActual, Vec::new()).await?;
             println!("actual payload bytes: {}", actual.payload.len());
+            let fp = conn
+                .request(MsgType::GetConfigFingerprint, Vec::new())
+                .await?;
+            match postcard::from_bytes::<Option<u64>>(&fp.payload) {
+                Ok(Some(fp)) => println!("config fingerprint: {fp:#018x}"),
+                Ok(None) => println!("config fingerprint: none"),
+                Err(_) => println!("config fingerprint: <malformed>"),
+            }
+        }
+        "fingerprint" => {
+            let fp = conn
+                .request(MsgType::GetConfigFingerprint, Vec::new())
+                .await?;
+            if fp.msg_type == MsgType::ResponseError {
+                eprintln!("error: {}", String::from_utf8_lossy(&fp.payload));
+                std::process::exit(1);
+            }
+            match postcard::from_bytes::<Option<u64>>(&fp.payload) {
+                Ok(Some(fp)) => println!("{fp:#018x}"),
+                Ok(None) => println!("none"),
+                Err(_) => {
+                    eprintln!("error: malformed fingerprint");
+                    std::process::exit(1);
+                }
+            }
         }
         "plan" => {
             let resp = conn.request(MsgType::GetPlan, Vec::new()).await?;

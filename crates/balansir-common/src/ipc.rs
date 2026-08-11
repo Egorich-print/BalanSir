@@ -38,6 +38,9 @@ pub enum MsgType {
     // A2: executor reports its kernel inventory (non-authority) so the daemon
     // can reconcile orphans after an ack-gap/executor restart.
     GetActualRules,
+    // P4.8: daemon reports the fingerprint of the last accepted desired-state
+    // config so operators can verify what is actually loaded.
+    GetConfigFingerprint,
     ResponseOk,
     ResponseError,
     ResponseData,

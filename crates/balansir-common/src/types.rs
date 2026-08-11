@@ -406,6 +406,22 @@ pub struct DesiredState {
     pub drivers: Vec<DesiredDriver>,
 }
 
+/// Stable FNV-1a fingerprint of a desired-state config (P4.8, ADR-021).
+///
+/// Computed over the postcard encoding of the whole `DesiredState`, so any
+/// change to rules or drivers changes the fingerprint. Used by the daemon to
+/// report which config is actually loaded (operator verification) and to
+/// detect redundant reloads.
+pub fn config_fingerprint(state: &DesiredState) -> u64 {
+    let bytes = postcard::to_allocvec(state).unwrap_or_default();
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in &bytes {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Optional flow criteria a desired rule matches on (A3, ADR-018).
 ///
 /// All fields are optional: `None` means "any" (no kernel matcher). When
@@ -490,5 +506,43 @@ mod driver_id_tests {
         for id in [DriverId::WireGuard, DriverId::B4, DriverId::Custom(99)] {
             assert_eq!(DriverId::from_u32(id.as_u32()), id);
         }
+    }
+}
+
+/// P4.8 (ADR-021): config fingerprint is stable for identical state and
+/// changes for any rule/driver difference.
+#[cfg(test)]
+mod config_fingerprint_tests {
+    use super::*;
+
+    fn state(rules: Vec<(u32, Action)>) -> DesiredState {
+        DesiredState {
+            rules: rules
+                .into_iter()
+                .map(|(id, action)| DesiredRule {
+                    id,
+                    action,
+                    priority: 0,
+                    flow: None,
+                })
+                .collect(),
+            drivers: vec![],
+        }
+    }
+
+    #[test]
+    fn identical_state_has_identical_fingerprint() {
+        let a = state(vec![(1, Action::Block)]);
+        let b = state(vec![(1, Action::Block)]);
+        assert_eq!(config_fingerprint(&a), config_fingerprint(&b));
+    }
+
+    #[test]
+    fn different_state_has_different_fingerprint() {
+        let a = state(vec![(1, Action::Block)]);
+        let b = state(vec![(1, Action::Allow)]);
+        let c = state(vec![(1, Action::Block), (2, Action::Allow)]);
+        assert_ne!(config_fingerprint(&a), config_fingerprint(&b));
+        assert_ne!(config_fingerprint(&a), config_fingerprint(&c));
     }
 }

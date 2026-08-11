@@ -281,6 +281,13 @@ async fn handle_message(
             let body = postcard::to_allocvec(&actual).unwrap_or_default();
             IpcMessage::response_data(msg.correlation_id, body)
         }
+        MsgType::GetConfigFingerprint => {
+            let fp = reconciler.config_fingerprint().await;
+            match postcard::to_allocvec(&fp) {
+                Ok(body) => IpcMessage::response_data(msg.correlation_id, body),
+                Err(_) => IpcMessage::response_error(msg.correlation_id, "encode failed"),
+            }
+        }
         MsgType::Reload => {
             let Ok(candidate) = postcard::from_bytes::<DesiredState>(&msg.payload) else {
                 return IpcMessage::response_error(msg.correlation_id, "invalid reload payload");

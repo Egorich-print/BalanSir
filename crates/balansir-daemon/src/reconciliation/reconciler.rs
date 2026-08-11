@@ -35,6 +35,10 @@ pub struct Reconciler {
     /// `set_desired`/`reload` expand domain-based rules into concrete per-IP
     /// rules before the planner sees them.
     flow_compiler: Option<crate::reconciliation::dns_flow::FlowCompiler>,
+    /// Fingerprint of the last accepted desired-state config (P4.8, ADR-021).
+    /// `None` until a config has been set/reloaded; updated by `set_desired`
+    /// and `reload` so the operator can verify what is actually loaded.
+    config_fingerprint: tokio::sync::Mutex<Option<u64>>,
     /// The single planning authority (M3.4.2). Both the coordinator's planning
     /// step and `Reconciler::build_plan` route through this same `Planner`
     /// port instance, so there is exactly one authoritative planning path.
@@ -138,6 +142,7 @@ impl Reconciler {
             runner: executor,
             executor: executor_inner,
             flow_compiler: None,
+            config_fingerprint: tokio::sync::Mutex::new(None),
             planner,
         }
     }
@@ -174,13 +179,20 @@ impl Reconciler {
 
     /// Update desired state. Domain-based rules (A3) are compiled to concrete
     /// per-IP flow rules before being stored, so the planner only ever sees
-    /// executor-ready rules.
+    /// executor-ready rules. The config fingerprint (P4.8) is recorded.
     pub async fn set_desired(&self, state: DesiredState) {
         let state = match &self.flow_compiler {
             Some(compiler) => compiler.compile(&state),
             None => state,
         };
+        *self.config_fingerprint.lock().await = Some(balansir_common::config_fingerprint(&state));
         *self.desired_state.lock().await = state;
+    }
+
+    /// Get the fingerprint of the last accepted config (P4.8, ADR-021), or
+    /// `None` if no config has been set yet.
+    pub async fn config_fingerprint(&self) -> Option<u64> {
+        *self.config_fingerprint.lock().await
     }
 
     /// Install (or replace) the DNS flow compiler used by `set_desired`/`reload`.
@@ -199,7 +211,8 @@ impl Reconciler {
     /// per-IP flow rules), then reveals the new desired state to the
     /// coordinator only when its reconcile cycle succeeds. On failure the
     /// old desired state is restored and the error surfaced — no
-    /// half-old/half-new state is ever observable.
+    /// half-old/half-new state is ever observable. The config fingerprint
+    /// (P4.8) is updated only on success.
     pub async fn reload(
         &self,
         candidate: DesiredState,
@@ -209,13 +222,17 @@ impl Reconciler {
             Some(compiler) => compiler.compile(&candidate),
             None => candidate,
         };
+        let fp = balansir_common::config_fingerprint(&candidate);
         let prev = {
             let mut desired = self.desired_state.lock().await;
             std::mem::replace(&mut *desired, candidate)
         };
 
         match self.coordinator.reconcile(reason).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                *self.config_fingerprint.lock().await = Some(fp);
+                Ok(())
+            }
             Err(e) => {
                 *self.desired_state.lock().await = prev;
                 Err(ReconciliationError::Reconcile(e.to_string()))
@@ -531,6 +548,78 @@ mod tests {
         assert_eq!(desired.rules[0].id, 7);
         let actual = reconciler.get_actual().await;
         assert_eq!(actual.active_rules.len(), 1);
+    }
+
+    /// P4.8 (ADR-021): the config fingerprint tracks the last *accepted*
+    /// config — updated on a successful reload, unchanged on a failed one.
+    #[tokio::test]
+    async fn config_fingerprint_tracks_last_accepted_reload() {
+        let executor = Arc::new(DummyExecutorAdapter::new());
+        let reconciler = Reconciler::new(
+            DesiredState::default(),
+            executor,
+            ReconcilerConfig::default(),
+        );
+        assert_eq!(reconciler.config_fingerprint().await, None);
+
+        let candidate = DesiredState {
+            rules: vec![DesiredRule {
+                id: 7,
+                action: Action::Block,
+                priority: 100,
+                flow: None,
+            }],
+            drivers: Vec::new(),
+        };
+        let fp_expected = balansir_common::config_fingerprint(&candidate);
+        reconciler
+            .reload(candidate.clone(), ReconcileReason::ConfigReload)
+            .await
+            .unwrap();
+        assert_eq!(reconciler.config_fingerprint().await, Some(fp_expected));
+
+        // A different candidate has a different fingerprint and updates it.
+        let changed = DesiredState {
+            rules: vec![DesiredRule {
+                id: 8,
+                action: Action::Allow,
+                priority: 10,
+                flow: None,
+            }],
+            drivers: Vec::new(),
+        };
+        let fp_changed = balansir_common::config_fingerprint(&changed);
+        reconciler
+            .reload(changed, ReconcileReason::ConfigReload)
+            .await
+            .unwrap();
+        assert_eq!(reconciler.config_fingerprint().await, Some(fp_changed));
+        assert_ne!(fp_changed, fp_expected);
+
+        // A failing reload must not change the fingerprint.
+        let failing = Arc::new(FailingExecutor);
+        let prev_fp = reconciler.config_fingerprint().await;
+        let bad = DesiredState {
+            rules: vec![DesiredRule {
+                id: 99,
+                action: Action::Block,
+                priority: 100,
+                flow: None,
+            }],
+            drivers: Vec::new(),
+        };
+        let failing_reconciler = Reconciler::new(
+            DesiredState::default(),
+            failing,
+            ReconcilerConfig::default(),
+        );
+        assert!(failing_reconciler
+            .reload(bad.clone(), ReconcileReason::ConfigReload)
+            .await
+            .is_err());
+        // (The failing reconciler never accepted anything.)
+        assert_eq!(failing_reconciler.config_fingerprint().await, None);
+        assert_eq!(reconciler.config_fingerprint().await, prev_fp);
     }
 
     #[tokio::test]
