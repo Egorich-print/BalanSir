@@ -14,7 +14,7 @@ use balansir_control::snapshot_store::MemorySnapshotStore;
 use balansir_control::traits::{Executor, Planner};
 use balansir_control::{Coordinator, CoordinatorConfig, ReconcileReason};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Reconciliation loop for maintaining desired state.
 ///
@@ -53,6 +53,13 @@ pub struct ReconcilerConfig {
     /// Enable atomic rollback. When false, decode failures are still rolled back
     /// by the coordinator but no extra commit semantics are applied.
     pub atomic_rollback: bool,
+    /// How often the ownership loop re-seeds `ActualState` from the executor's
+    /// kernel inventory (P4.1, ADR-020): every `resync_every_n_cycles`
+    /// iterations of `run_loop`. `0` disables periodic resync (only the
+    /// explicit startup/`resync` calls). Catches external kernel edits and
+    /// executor restarts that a `Desired − Actual` diff on stale accounting
+    /// would miss.
+    pub resync_every_n_cycles: u32,
 }
 
 impl Default for ReconcilerConfig {
@@ -63,6 +70,7 @@ impl Default for ReconcilerConfig {
             retry_delay_secs: 5,
             watchdog_timeout_secs: 30,
             atomic_rollback: true,
+            resync_every_n_cycles: 3,
         }
     }
 }
@@ -326,25 +334,50 @@ impl Reconciler {
     }
 
     /// Run reconciliation loop forever.
+    ///
+    /// P4.1 (ADR-020) ownership loop: every cycle reconciles Desired − Actual;
+    /// every `resync_every_n_cycles` cycles it re-seeds ActualState from the
+    /// executor's kernel inventory first, so external kernel edits and executor
+    /// restarts are discovered and converged, not just startup orphans.
     pub async fn run_loop(&self) {
         info!(
             interval = self.config.check_interval_secs,
+            resync_every = self.config.resync_every_n_cycles,
             "Reconciliation loop started"
         );
 
+        let mut cycle: u32 = 0;
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(
                 self.config.check_interval_secs,
             ))
             .await;
+            self.step(cycle).await;
+            cycle = cycle.wrapping_add(1);
+        }
+    }
 
-            if let Err(e) = self.reconcile_atomic().await {
-                error!("Reconciliation error: {}", e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(
-                    self.config.retry_delay_secs,
-                ))
-                .await;
+    /// One ownership-loop step (P4.1, ADR-020): optional inventory resync
+    /// followed by a reconcile. Split out so the loop logic is testable without
+    /// real wall-clock intervals.
+    async fn step(&self, cycle: u32) {
+        // Periodic ownership re-seed: bring ActualState back to what the
+        // kernel actually holds before diffing, so external edits or an
+        // executor restart cannot hide behind stale accounting.
+        if self.config.resync_every_n_cycles > 0
+            && cycle.is_multiple_of(self.config.resync_every_n_cycles)
+        {
+            if let Err(e) = self.sync_actual_from_executor().await {
+                warn!("Periodic kernel-inventory resync failed (will still reconcile): {e}");
             }
+        }
+
+        if let Err(e) = self.reconcile_atomic().await {
+            error!("Reconciliation error: {}", e);
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                self.config.retry_delay_secs,
+            ))
+            .await;
         }
     }
 }
@@ -736,5 +769,85 @@ mod tests {
         let mut ids: Vec<u32> = actual.active_rules.iter().map(|r| r.id).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec![7, 42]);
+    }
+
+    /// P4.1 (ADR-020): the ownership loop converges an *external kernel edit*
+    /// back to DesiredState. After a resync step, a rule that was injected into
+    /// the kernel outside the daemon is discovered from the inventory and
+    /// removed — the daemon's accounting alone could never see it.
+    #[tokio::test]
+    async fn ownership_loop_converges_external_kernel_edit() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        /// Fake executor whose "kernel" is a real set: execute adds, remove
+        /// deletes, inventory reflects it — so convergence is observable.
+        struct KernelExecutor {
+            kernel: Arc<tokio::sync::Mutex<HashSet<u32>>>,
+        }
+        #[async_trait::async_trait]
+        impl ExecutorAdapter for KernelExecutor {
+            async fn execute(&self, r: &ActionRequest) -> ActionResult {
+                self.kernel.lock().await.insert(r.trace.policy_id);
+                ActionResult::Applied {
+                    execution_time_us: 0,
+                    rule_id: None,
+                }
+            }
+            async fn rule_count(&self) -> u32 {
+                self.kernel.lock().await.len() as u32
+            }
+            async fn remove_rule(&self, id: u32) -> ActionResult {
+                self.kernel.lock().await.remove(&id);
+                ActionResult::Applied {
+                    execution_time_us: 0,
+                    rule_id: None,
+                }
+            }
+            async fn actual_rule_ids(&self) -> Vec<u32> {
+                self.kernel.lock().await.iter().copied().collect()
+            }
+        }
+
+        let kernel = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+        let executor = Arc::new(KernelExecutor {
+            kernel: Arc::clone(&kernel),
+        });
+        let config = ReconcilerConfig {
+            check_interval_secs: 0,
+            resync_every_n_cycles: 1,
+            ..Default::default()
+        };
+        let reconciler = Reconciler::new(
+            DesiredState {
+                rules: vec![DesiredRule {
+                    id: 7,
+                    action: Action::Block,
+                    priority: 100,
+                    flow: None,
+                }],
+                drivers: Vec::new(),
+            },
+            executor,
+            config,
+        );
+
+        // Converge the desired rule into the kernel.
+        reconciler.reconcile_atomic().await.unwrap();
+        assert_eq!(kernel.lock().await.len(), 1, "desired rule installed");
+
+        // External actor injects an unknown rule directly into the kernel.
+        kernel.lock().await.insert(99);
+
+        // One ownership step (resync + reconcile) must discover and remove it.
+        reconciler.step(0).await;
+        assert_eq!(
+            *kernel.lock().await,
+            HashSet::from([7u32]),
+            "external kernel edit must be converged back to desired"
+        );
+        let actual = reconciler.get_actual().await;
+        assert_eq!(actual.active_rules.len(), 1);
+        assert_eq!(actual.active_rules[0].id, 7);
     }
 }

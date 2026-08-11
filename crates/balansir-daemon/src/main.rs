@@ -78,6 +78,15 @@ async fn main() -> Result<()> {
         ),
     }
 
+    // P4.1 (ADR-020) ownership loop: converge Desired → kernel on a cadence,
+    // re-seeding ActualState from the executor inventory periodically so
+    // external kernel edits and executor restarts are discovered, not just
+    // startup orphans.
+    let loop_reconciler = Arc::clone(&reconciler);
+    tokio::spawn(async move {
+        loop_reconciler.run_loop().await;
+    });
+
     // Setup signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
