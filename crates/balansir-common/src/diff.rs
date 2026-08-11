@@ -17,11 +17,11 @@ impl StateDiff {
         // 1. Check rules to add or update
         for rule in &desired.rules {
             match actual.active_rules.iter().find(|r| r.id == rule.id) {
-                Some(ar) if ar.action == rule.action => {
-                    // Already in desired state and action matches -> NoOp
+                Some(ar) if ar.action == rule.action && ar.flow == rule.flow => {
+                    // Already in desired state and action + flow match -> NoOp
                 }
                 Some(_) => {
-                    // Rule exists but action changed -> Update
+                    // Rule exists but action or flow criteria changed -> Update
                     operations.push(ReconciliationOperation::UpdatePolicy(rule.clone()));
                 }
                 None => {
@@ -58,6 +58,7 @@ mod tests {
                 id: 1,
                 action: Action::Allow,
                 priority: 10,
+                flow: None,
             }],
             drivers: vec![],
         };
@@ -66,6 +67,7 @@ mod tests {
                 id: 1,
                 action: Action::Allow,
                 rule_id: Some(1),
+                flow: None,
             }],
         };
 
@@ -82,6 +84,7 @@ mod tests {
                 id: 1,
                 action: Action::Allow,
                 priority: 10,
+                flow: None,
             }],
             drivers: vec![],
         };
@@ -111,11 +114,13 @@ mod tests {
                     id: 1,
                     action: Action::Block,
                     priority: 100,
+                    flow: None,
                 },
                 DesiredRule {
                     id: 2,
                     action: Action::Allow,
                     priority: 50,
+                    flow: None,
                 },
             ],
             drivers: Vec::new(),
@@ -128,11 +133,13 @@ mod tests {
                     id: 2,
                     action: Action::Allow,
                     rule_id: Some(20),
+                    flow: None,
                 },
                 ActualRule {
                     id: 3,
                     action: Action::Block,
                     rule_id: Some(30),
+                    flow: None,
                 },
             ],
         };
@@ -144,6 +151,7 @@ mod tests {
                 id: 1,
                 action: Action::Block,
                 priority: 100,
+                flow: None,
             }),
             // Rule 3 in actual but not desired -> remove.
             ReconciliationOperation::RemovePolicy(3),
@@ -171,16 +179,19 @@ mod tests {
                     id: 10,
                     action: Action::Allow,
                     priority: 10,
+                    flow: None,
                 },
                 DesiredRule {
                     id: 20,
                     action: Action::Block,
                     priority: 20,
+                    flow: None,
                 },
                 DesiredRule {
                     id: 30,
                     action: Action::Reject,
                     priority: 30,
+                    flow: None,
                 },
             ],
             drivers: Vec::new(),
@@ -191,11 +202,13 @@ mod tests {
                     id: 40,
                     action: Action::Allow,
                     rule_id: None,
+                    flow: None,
                 },
                 ActualRule {
                     id: 10,
                     action: Action::Allow,
                     rule_id: Some(10),
+                    flow: None,
                 },
             ],
         };
@@ -219,5 +232,55 @@ mod tests {
             &a.operations[2],
             ReconciliationOperation::RemovePolicy(40)
         ));
+    }
+
+    /// A3 (ADR-018): flow criteria are part of rule identity. Same id + same
+    /// action but different flow → UpdatePolicy, not NoOp.
+    #[test]
+    fn flow_criteria_change_triggers_update() {
+        use crate::FlowCriteria;
+        let with_flow = |ip: u8| DesiredRule {
+            id: 7,
+            action: Action::Block,
+            priority: 100,
+            flow: Some(FlowCriteria {
+                dst_ip: Some(std::net::IpAddr::from([203, 0, 113, ip])),
+                ..Default::default()
+            }),
+        };
+
+        // Actual has the old flow; desired has a different flow.
+        let desired = DesiredState {
+            rules: vec![with_flow(6)],
+            drivers: vec![],
+        };
+        let actual = ActualState {
+            active_rules: vec![ActualRule {
+                id: 7,
+                action: Action::Block,
+                rule_id: Some(1),
+                flow: Some(FlowCriteria {
+                    dst_ip: Some(std::net::IpAddr::from([203, 0, 113, 5])),
+                    ..Default::default()
+                }),
+            }],
+        };
+        let plan = StateDiff::build(&desired, &actual, 1);
+        assert_eq!(plan.operations.len(), 1);
+        assert!(matches!(
+            &plan.operations[0],
+            ReconciliationOperation::UpdatePolicy(r) if r.id == 7
+        ));
+
+        // Same id + action + flow -> NoOp.
+        let same = ActualState {
+            active_rules: vec![ActualRule {
+                id: 7,
+                action: Action::Block,
+                rule_id: Some(1),
+                flow: with_flow(6).flow.clone(),
+            }],
+        };
+        assert!(StateDiff::build(&desired, &same, 1).is_empty());
     }
 }

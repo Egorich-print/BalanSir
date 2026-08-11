@@ -152,6 +152,7 @@ mod tests {
             id: 1,
             action: crate::Action::Block,
             priority: 100,
+            flow: None,
         }];
         assert!(validate_policy_rules(&rules).is_ok());
     }
@@ -163,11 +164,13 @@ mod tests {
                 id: 1,
                 action: crate::Action::Block,
                 priority: 100,
+                flow: None,
             },
             crate::DesiredRule {
                 id: 1,
                 action: crate::Action::Allow,
                 priority: 50,
+                flow: None,
             },
         ];
         assert!(validate_policy_rules(&rules).is_err());

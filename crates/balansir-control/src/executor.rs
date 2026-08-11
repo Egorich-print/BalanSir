@@ -102,6 +102,7 @@ mod tests {
                 id: 1,
                 action: Action::Allow,
                 priority: 10,
+                flow: None,
             }),
             ReconciliationOperation::RemovePolicy(2),
         ]);
@@ -122,6 +123,7 @@ mod tests {
                 id: 1,
                 action: Action::Allow,
                 priority: 10,
+                flow: None,
             }),
             ReconciliationOperation::RemovePolicy(3),
         ]);

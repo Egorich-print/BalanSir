@@ -350,11 +350,13 @@ mod tests {
                     id: 1,
                     action: Action::Block,
                     priority: 100,
+                    flow: None,
                 },
                 DesiredRule {
                     id: 2,
                     action: Action::Allow,
                     priority: 50,
+                    flow: None,
                 },
             ],
             drivers: vec![],

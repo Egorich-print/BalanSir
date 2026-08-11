@@ -31,6 +31,10 @@ pub struct Reconciler {
     /// Raw mechanism adapter, retained so the daemon can query the executor's
     /// kernel inventory (A2, non-authoritative) and reconcile orphans.
     executor: Arc<dyn ExecutorAdapter>,
+    /// DNS/conn metadata → compiled flow rules (A3, ADR-018). When present,
+    /// `set_desired`/`reload` expand domain-based rules into concrete per-IP
+    /// rules before the planner sees them.
+    flow_compiler: Option<crate::reconciliation::dns_flow::FlowCompiler>,
     /// The single planning authority (M3.4.2). Both the coordinator's planning
     /// step and `Reconciler::build_plan` route through this same `Planner`
     /// port instance, so there is exactly one authoritative planning path.
@@ -125,6 +129,7 @@ impl Reconciler {
             coordinator,
             runner: executor,
             executor: executor_inner,
+            flow_compiler: None,
             planner,
         }
     }
@@ -159,9 +164,20 @@ impl Reconciler {
         Ok(())
     }
 
-    /// Update desired state.
+    /// Update desired state. Domain-based rules (A3) are compiled to concrete
+    /// per-IP flow rules before being stored, so the planner only ever sees
+    /// executor-ready rules.
     pub async fn set_desired(&self, state: DesiredState) {
+        let state = match &self.flow_compiler {
+            Some(compiler) => compiler.compile(&state),
+            None => state,
+        };
         *self.desired_state.lock().await = state;
+    }
+
+    /// Install (or replace) the DNS flow compiler used by `set_desired`/`reload`.
+    pub fn with_flow_compiler(&mut self, compiler: crate::reconciliation::dns_flow::FlowCompiler) {
+        self.flow_compiler = Some(compiler);
     }
 
     /// Get current desired state.
@@ -171,8 +187,9 @@ impl Reconciler {
 
     /// Transactional hot reload (ADR-010).
     ///
-    /// Compiles the candidate strictly, then reveals the new desired state to
-    /// the coordinator only when its reconcile cycle succeeds. On failure the
+    /// Compiles the candidate strictly (A3: domain rules expanded to concrete
+    /// per-IP flow rules), then reveals the new desired state to the
+    /// coordinator only when its reconcile cycle succeeds. On failure the
     /// old desired state is restored and the error surfaced — no
     /// half-old/half-new state is ever observable.
     pub async fn reload(
@@ -180,6 +197,10 @@ impl Reconciler {
         candidate: DesiredState,
         reason: ReconcileReason,
     ) -> ReconciliationResult<()> {
+        let candidate = match &self.flow_compiler {
+            Some(compiler) => compiler.compile(&candidate),
+            None => candidate,
+        };
         let prev = {
             let mut desired = self.desired_state.lock().await;
             std::mem::replace(&mut *desired, candidate)
@@ -230,6 +251,7 @@ impl Reconciler {
                 id,
                 action: balansir_common::Action::Allow,
                 rule_id: None,
+                flow: None,
             })
             .collect();
         Ok(())
@@ -341,11 +363,13 @@ mod tests {
                     id: 1,
                     action: Action::Block,
                     priority: 100,
+                    flow: None,
                 },
                 DesiredRule {
                     id: 2,
                     action: Action::Allow,
                     priority: 50,
+                    flow: None,
                 },
             ],
             drivers: Vec::new(),
@@ -374,6 +398,7 @@ mod tests {
                 id: 1,
                 action: Action::Block,
                 priority: 100,
+                flow: None,
             }],
             drivers: Vec::new(),
         };
@@ -388,6 +413,7 @@ mod tests {
                 id: 2,
                 action: Action::Allow,
                 priority: 50,
+                flow: None,
             })
             .await;
         let plan = reconciler.build_plan().await;
@@ -409,6 +435,7 @@ mod tests {
                 id: 1,
                 action: Action::Block,
                 priority: 100,
+                flow: None,
             })
             .await;
         reconciler
@@ -416,6 +443,7 @@ mod tests {
                 id: 2,
                 action: Action::Allow,
                 priority: 50,
+                flow: None,
             })
             .await;
 
@@ -455,6 +483,7 @@ mod tests {
                 id: 7,
                 action: Action::Block,
                 priority: 100,
+                flow: None,
             }],
             drivers: Vec::new(),
         };
@@ -485,6 +514,7 @@ mod tests {
                 id: 2,
                 action: Action::Block,
                 priority: 100,
+                flow: None,
             }],
             drivers: Vec::new(),
         };
@@ -536,11 +566,13 @@ mod tests {
                     id: 1,
                     action: Action::Block,
                     priority: 100,
+                    flow: None,
                 },
                 DesiredRule {
                     id: 2,
                     action: Action::Allow,
                     priority: 50,
+                    flow: None,
                 },
             ],
             drivers: Vec::new(),
@@ -588,11 +620,13 @@ mod tests {
                     id: 1,
                     action: Action::Block,
                     priority: 100,
+                    flow: None,
                 },
                 DesiredRule {
                     id: 2,
                     action: Action::Allow,
                     priority: 50,
+                    flow: None,
                 },
             ],
             drivers: Vec::new(),
@@ -639,6 +673,7 @@ mod tests {
                 id: 7,
                 action: Action::Block,
                 priority: 100,
+                flow: None,
             }],
             drivers: Vec::new(),
         };

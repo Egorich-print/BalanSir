@@ -111,15 +111,12 @@ fn to_nft_spec(request: &ActionRequest) -> Option<crate::nftables::NftRuleSpec> 
         17 => Some(crate::nftables::NftProto::Udp),
         _ => None,
     };
-    let src_cidr = cidr_for_src(&request.src_ip);
     Some(NftRuleSpec {
         proto,
-        src_cidr,
-        dport: if request.dst_port != 0 {
-            Some(request.dst_port)
-        } else {
-            None
-        },
+        src_cidr: cidr_for_addr(&request.src_ip),
+        dst_cidr: cidr_for_addr(&request.dst_ip),
+        sport: (request.src_port != 0).then_some(request.src_port),
+        dport: (request.dst_port != 0).then_some(request.dst_port),
         verdict,
         mark: None,
         comment: Some(rule_comment(request.trace.policy_id)),
@@ -136,30 +133,27 @@ fn to_mark_spec(request: &ActionRequest, fwmark: u32) -> crate::nftables::NftRul
         17 => Some(crate::nftables::NftProto::Udp),
         _ => None,
     };
-    let src_cidr = cidr_for_src(&request.src_ip);
     NftRuleSpec {
         proto,
-        src_cidr,
-        dport: if request.dst_port != 0 {
-            Some(request.dst_port)
-        } else {
-            None
-        },
+        src_cidr: cidr_for_addr(&request.src_ip),
+        dst_cidr: cidr_for_addr(&request.dst_ip),
+        sport: (request.src_port != 0).then_some(request.src_port),
+        dport: (request.dst_port != 0).then_some(request.dst_port),
         verdict: crate::nftables::NftVerdict::Accept,
         mark: Some(fwmark),
         comment: Some(rule_comment(request.trace.policy_id)),
     }
 }
 
-/// Render the source-address matcher as a CIDR string, or `None` for an
-/// unspecified address (no source matcher). IPv6 renders as `::/128`-style
-/// and is nft-rendered with the `ip6` keyword (A4).
-fn cidr_for_src(src_ip: &std::net::IpAddr) -> Option<String> {
+/// Render an address as a host CIDR string, or `None` for an unspecified
+/// address (no matcher). IPv6 renders as `addr/128` and is nft-rendered with
+/// the `ip6` keyword (A4).
+fn cidr_for_addr(addr: &std::net::IpAddr) -> Option<String> {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    match *src_ip {
+    match *addr {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED) | IpAddr::V6(Ipv6Addr::UNSPECIFIED) => None,
-        IpAddr::V4(addr) => Some(format!("{addr}/32")),
-        IpAddr::V6(addr) => Some(format!("{addr}/128")),
+        IpAddr::V4(a) => Some(format!("{a}/32")),
+        IpAddr::V6(a) => Some(format!("{a}/128")),
     }
 }
 

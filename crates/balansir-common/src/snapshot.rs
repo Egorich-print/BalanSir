@@ -38,6 +38,7 @@ mod tests {
                     id: 1,
                     action: Action::Allow,
                     priority: 10,
+                    flow: None,
                 }],
                 drivers: vec![],
             },
@@ -46,6 +47,7 @@ mod tests {
                     id: 1,
                     action: Action::Allow,
                     rule_id: Some(1),
+                    flow: None,
                 }],
             },
             metadata: PlanMetadata::new(1),
@@ -69,6 +71,7 @@ mod tests {
                     id: 42,
                     action: Action::Block,
                     priority: 100,
+                    flow: None,
                 },
             )],
         );

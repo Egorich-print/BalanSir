@@ -402,11 +402,34 @@ pub struct DesiredState {
     pub drivers: Vec<DesiredDriver>,
 }
 
+/// Optional flow criteria a desired rule matches on (A3, ADR-018).
+///
+/// All fields are optional: `None` means "any" (no kernel matcher). When
+/// present, the daemon carries them into `ActionRequest` and the executor
+/// compiles them into per-flow nft matchers (`ip/ip6 saddr`, `daddr`,
+/// `th sport/dport`, `meta l4proto`) instead of a chain-level verdict.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowCriteria {
+    pub src_ip: Option<IpAddr>,
+    pub dst_ip: Option<IpAddr>,
+    pub src_port: Option<u16>,
+    pub dst_port: Option<u16>,
+    pub protocol: Option<u8>,
+    /// Domain matcher (A3, DNS/conn metadata). Consumed by the daemon's flow
+    /// compiler at reload time to resolve concrete `dst_ip`s; the executor
+    /// never receives a rule that still carries a domain.
+    #[serde(default)]
+    pub dst_domain: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesiredRule {
     pub id: u32,
     pub action: Action,
     pub priority: u32,
+    /// Optional flow matcher. `None` = chain-level verdict (all flows).
+    #[serde(default)]
+    pub flow: Option<FlowCriteria>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,6 +452,10 @@ pub struct ActualRule {
     pub id: u32,
     pub action: Action,
     pub rule_id: Option<u32>,
+    /// Flow criteria the installed rule matched on (A3). Defaults to `None`
+    /// for chain-level rules and for back-compat in tests.
+    #[serde(default)]
+    pub flow: Option<FlowCriteria>,
 }
 
 #[cfg(test)]

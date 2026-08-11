@@ -307,8 +307,12 @@ impl fmt::Display for NftVerdict {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NftRuleSpec {
     pub proto: Option<NftProto>,
-    /// Source CIDR, e.g. `10.0.0.0/8`.
+    /// Source CIDR, e.g. `10.0.0.0/8` (A3: per-flow matcher).
     pub src_cidr: Option<String>,
+    /// Destination CIDR, e.g. `203.0.113.5/32` (A3).
+    pub dst_cidr: Option<String>,
+    /// Source port (A3).
+    pub sport: Option<u16>,
     /// Destination port.
     pub dport: Option<u16>,
     pub verdict: NftVerdict,
@@ -324,6 +328,8 @@ impl NftRuleSpec {
         Self {
             proto: None,
             src_cidr: None,
+            dst_cidr: None,
+            sport: None,
             dport: None,
             verdict,
             mark: None,
@@ -331,21 +337,34 @@ impl NftRuleSpec {
         }
     }
 
+    /// Push an address matcher (`ip|ip6 saddr|daddr <cidr>`) into `args`.
+    /// IPv6 CIDRs contain ':', so the nft family keyword is derivable from the
+    /// CIDR string itself (A4).
+    fn push_addr_matcher(args: &mut Vec<String>, keyword: &str, cidr: &str) {
+        let family = if cidr.contains(':') { "ip6" } else { "ip" };
+        args.push(family.to_string());
+        args.push(keyword.to_string());
+        args.push(cidr.to_string());
+    }
+
     /// Render the rule into nft arguments (without the base add-rule prefix).
     pub fn render(&self) -> Vec<String> {
-        let mut args = Vec::with_capacity(10);
+        let mut args = Vec::with_capacity(12);
         if let Some(proto) = self.proto {
             args.push("meta".to_string());
             args.push("l4proto".to_string());
             args.push(proto.to_string());
         }
         if let Some(cidr) = &self.src_cidr {
-            // IPv6 CIDRs contain ':', so the nft family keyword (`ip` vs
-            // `ip6`) is derivable from the CIDR string itself (A4).
-            let family = if cidr.contains(':') { "ip6" } else { "ip" };
-            args.push(family.to_string());
-            args.push("saddr".to_string());
-            args.push(cidr.clone());
+            Self::push_addr_matcher(&mut args, "saddr", cidr);
+        }
+        if let Some(cidr) = &self.dst_cidr {
+            Self::push_addr_matcher(&mut args, "daddr", cidr);
+        }
+        if let Some(port) = self.sport {
+            args.push("th".to_string());
+            args.push("sport".to_string());
+            args.push(port.to_string());
         }
         if let Some(port) = self.dport {
             args.push("th".to_string());
@@ -407,6 +426,8 @@ mod tests {
         let spec = NftRuleSpec {
             proto: Some(NftProto::Tcp),
             src_cidr: Some("10.0.0.0/8".to_string()),
+            dst_cidr: None,
+            sport: None,
             dport: Some(443),
             verdict: NftVerdict::Accept,
             mark: None,
@@ -433,6 +454,8 @@ mod tests {
     fn test_rule_spec_render_src_only() {
         let spec = NftRuleSpec {
             src_cidr: Some("192.168.1.0/24".to_string()),
+            dst_cidr: None,
+            sport: None,
             verdict: NftVerdict::Drop,
             proto: None,
             dport: None,
@@ -456,6 +479,8 @@ mod tests {
         let spec = NftRuleSpec {
             proto: Some(NftProto::Udp),
             src_cidr: None,
+            dst_cidr: None,
+            sport: None,
             dport: Some(53),
             verdict: NftVerdict::Accept,
             mark: None,
@@ -486,6 +511,8 @@ mod tests {
         let spec = NftRuleSpec {
             proto: Some(NftProto::Tcp),
             src_cidr: None,
+            dst_cidr: None,
+            sport: None,
             dport: Some(443),
             verdict: NftVerdict::Drop,
             mark: Some(0x10),
@@ -530,5 +557,73 @@ mod tests {
         // Non-numeric trailing garbage is not a handle.
         let bad = "\t\t... comment \"balansir:1\" # handle notanumber\n";
         assert_eq!(parse_handle_for_comment(bad, "balansir:1"), None);
+    }
+
+    /// A3 (ADR-018): a full flow rule — src, dst, sport, dport, proto —
+    /// renders family-aware (`ip`/`ip6` by the address in each CIDR).
+    #[test]
+    fn test_flow_rule_render_v4_and_v6() {
+        // IPv4 flow: src + dst + ports + proto.
+        let v4 = NftRuleSpec {
+            proto: Some(NftProto::Tcp),
+            src_cidr: Some("10.0.0.0/8".to_string()),
+            dst_cidr: Some("203.0.113.5/32".to_string()),
+            sport: Some(40000),
+            dport: Some(443),
+            verdict: NftVerdict::Drop,
+            mark: None,
+            comment: None,
+        };
+        assert_eq!(
+            v4.render(),
+            vec![
+                "meta",
+                "l4proto",
+                "tcp",
+                "ip",
+                "saddr",
+                "10.0.0.0/8",
+                "ip",
+                "daddr",
+                "203.0.113.5/32",
+                "th",
+                "sport",
+                "40000",
+                "th",
+                "dport",
+                "443",
+                "drop",
+            ]
+        );
+
+        // IPv6 flow: both addresses are v6 -> both use the `ip6` keyword.
+        let v6 = NftRuleSpec {
+            proto: Some(NftProto::Udp),
+            src_cidr: Some("2001:db8::/64".to_string()),
+            dst_cidr: Some("2001:db8::5/128".to_string()),
+            sport: None,
+            dport: Some(53),
+            verdict: NftVerdict::Accept,
+            mark: None,
+            comment: None,
+        };
+        assert_eq!(
+            v6.render(),
+            vec![
+                "meta",
+                "l4proto",
+                "udp",
+                "ip6",
+                "saddr",
+                "2001:db8::/64",
+                "ip6",
+                "daddr",
+                "2001:db8::5/128",
+                "th",
+                "dport",
+                "53",
+                "accept",
+            ]
+        );
     }
 }

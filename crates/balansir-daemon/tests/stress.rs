@@ -174,6 +174,7 @@ async fn reconciler_24h_simulation() {
                         id,
                         action: Action::Block,
                         priority: id,
+                        flow: None,
                     })
                     .await;
                 desired_count += 1;
@@ -268,6 +269,7 @@ async fn reconciler_rapid_churn_legacy() {
                 id: cycle,
                 action: Action::Allow,
                 priority: cycle,
+                flow: None,
             })
             .await;
         if cycle >= 10 {

@@ -115,6 +115,7 @@ mod tests {
                 id: 1,
                 action: balansir_common::Action::Block,
                 priority: 100,
+                flow: None,
             })
             .await;
 

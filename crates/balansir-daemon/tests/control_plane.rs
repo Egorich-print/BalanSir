@@ -20,6 +20,7 @@ async fn production_reconcile_with_pending_mechanism_rolls_back() {
             id: 1,
             action: Action::Block,
             priority: 100,
+            flow: None,
         }],
         drivers: Vec::new(),
     };

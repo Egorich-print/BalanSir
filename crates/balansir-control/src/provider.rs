@@ -31,12 +31,27 @@ impl DesiredConfig {
 }
 
 /// One rule entry in the config file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuleConfig {
     pub id: u32,
     pub action: String,
     #[serde(default)]
     pub priority: u32,
+    /// Optional flow matcher (A3). Any field absent means "any".
+    #[serde(default)]
+    pub src_ip: Option<String>,
+    #[serde(default)]
+    pub dst_ip: Option<String>,
+    #[serde(default)]
+    pub src_port: Option<u16>,
+    #[serde(default)]
+    pub dst_port: Option<u16>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// Domain matcher (A3): the daemon resolves this to concrete `dst_ip`s at
+    /// reload time via the DNS flow compiler.
+    #[serde(default)]
+    pub dst_domain: Option<String>,
 }
 
 /// One driver entry in the config file.
@@ -106,6 +121,18 @@ fn parse_driver_action(s: &str) -> ControlResult<DriverAction> {
     }
 }
 
+/// Parse an L4 protocol selector: `tcp`, `udp`, or an IANA protocol number.
+fn parse_protocol(s: &str) -> ControlResult<u8> {
+    match s.to_ascii_lowercase().as_str() {
+        "tcp" => Ok(6),
+        "udp" => Ok(17),
+        "icmp" => Ok(1),
+        _ => s
+            .parse::<u8>()
+            .map_err(|_| ControlError::DesiredProvider(format!("unknown protocol: {s}"))),
+    }
+}
+
 /// Compile a `DesiredConfig` into a `DesiredState`, rejecting any entry that
 /// does not parse. A single malformed rule or driver aborts the whole compile
 /// so a malformed reload is always rejected atomically (ADR-010).
@@ -117,10 +144,49 @@ impl TryFrom<DesiredConfig> for DesiredState {
             .rules
             .into_iter()
             .map(|r| {
+                let flow = if r.src_ip.is_none()
+                    && r.dst_ip.is_none()
+                    && r.src_port.is_none()
+                    && r.dst_port.is_none()
+                    && r.protocol.is_none()
+                    && r.dst_domain.is_none()
+                {
+                    None
+                } else {
+                    Some(balansir_common::FlowCriteria {
+                        src_ip: r
+                            .src_ip
+                            .map(|s| {
+                                s.parse::<std::net::IpAddr>().map_err(|e| {
+                                    ControlError::DesiredProvider(format!(
+                                        "invalid src_ip {}: {e}",
+                                        s
+                                    ))
+                                })
+                            })
+                            .transpose()?,
+                        dst_ip: r
+                            .dst_ip
+                            .map(|s| {
+                                s.parse::<std::net::IpAddr>().map_err(|e| {
+                                    ControlError::DesiredProvider(format!(
+                                        "invalid dst_ip {}: {e}",
+                                        s
+                                    ))
+                                })
+                            })
+                            .transpose()?,
+                        src_port: r.src_port,
+                        dst_port: r.dst_port,
+                        protocol: r.protocol.as_deref().map(parse_protocol).transpose()?,
+                        dst_domain: r.dst_domain,
+                    })
+                };
                 Ok(DesiredRule {
                     id: r.id,
                     action: parse_action(&r.action)?,
                     priority: r.priority,
+                    flow,
                 })
             })
             .collect::<Result<Vec<_>, ControlError>>()?;
@@ -220,11 +286,13 @@ mod tests {
                     id: 1,
                     action: "block".into(),
                     priority: 100,
+                    ..Default::default()
                 },
                 RuleConfig {
                     id: 2,
                     action: "allow".into(),
                     priority: 50,
+                    ..Default::default()
                 },
             ],
             drivers: vec![DriverConfig {
@@ -245,11 +313,13 @@ mod tests {
                     id: 1,
                     action: "block".into(),
                     priority: 100,
+                    ..Default::default()
                 },
                 RuleConfig {
                     id: 2,
                     action: "nonsense".into(),
                     priority: 50,
+                    ..Default::default()
                 },
             ],
             drivers: vec![],
@@ -265,6 +335,7 @@ mod tests {
                 id: 1,
                 action: "allow".into(),
                 priority: 10,
+                ..Default::default()
             }],
             drivers: vec![DriverConfig {
                 id: "not-a-driver".into(),

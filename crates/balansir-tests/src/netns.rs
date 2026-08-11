@@ -239,6 +239,8 @@ mod tests {
         let spec = NftRuleSpec {
             proto: Some(balansir_executor::nftables::NftProto::Tcp),
             src_cidr: Some("10.0.0.0/8".to_string()),
+            dst_cidr: None,
+            sport: None,
             dport: Some(443),
             verdict: NftVerdict::Drop,
             mark: Some(0x10),

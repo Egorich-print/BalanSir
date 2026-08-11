@@ -341,6 +341,7 @@ mod tests {
                 id: 1,
                 action: Action::Block,
                 priority: 100,
+                flow: None,
             }],
             drivers: vec![DesiredDriver {
                 id: DriverId::Xray,
@@ -394,6 +395,7 @@ mod tests {
                 id: 7,
                 action: Action::Allow,
                 priority: 50,
+                flow: None,
             }],
             drivers: Vec::new(),
         }));
@@ -413,6 +415,7 @@ mod tests {
                 id: 9,
                 action: Action::Block,
                 priority: 100,
+                flow: None,
             }],
             drivers: Vec::new(),
         };
@@ -430,6 +433,7 @@ mod tests {
                 id: 1,
                 action: Action::Allow,
                 priority: 10,
+                flow: None,
             }],
             drivers: Vec::new(),
         };

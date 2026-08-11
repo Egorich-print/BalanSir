@@ -231,6 +231,7 @@ mod tests {
                 id: 7,
                 action: Action::Block,
                 priority: 50,
+                flow: None,
             }],
             drivers: vec![DesiredDriver {
                 id: balansir_common::DriverId::Hysteria,

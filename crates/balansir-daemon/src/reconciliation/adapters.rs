@@ -110,13 +110,24 @@ impl Executor for DaemonExecutorAdapter {
 
 impl DaemonExecutorAdapter {
     async fn apply_rule(&self, rule: &DesiredRule) -> ReconciliationResult<()> {
+        // A3: carry the desired rule's optional flow criteria into the
+        // request. Unspecified addresses / zero ports / zero protocol mean
+        // "any" (no matcher), matching how the executor treats them.
         let request = ActionRequest {
             action: rule.action,
-            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            src_port: 0,
-            dst_port: 0,
-            protocol: 0,
+            src_ip: rule
+                .flow
+                .as_ref()
+                .and_then(|f| f.src_ip)
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+            dst_ip: rule
+                .flow
+                .as_ref()
+                .and_then(|f| f.dst_ip)
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+            src_port: rule.flow.as_ref().and_then(|f| f.src_port).unwrap_or(0),
+            dst_port: rule.flow.as_ref().and_then(|f| f.dst_port).unwrap_or(0),
+            protocol: rule.flow.as_ref().and_then(|f| f.protocol).unwrap_or(0),
             interface: 0,
             trace: DecisionTrace {
                 // Carry the DesiredRule id so the executor can tag the rule and
@@ -137,6 +148,7 @@ impl DaemonExecutorAdapter {
                     id: rule.id,
                     action: rule.action,
                     rule_id,
+                    flow: rule.flow.clone(),
                 });
                 info!(rule_id = rule.id, "Rule applied");
                 Ok(())
@@ -270,6 +282,7 @@ mod tests {
                 id,
                 action: balansir_common::Action::Block,
                 rule_id: None,
+                flow: None,
             }],
         }
     }
@@ -282,11 +295,13 @@ mod tests {
                     id: 1,
                     action: balansir_common::Action::Block,
                     rule_id: None,
+                    flow: None,
                 },
                 ActualRule {
                     id: 2,
                     action: balansir_common::Action::Allow,
                     rule_id: Some(10),
+                    flow: None,
                 },
             ],
         }));
