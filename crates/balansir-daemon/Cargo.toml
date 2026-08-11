@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "balansir-cli"
+path = "src/cli.rs"
+
 [features]
 default = ["wireguard", "xray", "hysteria", "b4"]
 wireguard = []

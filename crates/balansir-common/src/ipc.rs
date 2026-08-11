@@ -29,6 +29,12 @@ pub enum MsgType {
     RestartDriver,
     HealthCheck,
     GetMetrics,
+    // M3.8 CLI / control-plane queries (additions only; append-only).
+    GetPlan,
+    GetExplain,
+    GetDesired,
+    GetActual,
+    Reload,
     ResponseOk,
     ResponseError,
     ResponseData,

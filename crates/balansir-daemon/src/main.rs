@@ -1,7 +1,8 @@
 use balansir_common::event_bus::BoundedEventBus;
 use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
 use balansir_common::metrics::SharedMetrics;
-use balansir_common::{DriverId, Result};
+use balansir_common::{DesiredState, DriverId, Result};
+use balansir_control::ReconcileReason;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -88,8 +89,14 @@ async fn main() -> Result<()> {
                                 let metrics = Arc::clone(&metrics);
                                 let events = Arc::clone(&events);
                                 let tracker = Arc::clone(&tracker);
+                                let reconciler = Arc::clone(&reconciler);
                                 tokio::spawn(handle_connection(
-                                    conn, lifecycle, metrics, events, tracker,
+                                    conn,
+                                    lifecycle,
+                                    metrics,
+                                    events,
+                                    tracker,
+                                    reconciler,
                                 ));
                             }
                             Err(e) => {
@@ -131,12 +138,20 @@ async fn handle_connection(
     metrics: Arc<SharedMetrics>,
     events: Arc<BoundedEventBus>,
     tracker: Arc<tokio::sync::Mutex<TierTracker>>,
+    reconciler: Arc<Reconciler>,
 ) {
     loop {
         match conn.recv().await {
             Ok(msg) => {
-                let response =
-                    handle_message(&msg, Arc::clone(&lifecycle), &metrics, &events, &tracker).await;
+                let response = handle_message(
+                    &msg,
+                    Arc::clone(&lifecycle),
+                    &metrics,
+                    &events,
+                    &tracker,
+                    &reconciler,
+                )
+                .await;
                 if let Err(e) = conn.send(&response).await {
                     error!("Send error: {}", e);
                     break;
@@ -175,6 +190,7 @@ async fn handle_message(
     metrics: &SharedMetrics,
     events: &BoundedEventBus,
     tracker: &tokio::sync::Mutex<TierTracker>,
+    reconciler: &Reconciler,
 ) -> IpcMessage {
     match msg.msg_type {
         MsgType::HealthCheck => {
@@ -229,6 +245,38 @@ async fn handle_message(
             refresh_tiers(&lifecycle, metrics, events, tracker).await;
             info!(?id, "driver stopped");
             IpcMessage::response_ok(msg.correlation_id)
+        }
+        // M3.8 CLI / control-plane queries.
+        MsgType::GetPlan => {
+            let plan = reconciler.build_plan().await;
+            let body = postcard::to_allocvec(&plan).unwrap_or_default();
+            IpcMessage::response_data(msg.correlation_id, body)
+        }
+        MsgType::GetExplain => {
+            let explanation = reconciler.explain().await;
+            IpcMessage::response_data(msg.correlation_id, explanation.into_bytes())
+        }
+        MsgType::GetDesired => {
+            let desired = reconciler.get_desired().await;
+            let body = postcard::to_allocvec(&desired).unwrap_or_default();
+            IpcMessage::response_data(msg.correlation_id, body)
+        }
+        MsgType::GetActual => {
+            let actual = reconciler.get_actual().await;
+            let body = postcard::to_allocvec(&actual).unwrap_or_default();
+            IpcMessage::response_data(msg.correlation_id, body)
+        }
+        MsgType::Reload => {
+            let Ok(candidate) = postcard::from_bytes::<DesiredState>(&msg.payload) else {
+                return IpcMessage::response_error(msg.correlation_id, "invalid reload payload");
+            };
+            match reconciler
+                .reload(candidate, ReconcileReason::ConfigReload)
+                .await
+            {
+                Ok(()) => IpcMessage::response_ok(msg.correlation_id),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+            }
         }
         _ => {
             info!("Unknown message type: {:?}", msg.msg_type);
