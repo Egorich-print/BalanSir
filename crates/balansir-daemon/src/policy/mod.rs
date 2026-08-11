@@ -2,11 +2,13 @@ use balansir_common::{Action, DecisionTrace, HealthView, MatcherStep};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
+pub mod compiler;
 pub mod error;
 pub mod fast_match;
 pub mod matcher;
 pub mod rules;
 
+pub use compiler::*;
 pub use error::*;
 pub use fast_match::*;
 pub use matcher::*;

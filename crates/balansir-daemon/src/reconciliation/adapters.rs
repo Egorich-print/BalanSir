@@ -3,12 +3,11 @@
 
 use balansir_common::plan::{ReconciliationOperation, ReconciliationPlan};
 use balansir_common::{
-    ActionRequest, ActionResult, ActionType, ActualRule, ActualState, DecisionTrace, DesiredRule,
-    DesiredState, Snapshot,
+    ActionRequest, ActionResult, ActionType, ActualRule, ActualState, DesiredRule, DesiredState,
+    Snapshot,
 };
 use balansir_control::traits::{DesiredProvider, Executor, Rollback, StateProvider};
 use balansir_control::{ControlResult, ExecutionReport};
-use smallvec::SmallVec;
 use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -110,35 +109,11 @@ impl Executor for DaemonExecutorAdapter {
 
 impl DaemonExecutorAdapter {
     async fn apply_rule(&self, rule: &DesiredRule) -> ReconciliationResult<()> {
-        // A3: carry the desired rule's optional flow criteria into the
-        // request. Unspecified addresses / zero ports / zero protocol mean
-        // "any" (no matcher), matching how the executor treats them.
-        let request = ActionRequest {
-            action: rule.action,
-            src_ip: rule
-                .flow
-                .as_ref()
-                .and_then(|f| f.src_ip)
-                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
-            dst_ip: rule
-                .flow
-                .as_ref()
-                .and_then(|f| f.dst_ip)
-                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
-            src_port: rule.flow.as_ref().and_then(|f| f.src_port).unwrap_or(0),
-            dst_port: rule.flow.as_ref().and_then(|f| f.dst_port).unwrap_or(0),
-            protocol: rule.flow.as_ref().and_then(|f| f.protocol).unwrap_or(0),
-            interface: 0,
-            trace: DecisionTrace {
-                // Carry the DesiredRule id so the executor can tag the rule and
-                // resolve it for precise handle-based removal (M3.7).
-                policy_id: rule.id,
-                steps: SmallVec::new(),
-                action: rule.action,
-                execution_time_us: 0,
-                correlation_id: 0,
-            },
-        };
+        // P5 (policy compiler): the semantic rule becomes the backend-neutral
+        // wire request here; the executor owns the mechanism mapping. Flow
+        // criteria (absent fields = "no matcher") are compiled in
+        // `policy::PolicyCompiler`, not inline.
+        let request = crate::policy::PolicyCompiler::compile(rule);
 
         match self.executor.execute(&request).await {
             ActionResult::Applied { rule_id, .. } => {
