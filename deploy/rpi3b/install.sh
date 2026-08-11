@@ -40,8 +40,24 @@ ssh "${HOST}" '
 
     install -d /etc/balansir /run/balansir
 
+    # Runtime dir ownership for the split daemon/executor UIDs (ADR-030):
+    # systemd-tmpfiles creates /run/balansir as root:balansir before services.
+    install -d /usr/lib/tmpfiles.d
+    install -m 0644 /dev/stdin /usr/lib/tmpfiles.d/balansir.conf <<'TMPFILES'
+d /run/balansir 0775 root balansir -
+TMPFILES
+
+    # Unprivileged daemon account (fixed, ADR-030): the daemon unit runs as
+    # UID 1500 (balansir); the executor accepts it via BALANSIR_ALLOWED_UIDS.
+    if ! id -u balansir >/dev/null 2>&1; then
+        useradd --system --uid 1500 --home-dir /var/lib/balansir \
+            --shell /usr/sbin/nologin balansir
+    fi
+    install -d -o balansir -g balansir /var/lib/balansir
+
     # systemd units (daemon carries BALANSIR_CONFIG; executor is the
-    # privileged nft mechanism).
+    # privileged nft mechanism). Type=simple: neither binary implements
+    # sd_notify (fixed, ADR-030).
     install -m 0644 /dev/stdin /etc/systemd/system/balansir-daemon.service <<UNIT
 [Unit]
 Description=BalanSir Network Policy Engine - Daemon
@@ -49,9 +65,12 @@ After=network.target balansir-executor.service
 Wants=network.target
 
 [Service]
-Type=notify
+Type=simple
 ExecStart=/usr/local/bin/balansir-daemon
 Environment=BALANSIR_CONFIG=/etc/balansir/balansir.toml
+Environment=BALANSIR_ALLOWED_UIDS=0,1500
+User=balansir
+Group=balansir
 Restart=on-failure
 RestartSec=5
 
@@ -65,8 +84,9 @@ Description=BalanSir Network Policy Engine - Executor (privileged)
 After=network.target
 
 [Service]
-Type=notify
+Type=simple
 ExecStart=/usr/local/bin/balansir-executor
+Environment=BALANSIR_ALLOWED_UIDS=0,1500
 Restart=on-failure
 RestartSec=5
 User=root

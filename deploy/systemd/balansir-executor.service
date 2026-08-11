@@ -1,22 +1,27 @@
 [Unit]
 Description=BalanSir Network Policy Engine - Executor (privileged)
 Documentation=https://github.com/balansir/balansir
-After=network.target balansir-daemon.service
+# The daemon connects to us; we do not depend on it (reordering fixed, ADR-030).
+After=network.target
 Wants=network.target
-Requires=balansir-daemon.service
 
 [Service]
-Type=notify
+# Simple: the executor does not implement sd_notify (fixed, ADR-030).
+Type=simple
 ExecStart=/usr/local/bin/balansir-executor
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
-WatchdogSec=30
 
 # Security (needs root for netlink/nftables)
 User=root
 Group=root
 NoNewPrivileges=yes
+
+# IPC peer auth (ADR-013, fixed ADR-030): the executor accepts the control
+# connection from the unprivileged daemon (UID 1500, balansir). Root is kept
+# so an operator can run privileged diagnostics.
+Environment=BALANSIR_ALLOWED_UIDS=0,1500
 
 # Capabilities: minimal set for network control only.
 # CAP_SYS_ADMIN removed (not needed; reduces kernel attack surface).
@@ -25,6 +30,7 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 
 # Filesystem hardening: root fs read-only, exec-only tmp, private /tmp.
 ProtectSystem=strict
+# /run/balansir created by systemd-tmpfiles (tmpfiles.d/balansir.conf).
 ReadWritePaths=/run/balansir
 ProtectHome=yes
 PrivateTmp=yes

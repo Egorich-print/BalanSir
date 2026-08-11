@@ -64,8 +64,10 @@ install-bin:
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 target/release/balansir-daemon $(DESTDIR)$(BINDIR)/
 	install -m 755 target/release/balansir-executor $(DESTDIR)$(BINDIR)/
-	@# Create CLI wrapper
-	install -m 755 scripts/balansir-cli $(DESTDIR)$(BINDIR)/
+	@# Compiled CLI binary (the old scripts/balansir-cli bash wrapper was a
+	@# stale artifact pointing at /tmp/balansir-test/daemon.sock — removed,
+	@# ADR-030).
+	install -m 755 target/release/balansir-cli $(DESTDIR)$(BINDIR)/
 
 install-config:
 	@echo "Installing configuration..."
@@ -94,7 +96,8 @@ install-systemd:
 		install -d $(DESTDIR)$(SYSTEMDDIR); \
 		install -m 644 deploy/systemd/balansir-daemon.service $(DESTDIR)$(SYSTEMDDIR)/; \
 		install -m 644 deploy/systemd/balansir-executor.service $(DESTDIR)$(SYSTEMDDIR)/; \
-		install -m 644 deploy/systemd/balansir.socket $(DESTDIR)$(SYSTEMDDIR)/; \
+		install -d $(DESTDIR)/usr/lib/tmpfiles.d; \
+		install -m 644 deploy/systemd/tmpfiles.d/balansir.conf $(DESTDIR)/usr/lib/tmpfiles.d/; \
 		systemctl daemon-reload; \
 	else \
 		echo "Skipping systemd (not Linux)"; \
@@ -107,7 +110,7 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/balansir-cli
 	rm -f $(DESTDIR)$(SYSTEMDDIR)/balansir-daemon.service
 	rm -f $(DESTDIR)$(SYSTEMDDIR)/balansir-executor.service
-	rm -f $(DESTDIR)$(SYSTEMDDIR)/balansir.socket
+	rm -f $(DESTDIR)/usr/lib/tmpfiles.d/balansir.conf
 	@if [ "$(OS)" = "linux" ]; then \
 		systemctl daemon-reload; \
 	fi
@@ -135,7 +138,7 @@ deb: build
 	@mkdir -p target/deb
 	@cp target/release/balansir-daemon target/deb/
 	@cp target/release/balansir-executor target/deb/
-	@cp scripts/balansir-cli target/deb/
+	@cp target/release/balansir-cli target/deb/
 	@echo "Use 'dpkg-deb' to create .deb package"
 
 rpm: build

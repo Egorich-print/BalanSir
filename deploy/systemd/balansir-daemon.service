@@ -1,20 +1,25 @@
 [Unit]
 Description=BalanSir Network Policy Engine - Daemon
 Documentation=https://github.com/balansir/balansir
-After=network.target
+After=network.target balansir-executor.service
 Wants=network.target
 
 [Service]
-Type=notify
+# Simple: the daemon does not implement sd_notify, so Type=notify would never
+# become active (fixed, ADR-030).
+Type=simple
 ExecStart=/usr/local/bin/balansir-daemon
 # Startup config (P7.2.1, ADR-027): the daemon restores the last accepted
 # desired state after reboot without an operator reload. A rejected config is
 # a fatal startup error (never silently empty).
 Environment=BALANSIR_CONFIG=/etc/balansir/balansir.toml
+# IPC peer auth (ADR-013): the daemon accepts the privileged executor (root)
+# and the operator CLI (root); the unprivileged daemon UID is allowed so the
+# executor can accept the daemon's control connection (fixed, ADR-030).
+Environment=BALANSIR_ALLOWED_UIDS=0,1500
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
-WatchdogSec=30
 
 # Security
 User=balansir
@@ -22,6 +27,8 @@ Group=balansir
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
+# /run/balansir is created by systemd-tmpfiles (tmpfiles.d/balansir.conf),
+# owned root:balansir so both daemon and executor can use it.
 ReadWritePaths=/var/lib/balansir /var/log/balansir /run/balansir
 PrivateTmp=yes
 
