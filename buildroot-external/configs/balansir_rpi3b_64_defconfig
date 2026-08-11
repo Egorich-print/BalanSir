@@ -1,25 +1,27 @@
 # BalanSir + Raspberry Pi 3B+ (AArch64) Buildroot configuration.
 #
-# Based on Buildroot's raspberrypi3_64_defconfig (2025.02.x LTS) with:
+# Based on Buildroot's raspberrypi3_64_defconfig (2026.05.x) with:
 #   - BalanSir package (daemon/executor/cli) + runtime deps (nft, iproute2)
 #   - systemd init (uses the project's deploy/systemd units, ADR-030)
 #   - read-only-ish rootfs + tmpfs /run hardening
-#   - serial console for recovery, DHCP on eth0, dropbear SSH
+#   - serial console for recovery, DHCP on eth0, openssh
 #
 # Build:  make BR2_EXTERNAL=buildroot-external balansir_rpi3b_64_defconfig
 #         make
 
-# Architecture / toolchain (aarch64, glibc, C++)
+# Architecture / toolchain (aarch64; Bootlin external glibc toolchain — no
+# host gcc build, faster and reproducible)
 BR2_aarch64=y
 BR2_ARM_FPU_VFPV4=y
-BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_6=y
-BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_TOOLCHAIN_EXTERNAL=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_AARCH64_GLIBC_STABLE=y
 
-# Kernel (Raspberry Pi custom tree, bcmrpi3 defconfig, 3B/3B+/CM3 DTBs)
+# Kernel (Raspberry Pi custom tree, bcm2711 defconfig, 3B/3B+/CM3 DTBs)
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,576cc10e1ed50a9eacffc7a05c796051d7343ea4)/linux-576cc10e1ed50a9eacffc7a05c796051d7343ea4.tar.gz"
-BR2_LINUX_KERNEL_DEFCONFIG="bcmrpi3"
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,21b410140c47ffab5668399f6f143c7d7b935c8b)/linux-21b410140c47ffab5668399f6f143c7d7b935c8b.tar.gz"
+BR2_LINUX_KERNEL_DEFCONFIG="bcm2711"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2710-rpi-3-b broadcom/bcm2710-rpi-3-b-plus broadcom/bcm2710-rpi-cm3"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
