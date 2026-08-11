@@ -230,6 +230,36 @@ impl NftablesBackend {
         Ok(rules)
     }
 
+    /// Report the ids of rules present in the chain, parsed from `balansir:<id>`
+    /// comments (A2 inventory — non-authoritative). Includes mark-only rules.
+    pub fn list_rule_ids(&self) -> Result<Vec<u32>> {
+        let output = Command::new(nft_bin()?)
+            .args(["list", "chain", "inet", &self.table_name, &self.chain_name])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(balansir_common::Error::Fatal(format!(
+                "nft list failed: {}",
+                stderr
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut ids = Vec::new();
+        for line in stdout.lines() {
+            if let Some(start) = line.find("balansir:") {
+                let rest = &line[start + "balansir:".len()..];
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !digits.is_empty() {
+                    if let Ok(id) = digits.parse::<u32>() {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     #[cfg(test)]
     fn render_args(&self, spec: &NftRuleSpec) -> Vec<String> {
         self.rule_args(spec)

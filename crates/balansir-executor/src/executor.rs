@@ -33,6 +33,16 @@ pub trait Executor: Send + Sync {
         0
     }
 
+    /// Report the ids of rules currently present in the mechanism (A2).
+    ///
+    /// This is a **non-authoritative inventory**: it tells the daemon what the
+    /// kernel currently holds so the daemon can reconcile against its desired
+    /// state. The executor does not decide what *should* be — it only reports
+    /// what *is*. Default is empty for executors with no kernel state.
+    async fn actual_rule_ids(&self) -> Vec<u32> {
+        Vec::new()
+    }
+
     /// Flush all rules in the executor's mechanism.
     ///
     /// Default is `Unsupported`-free success so in-memory/test executors that

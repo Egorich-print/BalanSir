@@ -64,6 +64,12 @@ async fn main() -> Result<()> {
         Arc::new(ExecutorClient::default()),
         ReconcilerConfig::default(),
     ));
+    // A2: seed ActualState from the executor's kernel inventory so any rule
+    // left behind by an ack-gap/executor restart is reconciled (removed if not
+    // desired). Non-authoritative — the daemon still decides what should be.
+    if let Err(e) = reconciler.sync_actual_from_executor().await {
+        warn!("Could not read executor inventory (will reconcile anyway): {e}");
+    }
     match reconciler.reconcile().await {
         Ok(()) => info!("Initial reconcile: no changes required"),
         Err(e) => warn!(

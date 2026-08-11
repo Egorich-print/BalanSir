@@ -6,7 +6,9 @@ use crate::reconciliation::adapters::{
 use crate::reconciliation::sinks::TracingEventSink;
 use crate::reconciliation::{ReconciliationError, ReconciliationResult};
 use balansir_common::plan::ReconciliationPlan;
-use balansir_common::{ActionRequest, ActionResult, ActualState, DesiredRule, DesiredState};
+use balansir_common::{
+    ActionRequest, ActionResult, ActualRule, ActualState, DesiredRule, DesiredState,
+};
 use balansir_control::planner::BasicPlanner;
 use balansir_control::snapshot_store::MemorySnapshotStore;
 use balansir_control::traits::{Executor, Planner};
@@ -26,6 +28,9 @@ pub struct Reconciler {
     config: ReconcilerConfig,
     coordinator: Arc<Coordinator>,
     runner: Arc<DaemonExecutorAdapter>,
+    /// Raw mechanism adapter, retained so the daemon can query the executor's
+    /// kernel inventory (A2, non-authoritative) and reconcile orphans.
+    executor: Arc<dyn ExecutorAdapter>,
     /// The single planning authority (M3.4.2). Both the coordinator's planning
     /// step and `Reconciler::build_plan` route through this same `Planner`
     /// port instance, so there is exactly one authoritative planning path.
@@ -65,6 +70,11 @@ pub trait ExecutorAdapter: Send + Sync {
     async fn rule_count(&self) -> u32;
     /// Revert a previously applied rule at the kernel/mechanism level.
     async fn remove_rule(&self, rule_id: u32) -> ActionResult;
+    /// Report the ids of rules currently present in the mechanism (A2,
+    /// non-authoritative inventory). Default empty.
+    async fn actual_rule_ids(&self) -> Vec<u32> {
+        Vec::new()
+    }
 }
 
 impl Reconciler {
@@ -84,8 +94,9 @@ impl Reconciler {
             executor: executor.clone(),
             actual: actual.clone(),
         });
+        let executor_inner: Arc<dyn ExecutorAdapter> = executor.clone();
         let executor = Arc::new(DaemonExecutorAdapter {
-            executor,
+            executor: executor.clone(),
             actual: actual.clone(),
         });
 
@@ -113,6 +124,7 @@ impl Reconciler {
             config,
             coordinator,
             runner: executor,
+            executor: executor_inner,
             planner,
         }
     }
@@ -195,6 +207,32 @@ impl Reconciler {
     /// Get current actual state (for testing and monitoring).
     pub async fn get_actual(&self) -> ActualState {
         self.actual_state.lock().await.clone()
+    }
+
+    /// A2: reconcile kernel orphans after an ack-gap / executor restart.
+    ///
+    /// Asks the executor what rule ids are actually present in the kernel
+    /// (non-authoritative inventory), seeds `ActualState` with them, then runs
+    /// a normal reconcile. Rules present in the kernel but absent from desired
+    /// are removed; the planner decides what *should* be present. The executor
+    /// never decides what should be present.
+    ///
+    /// The inventory carries only ids, not actions, so seeded rules use a
+    /// placeholder action (`Allow`); any desired rule that differs is
+    /// re-applied by the planner (A1 makes that idempotent), and orphaned
+    /// rules are removed by id.
+    pub async fn sync_actual_from_executor(&self) -> ReconciliationResult<()> {
+        let ids = self.executor.actual_rule_ids().await;
+        let mut actual = self.actual_state.lock().await;
+        actual.active_rules = ids
+            .into_iter()
+            .map(|id| ActualRule {
+                id,
+                action: balansir_common::Action::Allow,
+                rule_id: None,
+            })
+            .collect();
+        Ok(())
     }
 
     /// Get current generation (for testing and monitoring).
@@ -620,5 +658,48 @@ mod tests {
             plan.to_string().contains("Update policy"),
             "plan display matches explain"
         );
+    }
+
+    /// A2: sync_actual_from_executor seeds ActualState from the executor's
+    /// non-authoritative kernel inventory so orphaned rules are reconcilable.
+    #[tokio::test]
+    async fn sync_actual_from_executor_imports_kernel_inventory() {
+        use std::sync::Arc;
+
+        struct Inventory(Arc<tokio::sync::Mutex<Vec<u32>>>);
+        #[async_trait::async_trait]
+        impl ExecutorAdapter for Inventory {
+            async fn execute(&self, _r: &ActionRequest) -> ActionResult {
+                ActionResult::Unsupported {
+                    action_type: balansir_common::ActionType::Block,
+                }
+            }
+            async fn rule_count(&self) -> u32 {
+                0
+            }
+            async fn remove_rule(&self, _id: u32) -> ActionResult {
+                ActionResult::Applied {
+                    execution_time_us: 0,
+                    rule_id: None,
+                }
+            }
+            async fn actual_rule_ids(&self) -> Vec<u32> {
+                self.0.lock().await.clone()
+            }
+        }
+
+        let inventory = Arc::new(tokio::sync::Mutex::new(vec![7u32, 42]));
+        let executor = Arc::new(Inventory(inventory));
+        let reconciler = Reconciler::new(
+            DesiredState::default(),
+            executor,
+            ReconcilerConfig::default(),
+        );
+
+        reconciler.sync_actual_from_executor().await.unwrap();
+        let actual = reconciler.get_actual().await;
+        let mut ids: Vec<u32> = actual.active_rules.iter().map(|r| r.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![7, 42]);
     }
 }

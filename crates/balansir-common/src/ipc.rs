@@ -35,6 +35,9 @@ pub enum MsgType {
     GetDesired,
     GetActual,
     Reload,
+    // A2: executor reports its kernel inventory (non-authority) so the daemon
+    // can reconcile orphans after an ack-gap/executor restart.
+    GetActualRules,
     ResponseOk,
     ResponseError,
     ResponseData,

@@ -104,6 +104,15 @@ impl ExecutorAdapter for ExecutorClient {
         0
     }
 
+    /// A2 inventory: ask the executor what rule ids are present in the kernel.
+    /// Non-authoritative — the daemon reconciles against this result.
+    async fn actual_rule_ids(&self) -> Vec<u32> {
+        match self.request(MsgType::GetActualRules, Vec::new()).await {
+            Ok(resp) => postcard::from_bytes::<Vec<u32>>(&resp.payload).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     async fn remove_rule(&self, rule_id: u32) -> ActionResult {
         let payload = postcard::to_allocvec(&rule_id).unwrap_or_default();
         match self.request(MsgType::RemoveRule, payload).await {

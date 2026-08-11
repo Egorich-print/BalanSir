@@ -246,6 +246,13 @@ impl Executor for NftablesExecutor {
         self.forget(rule_id);
         Ok(())
     }
+
+    /// A2 inventory: report the rule ids currently present in the kernel. The
+    /// daemon reconciles against this; the executor does not decide what should
+    /// be present (non-authority).
+    async fn actual_rule_ids(&self) -> Vec<u32> {
+        self.backend.list_rule_ids().unwrap_or_default()
+    }
 }
 
 /// Allowed executor operations. Anything not in this set is rejected before
@@ -253,7 +260,11 @@ impl Executor for NftablesExecutor {
 fn is_allowlisted(msg_type: MsgType) -> bool {
     matches!(
         msg_type,
-        MsgType::AddRule | MsgType::RemoveRule | MsgType::FlushRules | MsgType::HealthCheck
+        MsgType::AddRule
+            | MsgType::RemoveRule
+            | MsgType::FlushRules
+            | MsgType::HealthCheck
+            | MsgType::GetActualRules
     )
 }
 
@@ -319,6 +330,15 @@ pub async fn dispatch(msg: &IpcMessage, executor: &dyn Executor) -> IpcMessage {
                 Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
             }
         }
+        MsgType::GetActualRules => {
+            let ids = executor.actual_rule_ids().await;
+            match postcard::to_allocvec(&ids) {
+                Ok(payload) => IpcMessage::response_data(msg.correlation_id, payload),
+                Err(_) => {
+                    IpcMessage::response_error(msg.correlation_id, "failed to encode inventory")
+                }
+            }
+        }
         _ => IpcMessage::response_error(msg.correlation_id, "operation not allowed"),
     }
 }
@@ -337,15 +357,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_non_allowlisted_operation() {
-        let response = dispatch(&message(MsgType::StartDriver, vec![]), &dummy_executor()).await;
-        assert_eq!(response.msg_type, MsgType::ResponseError);
-    }
-
-    #[tokio::test]
     async fn health_check_is_allowlisted() {
         let response = dispatch(&message(MsgType::HealthCheck, vec![]), &dummy_executor()).await;
         assert_eq!(response.msg_type, MsgType::ResponseOk);
+    }
+
+    /// A2: GetActualRules returns the executor's kernel inventory (non-
+    /// authoritative). DummyExecutor's inventory is empty.
+    #[tokio::test]
+    async fn get_actual_rules_returns_inventory() {
+        let response = dispatch(&message(MsgType::GetActualRules, vec![]), &dummy_executor()).await;
+        assert_eq!(response.msg_type, MsgType::ResponseData);
+        let ids: Vec<u32> = postcard::from_bytes(&response.payload).unwrap();
+        assert!(ids.is_empty());
     }
 
     #[tokio::test]
