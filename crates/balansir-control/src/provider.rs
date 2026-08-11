@@ -16,6 +16,30 @@ pub struct DesiredConfig {
     pub rules: Vec<RuleConfig>,
     #[serde(default)]
     pub drivers: Vec<DriverConfig>,
+    /// Policy-level semantics (P1, ADR-019).
+    #[serde(default)]
+    pub policy: PolicyConfig,
+}
+
+/// Policy-level semantics for a config (P1, ADR-019).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PolicyConfig {
+    /// What an *empty* rule set means. `Pass` (default) installs nothing
+    /// (fail-open, current behavior). `Drop` installs a single terminal
+    /// fail-closed rule so an empty config does not silently pass everything.
+    #[serde(default)]
+    pub empty_config_action: EmptyConfigAction,
+}
+
+/// Action for an empty rule set (P1, ADR-019).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmptyConfigAction {
+    /// Install nothing (fail-open). Current behavior.
+    #[default]
+    Pass,
+    /// Install a single terminal drop (fail-closed).
+    Drop,
 }
 
 impl DesiredConfig {
@@ -140,7 +164,7 @@ impl TryFrom<DesiredConfig> for DesiredState {
     type Error = ControlError;
 
     fn try_from(config: DesiredConfig) -> Result<Self, Self::Error> {
-        let rules = config
+        let mut rules = config
             .rules
             .into_iter()
             .map(|r| {
@@ -201,6 +225,20 @@ impl TryFrom<DesiredConfig> for DesiredState {
                 })
             })
             .collect::<Result<Vec<_>, ControlError>>()?;
+
+        // P1 (ADR-019): fail-closed semantics for an empty rule set. When the
+        // compiled rules are empty and the config asks for `Drop`, append a
+        // single terminal drop so an empty config cannot silently pass
+        // everything. The executor stays non-authoritative — this is a
+        // desired-state compile decision, not a mechanism default.
+        if rules.is_empty() && config.policy.empty_config_action == EmptyConfigAction::Drop {
+            rules.push(DesiredRule {
+                id: balansir_common::FAIL_CLOSED_RULE_ID,
+                action: Action::Block,
+                priority: 0,
+                flow: None,
+            });
+        }
 
         Ok(Self { rules, drivers })
     }
@@ -299,6 +337,7 @@ mod tests {
                 id: "wireguard".into(),
                 action: "start".into(),
             }],
+            policy: Default::default(),
         };
         let state = DesiredState::try_from(config).unwrap();
         assert_eq!(state.rules.len(), 2);
@@ -323,6 +362,7 @@ mod tests {
                 },
             ],
             drivers: vec![],
+            policy: Default::default(),
         };
         let err = DesiredState::try_from(config).unwrap_err();
         assert!(err.to_string().to_lowercase().contains("unknown action"));
@@ -341,7 +381,66 @@ mod tests {
                 id: "not-a-driver".into(),
                 action: "start".into(),
             }],
+            policy: Default::default(),
         };
         assert!(DesiredState::try_from(config).is_err());
+    }
+
+    /// P1 (ADR-019): default is fail-open — an empty config installs nothing.
+    #[test]
+    fn empty_config_defaults_to_pass() {
+        let config = DesiredConfig::default();
+        let state = DesiredState::try_from(config).unwrap();
+        assert!(state.rules.is_empty());
+    }
+
+    /// P1 (ADR-019): fail-closed — an empty config with `empty_config_action =
+    /// "drop"` compiles to a single terminal drop rule.
+    #[test]
+    fn empty_config_fail_closed_installs_terminal_drop() {
+        let config = DesiredConfig {
+            policy: PolicyConfig {
+                empty_config_action: EmptyConfigAction::Drop,
+            },
+            ..Default::default()
+        };
+        let state = DesiredState::try_from(config).unwrap();
+        assert_eq!(state.rules.len(), 1);
+        assert_eq!(state.rules[0].id, balansir_common::FAIL_CLOSED_RULE_ID);
+        assert_eq!(state.rules[0].action, Action::Block);
+        assert!(state.rules[0].flow.is_none());
+    }
+
+    /// P1 (ADR-019): fail-closed only applies to an *empty* rule set — a config
+    /// with rules is unchanged.
+    #[test]
+    fn fail_closed_does_not_touch_non_empty_config() {
+        let config = DesiredConfig {
+            rules: vec![RuleConfig {
+                id: 1,
+                action: "allow".into(),
+                priority: 10,
+                ..Default::default()
+            }],
+            policy: PolicyConfig {
+                empty_config_action: EmptyConfigAction::Drop,
+            },
+            ..Default::default()
+        };
+        let state = DesiredState::try_from(config).unwrap();
+        assert_eq!(state.rules.len(), 1);
+        assert_eq!(state.rules[0].id, 1);
+    }
+
+    /// P1 (ADR-019): the TOML spelling is `[policy] empty_config_action =
+    /// "drop"` (lowercase), parsed strictly.
+    #[test]
+    fn empty_config_action_parses_from_toml() {
+        let config: DesiredConfig =
+            toml::from_str("[policy]\nempty_config_action = \"drop\"\n").unwrap();
+        assert_eq!(config.policy.empty_config_action, EmptyConfigAction::Drop);
+
+        let pass: DesiredConfig = toml::from_str("").unwrap();
+        assert_eq!(pass.policy.empty_config_action, EmptyConfigAction::Pass);
     }
 }

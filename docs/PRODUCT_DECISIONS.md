@@ -34,14 +34,14 @@ a predictable, safe outcome — and "safe" is a product call.
   kernel, but introduces an executor-side default (which the A-series gates
   deliberately avoided by keeping the executor non-authoritative).
 
-**Recommendation:** **B** via a config flag
-(`[policy] empty_config_action = "pass" | "drop"`, default `"pass"` to preserve
-current behavior), implemented as a planner/compile concern so the executor
-stays non-authoritative. Fail-open remains the default only because it is
-today's honest behavior; the packaged appliance profiles would set `drop`.
+**Decision (implemented, ADR-019):** a `[policy] empty_config_action =
+"pass" | "drop"` flag, compiled in `DesiredConfig → DesiredState`. Default
+`"pass"` preserves current behavior; `"drop"` appends a single terminal drop
+rule (reserved id `FAIL_CLOSED_RULE_ID`) so the executor stays
+non-authoritative. Packaged appliance profiles can set `"drop"`.
 
-**Owner decision needed:** default value + whether a packaged profile may
-override it.
+**Owner decision needed:** ~~default value + whether a packaged profile may
+override it~~ → decided: default `pass`, profiles may override.
 
 ---
 

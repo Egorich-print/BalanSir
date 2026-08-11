@@ -396,6 +396,10 @@ pub struct ExecutorCapabilities {
 
 // --- Desired State ---
 
+/// Rule id reserved for the terminal fail-closed rule installed when a
+/// fail-closed config compiles with an empty rule set (P1, ADR-019).
+pub const FAIL_CLOSED_RULE_ID: u32 = u32::MAX;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DesiredState {
     pub rules: Vec<DesiredRule>,
