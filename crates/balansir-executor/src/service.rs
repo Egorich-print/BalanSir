@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
 use balansir_common::{ActionRequest, ActionResult, Result};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::executor::Executor;
@@ -30,27 +30,37 @@ use crate::executor::Executor;
 /// implemented and unit-tested so fwmark+ip-rule is ready to wire when the
 /// daemon contract can express a mark↔table pair.
 ///
-/// Installed rules are tracked by their `trace.policy_id` so `RemoveRule` can
-/// resolve the nft handle and delete precisely (never a fragile flush-all).
+/// Installed rules are tracked by `policy_id -> semantic fingerprint` so
+/// `RemoveRule` can resolve the nft handle and delete precisely (never a
+/// fragile flush-all), and `execute` can distinguish "same rule" from
+/// "different rule under the same id" (A1, ADR-015).
 #[derive(Debug)]
 pub struct NftablesExecutor {
     backend: crate::nftables::NftablesBackend,
-    installed: Mutex<HashSet<u32>>,
+    installed: Mutex<HashMap<u32, u64>>,
 }
 
 impl NftablesExecutor {
     pub fn new(backend: crate::nftables::NftablesBackend) -> Self {
         Self {
             backend,
-            installed: Mutex::new(HashSet::new()),
+            installed: Mutex::new(HashMap::new()),
         }
     }
 
-    fn remember(&self, policy_id: u32) {
+    fn fingerprint_of(&self, policy_id: u32) -> Option<u64> {
         self.installed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(policy_id);
+            .get(&policy_id)
+            .copied()
+    }
+
+    fn remember(&self, policy_id: u32, fingerprint: u64) {
+        self.installed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(policy_id, fingerprint);
     }
 
     fn forget(&self, policy_id: u32) {
@@ -59,6 +69,21 @@ impl NftablesExecutor {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&policy_id);
     }
+}
+
+/// Stable semantic fingerprint of a rule request (A1, ADR-015).
+///
+/// FNV-1a over the postcard encoding of the full `ActionRequest`, so two rules
+/// with the same `policy_id` but different action/flow fields hash
+/// differently — "same id" is no longer assumed to mean "same rule".
+fn rule_fingerprint(request: &ActionRequest) -> u64 {
+    let bytes = postcard::to_allocvec(request).unwrap_or_default();
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in &bytes {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn to_nft_verdict(action: &balansir_common::Action) -> Option<crate::nftables::NftVerdict> {
@@ -159,51 +184,59 @@ impl Executor for NftablesExecutor {
     }
 
     async fn execute(&self, request: &ActionRequest) -> ActionResult {
-        match request.action {
+        let policy_id = request.trace.policy_id;
+        let fingerprint = rule_fingerprint(request);
+
+        // Idempotency (A1, ADR-015): the exact same rule is already installed.
+        if self.fingerprint_of(policy_id) == Some(fingerprint) {
+            return ActionResult::AlreadyApplied;
+        }
+
+        let spec = match request.action {
             // Mark: classify + set fwmark, then continue (policy routing applies).
-            balansir_common::Action::Mark { fwmark } => {
-                let spec = to_mark_spec(request, fwmark);
-                match self.backend.add_rule(&spec) {
-                    Ok(()) => {
-                        self.remember(request.trace.policy_id);
-                        ActionResult::Applied {
-                            execution_time_us: 0,
-                            rule_id: Some(request.trace.policy_id),
-                        }
-                    }
-                    Err(e) => ActionResult::Failed {
-                        error: balansir_common::ActionError::KernelError(0),
-                        message: Some(e.to_string()),
-                    },
-                }
-            }
-            // Verdict actions: drop / accept / reject.
-            _ => {
-                let Some(spec) = to_nft_spec(request) else {
+            balansir_common::Action::Mark { fwmark } => to_mark_spec(request, fwmark),
+            _ => match to_nft_spec(request) {
+                Some(spec) => spec,
+                None => {
                     return ActionResult::Unsupported {
                         action_type: request.action.action_type(),
-                    };
-                };
-                match self.backend.add_rule(&spec) {
-                    Ok(()) => {
-                        self.remember(request.trace.policy_id);
-                        ActionResult::Applied {
-                            execution_time_us: 0,
-                            rule_id: Some(request.trace.policy_id),
-                        }
                     }
-                    Err(e) => ActionResult::Failed {
-                        error: balansir_common::ActionError::KernelError(0),
-                        message: Some(e.to_string()),
-                    },
+                }
+            },
+        };
+
+        // Replacement under the same id: drop any prior rule first so a changed
+        // rule does not leave a stale kernel rule behind.
+        if self.fingerprint_of(policy_id).is_some() {
+            if let Err(e) = self
+                .backend
+                .remove_rule_by_comment(&rule_comment(policy_id))
+            {
+                return ActionResult::Failed {
+                    error: balansir_common::ActionError::KernelError(0),
+                    message: Some(format!("replace: {e}")),
+                };
+            }
+        }
+
+        match self.backend.add_rule(&spec) {
+            Ok(()) => {
+                self.remember(policy_id, fingerprint);
+                ActionResult::Applied {
+                    execution_time_us: 0,
+                    rule_id: Some(policy_id),
                 }
             }
+            Err(e) => ActionResult::Failed {
+                error: balansir_common::ActionError::KernelError(0),
+                message: Some(e.to_string()),
+            },
         }
     }
 
     async fn flush(&self) -> Result<()> {
         self.backend.flush()?;
-        *self.installed.lock().unwrap_or_else(|e| e.into_inner()) = HashSet::new();
+        *self.installed.lock().unwrap_or_else(|e| e.into_inner()) = HashMap::new();
         Ok(())
     }
 
@@ -443,5 +476,34 @@ mod tests {
             },
         };
         assert!(to_nft_spec(&forward).is_none());
+    }
+
+    /// A1 (ADR-015): the rule fingerprint is deterministic and distinguishes
+    /// "same rule" from "different rule under the same id".
+    #[test]
+    fn rule_fingerprint_is_stable_and_semantic() {
+        let mut base = ActionRequest {
+            action: balansir_common::Action::Block,
+            src_ip: [10, 0, 0, 1],
+            dst_ip: [0; 4],
+            src_port: 0,
+            dst_port: 443,
+            protocol: 6,
+            interface: 0,
+            trace: balansir_common::DecisionTrace {
+                policy_id: 42,
+                steps: smallvec::SmallVec::new(),
+                action: balansir_common::Action::Block,
+                execution_time_us: 0,
+                correlation_id: 0,
+            },
+        };
+        let fp = rule_fingerprint(&base);
+        // Same content -> same fingerprint.
+        assert_eq!(rule_fingerprint(&base), fp);
+
+        // Same id, different action -> different fingerprint ("same id != same rule").
+        base.action = balansir_common::Action::Allow;
+        assert_ne!(rule_fingerprint(&base), fp);
     }
 }
