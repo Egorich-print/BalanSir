@@ -32,7 +32,6 @@ BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="board/raspberrypi3-64/config_3_64bit.txt"
 
 # Init: systemd (uses project deploy/systemd units, ADR-030)
 BR2_INIT_SYSTEMD=y
-BR2_PACKAGE_SYSTEMD_JOURNAL_GATEWAY=y
 
 # System
 BR2_SYSTEM_DHCP="eth0"
