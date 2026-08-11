@@ -158,6 +158,7 @@ async fn reconciler_24h_simulation() {
         watchdog_timeout_secs: 1,
         atomic_rollback: true,
         resync_every_n_cycles: 0,
+        dns_resync_interval_secs: 0,
     };
 
     let reconciler = Reconciler::new(DesiredState::default(), executor.clone(), config);

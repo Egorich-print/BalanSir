@@ -400,7 +400,7 @@ pub struct ExecutorCapabilities {
 /// fail-closed config compiles with an empty rule set (P1, ADR-019).
 pub const FAIL_CLOSED_RULE_ID: u32 = u32::MAX;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DesiredState {
     pub rules: Vec<DesiredRule>,
     pub drivers: Vec<DesiredDriver>,
@@ -452,7 +452,7 @@ pub struct DesiredRule {
     pub flow: Option<FlowCriteria>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesiredDriver {
     pub id: DriverId,
     pub action: DriverAction,

@@ -29,6 +29,7 @@ pub async fn bootstrap(
         watchdog_timeout_secs: 30,
         atomic_rollback: true,
         resync_every_n_cycles: 3,
+        dns_resync_interval_secs: 60,
     };
 
     let reconciler = Reconciler::new(desired, executor, config);

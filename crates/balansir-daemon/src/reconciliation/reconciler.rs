@@ -24,6 +24,10 @@ use tracing::{error, info, warn};
 /// coordinator's provider abstractions and keeps the daemon-facing API stable.
 pub struct Reconciler {
     desired_state: Arc<tokio::sync::Mutex<DesiredState>>,
+    /// The desired state *as authored* (pre-compilation, domains still
+    /// present). P6 (ADR-023): the DNS resync loop re-runs the flow compiler
+    /// over this to pick up changed DNS observations. `None` until set.
+    desired_raw: Arc<tokio::sync::Mutex<Option<DesiredState>>>,
     actual_state: Arc<tokio::sync::Mutex<ActualState>>,
     config: ReconcilerConfig,
     coordinator: Arc<Coordinator>,
@@ -33,8 +37,11 @@ pub struct Reconciler {
     executor: Arc<dyn ExecutorAdapter>,
     /// DNS/conn metadata → compiled flow rules (A3, ADR-018). When present,
     /// `set_desired`/`reload` expand domain-based rules into concrete per-IP
-    /// rules before the planner sees them.
-    flow_compiler: Option<crate::reconciliation::dns_flow::FlowCompiler>,
+    /// rules before the planner sees them, and `dns_loop` re-runs them on DNS
+    /// changes (P6, ADR-023). Shared behind a lock so the compiler can be
+    /// registered after construction (the daemon holds the reconciler in an
+    /// `Arc`).
+    flow_compiler: tokio::sync::Mutex<Option<crate::reconciliation::dns_flow::FlowCompiler>>,
     /// Fingerprint of the last accepted desired-state config (P4.8, ADR-021).
     /// `None` until a config has been set/reloaded; updated by `set_desired`
     /// and `reload` so the operator can verify what is actually loaded.
@@ -64,6 +71,12 @@ pub struct ReconcilerConfig {
     /// executor restarts that a `Desired − Actual` diff on stale accounting
     /// would miss.
     pub resync_every_n_cycles: u32,
+    /// How often `dns_loop` re-runs the flow compiler over the *raw* desired
+    /// state (P6, ADR-023). When DNS observations change a domain's resolved
+    /// IP set, the next pass re-compiles and reconciles — the compiled per-IP
+    /// rules track the latest resolution without a manual reload. `0` disables
+    /// periodic DNS resync.
+    pub dns_resync_interval_secs: u64,
 }
 
 impl Default for ReconcilerConfig {
@@ -75,6 +88,7 @@ impl Default for ReconcilerConfig {
             watchdog_timeout_secs: 30,
             atomic_rollback: true,
             resync_every_n_cycles: 3,
+            dns_resync_interval_secs: 60,
         }
     }
 }
@@ -136,12 +150,13 @@ impl Reconciler {
 
         Self {
             desired_state: desired,
+            desired_raw: Arc::new(tokio::sync::Mutex::new(None)),
             actual_state: actual,
             config,
             coordinator,
             runner: executor,
             executor: executor_inner,
-            flow_compiler: None,
+            flow_compiler: tokio::sync::Mutex::new(None),
             config_fingerprint: tokio::sync::Mutex::new(None),
             planner,
         }
@@ -179,12 +194,16 @@ impl Reconciler {
 
     /// Update desired state. Domain-based rules (A3) are compiled to concrete
     /// per-IP flow rules before being stored, so the planner only ever sees
-    /// executor-ready rules. The config fingerprint (P4.8) is recorded.
+    /// executor-ready rules. The raw (authored) state is kept so the DNS
+    /// resync loop (P6) can re-compile it when observations change. The config
+    /// fingerprint (P4.8) is recorded.
     pub async fn set_desired(&self, state: DesiredState) {
-        let state = match &self.flow_compiler {
+        let raw = state.clone();
+        let state = match self.flow_compiler.lock().await.as_ref() {
             Some(compiler) => compiler.compile(&state),
             None => state,
         };
+        *self.desired_raw.lock().await = Some(raw);
         *self.config_fingerprint.lock().await = Some(balansir_common::config_fingerprint(&state));
         *self.desired_state.lock().await = state;
     }
@@ -196,13 +215,21 @@ impl Reconciler {
     }
 
     /// Install (or replace) the DNS flow compiler used by `set_desired`/`reload`.
-    pub fn with_flow_compiler(&mut self, compiler: crate::reconciliation::dns_flow::FlowCompiler) {
-        self.flow_compiler = Some(compiler);
+    pub async fn with_flow_compiler(
+        &self,
+        compiler: crate::reconciliation::dns_flow::FlowCompiler,
+    ) {
+        *self.flow_compiler.lock().await = Some(compiler);
     }
 
     /// Get current desired state.
     pub async fn get_desired(&self) -> DesiredState {
         self.desired_state.lock().await.clone()
+    }
+
+    /// Get the raw (authored, pre-compilation) desired state, if set.
+    pub async fn get_desired_raw(&self) -> Option<DesiredState> {
+        self.desired_raw.lock().await.clone()
     }
 
     /// Transactional hot reload (ADR-010).
@@ -218,7 +245,8 @@ impl Reconciler {
         candidate: DesiredState,
         reason: ReconcileReason,
     ) -> ReconciliationResult<()> {
-        let candidate = match &self.flow_compiler {
+        let raw = candidate.clone();
+        let candidate = match self.flow_compiler.lock().await.as_ref() {
             Some(compiler) => compiler.compile(&candidate),
             None => candidate,
         };
@@ -230,6 +258,7 @@ impl Reconciler {
 
         match self.coordinator.reconcile(reason).await {
             Ok(()) => {
+                *self.desired_raw.lock().await = Some(raw);
                 *self.config_fingerprint.lock().await = Some(fp);
                 Ok(())
             }
@@ -396,6 +425,59 @@ impl Reconciler {
             ))
             .await;
         }
+    }
+
+    /// Run the DNS resync loop forever (P6, ADR-023).
+    ///
+    /// Every `dns_resync_interval_secs` it re-runs the flow compiler over the
+    /// raw desired state; if the compiled per-IP rules differ from what is
+    /// loaded (because DNS observations changed a domain's IP set), it swaps
+    /// the compiled state in and reconciles — without a manual reload.
+    pub async fn dns_loop(&self) {
+        if self.config.dns_resync_interval_secs == 0 {
+            info!("DNS resync loop disabled (dns_resync_interval_secs = 0)");
+            return;
+        }
+        info!(
+            interval = self.config.dns_resync_interval_secs,
+            "DNS resync loop started"
+        );
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                self.config.dns_resync_interval_secs,
+            ))
+            .await;
+            self.dns_resync().await;
+        }
+    }
+
+    /// Re-compile the raw desired state through the flow compiler and, if the
+    /// result differs from what is currently loaded, swap it in and reconcile
+    /// (P6, ADR-023). Returns whether the desired state changed.
+    pub async fn dns_resync(&self) -> bool {
+        let compiler = {
+            let guard = self.flow_compiler.lock().await;
+            let Some(compiler) = guard.as_ref() else {
+                return false;
+            };
+            compiler.clone()
+        };
+        let Some(raw) = self.desired_raw.lock().await.clone() else {
+            return false;
+        };
+        let recompiled = compiler.compile(&raw);
+        let mut desired = self.desired_state.lock().await;
+        if *desired == recompiled {
+            return false;
+        }
+        *desired = recompiled.clone();
+        drop(desired);
+        *self.config_fingerprint.lock().await =
+            Some(balansir_common::config_fingerprint(&recompiled));
+        if let Err(e) = self.reconcile_atomic().await {
+            warn!("DNS resync reconcile failed: {e}");
+        }
+        true
     }
 }
 
@@ -938,5 +1020,93 @@ mod tests {
         let actual = reconciler.get_actual().await;
         assert_eq!(actual.active_rules.len(), 1);
         assert_eq!(actual.active_rules[0].id, 7);
+    }
+
+    /// P6 (ADR-023): a DNS observation change re-compiles the raw desired
+    /// state and reconciles — the compiled per-IP rule tracks the new
+    /// resolution without a manual reload.
+    #[tokio::test]
+    async fn dns_resync_tracks_domain_resolution_change() {
+        use crate::reconciliation::dns_flow::{DnsRegistry, FlowCompiler};
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        struct KernelExecutor {
+            kernel: Arc<tokio::sync::Mutex<HashSet<u32>>>,
+        }
+        #[async_trait::async_trait]
+        impl ExecutorAdapter for KernelExecutor {
+            async fn execute(&self, r: &ActionRequest) -> ActionResult {
+                self.kernel.lock().await.insert(r.trace.policy_id);
+                ActionResult::Applied {
+                    execution_time_us: 0,
+                    rule_id: None,
+                }
+            }
+            async fn rule_count(&self) -> u32 {
+                self.kernel.lock().await.len() as u32
+            }
+            async fn remove_rule(&self, id: u32) -> ActionResult {
+                self.kernel.lock().await.remove(&id);
+                ActionResult::Applied {
+                    execution_time_us: 0,
+                    rule_id: None,
+                }
+            }
+            async fn actual_rule_ids(&self) -> Vec<u32> {
+                self.kernel.lock().await.iter().copied().collect()
+            }
+        }
+
+        let kernel = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+        let executor = Arc::new(KernelExecutor {
+            kernel: Arc::clone(&kernel),
+        });
+
+        // Domain rule + registry that resolves to IP A initially.
+        let registry = DnsRegistry::new();
+        registry.insert("api.example.com", vec!["203.0.113.5".parse().unwrap()]);
+        let compiler = FlowCompiler::new(registry.clone());
+        let reconciler = Reconciler::new(
+            DesiredState::default(),
+            executor,
+            ReconcilerConfig::default(),
+        );
+        reconciler.with_flow_compiler(compiler).await;
+
+        let raw = DesiredState {
+            rules: vec![DesiredRule {
+                id: 7,
+                action: Action::Block,
+                priority: 100,
+                flow: Some(balansir_common::FlowCriteria {
+                    dst_domain: Some("api.example.com".to_string()),
+                    ..Default::default()
+                }),
+            }],
+            drivers: Vec::new(),
+        };
+        reconciler.set_desired(raw).await;
+        reconciler.reconcile_atomic().await.unwrap();
+        let ids_a: Vec<u32> = kernel.lock().await.iter().copied().collect();
+        assert_eq!(
+            ids_a.len(),
+            1,
+            "initial domain resolution installed one rule"
+        );
+
+        // DNS observation changes the resolution to a different IP.
+        registry.insert("api.example.com", vec!["198.51.100.9".parse().unwrap()]);
+        let changed = reconciler.dns_resync().await;
+        assert!(changed, "dns_resync must detect the resolution change");
+
+        // Kernel now holds the new derived rule id, and the old one is gone.
+        let ids_b: Vec<u32> = kernel.lock().await.iter().copied().collect();
+        assert_eq!(ids_b.len(), 1);
+        assert_ne!(ids_a[0], ids_b[0], "derived id must change with the IP");
+        assert!(kernel.lock().await.contains(&ids_b[0]));
+
+        // A second resync with no DNS change is a no-op.
+        assert!(!reconciler.dns_resync().await);
     }
 }

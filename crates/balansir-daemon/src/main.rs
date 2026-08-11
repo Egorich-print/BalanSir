@@ -87,6 +87,20 @@ async fn main() -> Result<()> {
         loop_reconciler.run_loop().await;
     });
 
+    // P6 (ADR-023) DNS plane: a shared DNS registry (populated by the DNS
+    // forwarder/observation feed) feeds the flow compiler, which expands
+    // domain rules into per-IP rules. The compiler is registered on the
+    // reconciler so set_desired/reload expand domains, and the dns_loop
+    // re-compiles on DNS changes without a manual reload.
+    let dns_registry = std::sync::Arc::new(balansir_daemon::reconciliation::DnsRegistry::new());
+    let compiler = balansir_daemon::reconciliation::FlowCompiler::new((*dns_registry).clone());
+    reconciler.with_flow_compiler(compiler).await;
+
+    let dns_loop_reconciler = Arc::clone(&reconciler);
+    tokio::spawn(async move {
+        dns_loop_reconciler.dns_loop().await;
+    });
+
     // Setup signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
