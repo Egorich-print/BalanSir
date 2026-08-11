@@ -1,0 +1,10 @@
+# BalanSir external tree Kconfig
+#
+# All BalanSir-specific packages are exposed under a BALANSIR_ prefix so they
+# cannot collide with upstream Buildroot symbols.
+
+menu "BalanSir"
+
+source "$BR2_EXTERNAL_BALANSIR_PATH/package/balansir/Config.in"
+
+endmenu

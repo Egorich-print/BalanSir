@@ -1,0 +1,66 @@
+# BalanSir + Raspberry Pi 3B+ (AArch64) Buildroot configuration.
+#
+# Based on Buildroot's raspberrypi3_64_defconfig (2025.02.x LTS) with:
+#   - BalanSir package (daemon/executor/cli) + runtime deps (nft, iproute2)
+#   - systemd init (uses the project's deploy/systemd units, ADR-030)
+#   - read-only-ish rootfs + tmpfs /run hardening
+#   - serial console for recovery, DHCP on eth0, dropbear SSH
+#
+# Build:  make BR2_EXTERNAL=buildroot-external balansir_rpi3b_64_defconfig
+#         make
+
+# Architecture / toolchain (aarch64, glibc, C++)
+BR2_aarch64=y
+BR2_ARM_FPU_VFPV4=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_6=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+
+# Kernel (Raspberry Pi custom tree, bcmrpi3 defconfig, 3B/3B+/CM3 DTBs)
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,576cc10e1ed50a9eacffc7a05c796051d7343ea4)/linux-576cc10e1ed50a9eacffc7a05c796051d7343ea4.tar.gz"
+BR2_LINUX_KERNEL_DEFCONFIG="bcmrpi3"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2710-rpi-3-b broadcom/bcm2710-rpi-3-b-plus broadcom/bcm2710-rpi-cm3"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+
+# Firmware + boot files
+BR2_PACKAGE_RPI_FIRMWARE=y
+BR2_PACKAGE_RPI_FIRMWARE_BOOTCODE_BIN=y
+BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI=y
+BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="board/raspberrypi3-64/config_3_64bit.txt"
+
+# Init: systemd (uses project deploy/systemd units, ADR-030)
+BR2_INIT_SYSTEMD=y
+BR2_PACKAGE_SYSTEMD_JOURNAL_GATEWAY=y
+
+# System
+BR2_SYSTEM_DHCP="eth0"
+BR2_TARGET_GENERIC_HOSTNAME="balansir"
+BR2_TARGET_GENERIC_ISSUE="BalanSir Network Policy Engine"
+
+# Rootfs overlay (configs, systemd units, tmpfiles) + post-build/image hooks
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_BALANSIR_PATH)/board/raspberrypi3/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_BALANSIR_PATH)/board/raspberrypi3/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_BALANSIR_PATH)/board/raspberrypi3/post-image.sh"
+
+# BalanSir + runtime deps
+BR2_PACKAGE_BALANSIR=y
+BR2_PACKAGE_NFTABLES=y
+BR2_PACKAGE_IPROUTE2=y
+BR2_PACKAGE_OPENSSH=y
+
+# Rootfs: ext4 on SD, no tar
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="256M"
+# BR2_TARGET_ROOTFS_TAR is not set
+
+# Host tools for the SD card image
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_KMOD_XZ=y
+BR2_PACKAGE_HOST_MTOOLS=y
+
+# Reproducible builds (ADR-029 principle; timestamps pinned)
+BR2_REPRODUCIBLE=y
