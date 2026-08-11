@@ -107,11 +107,21 @@ impl ExecutorAdapter for ExecutorClient {
     async fn remove_rule(&self, rule_id: u32) -> ActionResult {
         let payload = postcard::to_allocvec(&rule_id).unwrap_or_default();
         match self.request(MsgType::RemoveRule, payload).await {
-            Ok(resp) => match postcard::from_bytes::<ActionResult>(&resp.payload) {
-                Ok(result) => result,
-                Err(_) => ActionResult::Failed {
+            Ok(resp) => match resp.msg_type {
+                MsgType::ResponseOk => ActionResult::Applied {
+                    execution_time_us: 0,
+                    rule_id: Some(rule_id),
+                },
+                MsgType::ResponseError => {
+                    let message = String::from_utf8(resp.payload.clone()).ok();
+                    ActionResult::Failed {
+                        error: balansir_common::ActionError::Unknown,
+                        message,
+                    }
+                }
+                _ => ActionResult::Failed {
                     error: balansir_common::ActionError::Unknown,
-                    message: Some("executor returned malformed RemoveRule result".into()),
+                    message: Some("unexpected RemoveRule response".into()),
                 },
             },
             Err(e) => ActionResult::Failed {
@@ -250,6 +260,41 @@ mod tests {
             "dropped connection must clear the client for reconnect"
         );
 
+        server_task.await.unwrap();
+    }
+
+    /// M3.7 chain: RemoveRule sends the rule id and decodes a success ack.
+    #[tokio::test]
+    async fn executor_client_remove_rule_decodes_ok() {
+        std::env::set_var(
+            "BALANSIR_ALLOWED_UIDS",
+            unsafe { libc::geteuid() }.to_string(),
+        );
+
+        let (daemon_stream, executor_stream) = UnixStream::pair().unwrap();
+        let mut server = IpcServerConnection::accept(executor_stream)
+            .await
+            .expect("peer auth on paired stream");
+
+        let server_task = tokio::spawn(async move {
+            let msg = server.recv().await.unwrap();
+            assert_eq!(msg.msg_type, MsgType::RemoveRule);
+            let rule_id: u32 = postcard::from_bytes(&msg.payload).unwrap();
+            assert_eq!(rule_id, 7);
+            let _ = server
+                .send(&IpcMessage::response_ok(msg.correlation_id))
+                .await;
+        });
+
+        let conn = IpcClientConnection::from_stream(daemon_stream)
+            .await
+            .unwrap();
+        let client = ExecutorClient {
+            socket: "unused".into(),
+            conn: tokio::sync::Mutex::new(Some(conn)),
+        };
+        let result = client.remove_rule(7).await;
+        assert!(matches!(result, ActionResult::Applied { rule_id: Some(7), .. }));
         server_task.await.unwrap();
     }
 }

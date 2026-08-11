@@ -41,6 +41,17 @@ pub trait Executor: Send + Sync {
     async fn flush(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Remove a previously applied rule by its stable rule id.
+    ///
+    /// The default reports failure (not implemented) so an executor that does
+    /// not support per-rule removal is explicit rather than silently
+    /// pretending success.
+    async fn remove_rule(&self, _rule_id: u32) -> Result<()> {
+        Err(balansir_common::error::Error::Unsupported(
+            "remove_rule not implemented by this executor".into(),
+        ))
+    }
 }
 
 /// Dummy executor for testing

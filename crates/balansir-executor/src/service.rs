@@ -14,23 +14,50 @@
 use async_trait::async_trait;
 use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
 use balansir_common::{ActionRequest, ActionResult, Result};
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 use crate::executor::Executor;
 
-/// A concrete privileged mechanism: nftables-backed rule execution.
+/// A concrete privileged mechanism: nftables-backed rule execution plus the
+/// policy-routing (`ip rule`) capability (M3.7, ADR-014).
 ///
 /// Maps `ActionRequest` -> `NftRuleSpec` for the supported verdicts and
-/// executes them against the `NftablesBackend`. Rules that have no nft
-/// representation (e.g. `Forward`) are honestly reported as `Unsupported`
-/// rather than fabricated.
+/// mark actions, executing against `NftablesBackend`. `Mark` sets a real
+/// fwmark (`meta mark set N`). `Route`/`Forward`/other actions have no fwmark
+/// binding in the current `ActionRequest` contract and are honestly reported
+/// as `Unsupported`; the `IpRuleBackend` capability (module `iprule`) is
+/// implemented and unit-tested so fwmark+ip-rule is ready to wire when the
+/// daemon contract can express a mark↔table pair.
+///
+/// Installed rules are tracked by their `trace.policy_id` so `RemoveRule` can
+/// resolve the nft handle and delete precisely (never a fragile flush-all).
 #[derive(Debug)]
 pub struct NftablesExecutor {
     backend: crate::nftables::NftablesBackend,
+    installed: Mutex<HashSet<u32>>,
 }
 
 impl NftablesExecutor {
     pub fn new(backend: crate::nftables::NftablesBackend) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            installed: Mutex::new(HashSet::new()),
+        }
+    }
+
+    fn remember(&self, policy_id: u32) {
+        self.installed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(policy_id);
+    }
+
+    fn forget(&self, policy_id: u32) {
+        self.installed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&policy_id);
     }
 }
 
@@ -39,8 +66,16 @@ fn to_nft_verdict(action: &balansir_common::Action) -> Option<crate::nftables::N
     match action {
         balansir_common::Action::Allow => Some(NftVerdict::Accept),
         balansir_common::Action::Block => Some(NftVerdict::Drop),
+        balansir_common::Action::Reject => Some(NftVerdict::Reject),
         _ => None,
     }
+}
+
+/// The stable per-rule comment used to tag installed nft rules so they can be
+/// found by handle for removal. Uses the rule's `trace.policy_id` (set by the
+/// daemon to the `DesiredRule.id`).
+fn rule_comment(policy_id: u32) -> String {
+    format!("balansir:{policy_id}")
 }
 
 fn to_nft_spec(request: &ActionRequest) -> Option<crate::nftables::NftRuleSpec> {
@@ -68,7 +103,41 @@ fn to_nft_spec(request: &ActionRequest) -> Option<crate::nftables::NftRuleSpec> 
             None
         },
         verdict,
+        mark: None,
+        comment: Some(rule_comment(request.trace.policy_id)),
     })
+}
+
+/// Build an nft rule for a mark action: classify the flow and set the fwmark
+/// (`meta mark set N`), then allow the packet to continue so policy routing
+/// (`ip rule fwmark N lookup <table>`) can take effect.
+fn to_mark_spec(request: &ActionRequest, fwmark: u32) -> crate::nftables::NftRuleSpec {
+    use crate::nftables::NftRuleSpec;
+    let proto = match request.protocol {
+        6 => Some(crate::nftables::NftProto::Tcp),
+        17 => Some(crate::nftables::NftProto::Udp),
+        _ => None,
+    };
+    let src_cidr = if request.src_ip == [0; 4] {
+        None
+    } else {
+        Some(format!(
+            "{}.{}.{}.{}/32",
+            request.src_ip[0], request.src_ip[1], request.src_ip[2], request.src_ip[3]
+        ))
+    };
+    NftRuleSpec {
+        proto,
+        src_cidr,
+        dport: if request.dst_port != 0 {
+            Some(request.dst_port)
+        } else {
+            None
+        },
+        verdict: crate::nftables::NftVerdict::Accept,
+        mark: Some(fwmark),
+        comment: Some(rule_comment(request.trace.policy_id)),
+    }
 }
 
 #[async_trait]
@@ -80,37 +149,69 @@ impl Executor for NftablesExecutor {
             supported_actions: vec![
                 balansir_common::ActionType::Block,
                 balansir_common::ActionType::Allow,
+                balansir_common::ActionType::Reject,
+                balansir_common::ActionType::Mark,
             ],
             max_rules: 1024,
-            max_fwmarks: 0,
+            max_fwmarks: 256,
             max_route_tables: 0,
         })
     }
 
     async fn execute(&self, request: &ActionRequest) -> ActionResult {
-        let Some(spec) = to_nft_spec(request) else {
-            return ActionResult::Unsupported {
-                action_type: request.action.action_type(),
-            };
-        };
-        match self.backend.add_rule(&spec) {
-            Ok(()) => ActionResult::Applied {
-                execution_time_us: 0,
-                rule_id: None,
-            },
-            Err(e) => ActionResult::Failed {
-                error: balansir_common::ActionError::KernelError(0),
-                message: Some(e.to_string()),
-            },
+        match request.action {
+            // Mark: classify + set fwmark, then continue (policy routing applies).
+            balansir_common::Action::Mark { fwmark } => {
+                let spec = to_mark_spec(request, fwmark);
+                match self.backend.add_rule(&spec) {
+                    Ok(()) => {
+                        self.remember(request.trace.policy_id);
+                        ActionResult::Applied {
+                            execution_time_us: 0,
+                            rule_id: Some(request.trace.policy_id),
+                        }
+                    }
+                    Err(e) => ActionResult::Failed {
+                        error: balansir_common::ActionError::KernelError(0),
+                        message: Some(e.to_string()),
+                    },
+                }
+            }
+            // Verdict actions: drop / accept / reject.
+            _ => {
+                let Some(spec) = to_nft_spec(request) else {
+                    return ActionResult::Unsupported {
+                        action_type: request.action.action_type(),
+                    };
+                };
+                match self.backend.add_rule(&spec) {
+                    Ok(()) => {
+                        self.remember(request.trace.policy_id);
+                        ActionResult::Applied {
+                            execution_time_us: 0,
+                            rule_id: Some(request.trace.policy_id),
+                        }
+                    }
+                    Err(e) => ActionResult::Failed {
+                        error: balansir_common::ActionError::KernelError(0),
+                        message: Some(e.to_string()),
+                    },
+                }
+            }
         }
     }
 
     async fn flush(&self) -> Result<()> {
-        self.backend.flush()
+        self.backend.flush()?;
+        *self.installed.lock().unwrap_or_else(|e| e.into_inner()) = HashSet::new();
+        Ok(())
     }
 
-    async fn rule_count(&self) -> u32 {
-        0
+    async fn remove_rule(&self, rule_id: u32) -> Result<()> {
+        self.backend
+            .remove_rule_by_comment(&rule_comment(rule_id))?;
+        self.forget(rule_id);
+        Ok(())
     }
 }
 
@@ -174,13 +275,16 @@ pub async fn dispatch(msg: &IpcMessage, executor: &dyn Executor) -> IpcMessage {
             Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
         },
         MsgType::RemoveRule => {
-            // Per-rule removal needs a handle-tracking mechanism that is not yet
-            // represented; the operation is allowlisted but honestly reports
-            // unsupported rather than fabricating success.
-            IpcMessage::response_error(
-                msg.correlation_id,
-                "RemoveRule mechanism not yet implemented",
-            )
+            let Ok(rule_id) = postcard::from_bytes::<u32>(&msg.payload) else {
+                return IpcMessage::response_error(
+                    msg.correlation_id,
+                    "invalid RemoveRule payload",
+                );
+            };
+            match executor.remove_rule(rule_id).await {
+                Ok(()) => IpcMessage::response_ok(msg.correlation_id),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+            }
         }
         _ => IpcMessage::response_error(msg.correlation_id, "operation not allowed"),
     }
@@ -243,11 +347,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_rule_is_allowlisted_but_honestly_unsupported() {
-        let response = dispatch(&message(MsgType::RemoveRule, vec![]), &dummy_executor()).await;
+    async fn remove_rule_is_allowlisted_but_dummy_not_implemented() {
+        // Valid rule id payload; the DummyExecutor's remove_rule is the
+        // default not-implemented, so the daemon sees an explicit error rather
+        // than a fabricated success.
+        let payload = postcard::to_allocvec(&7u32).unwrap();
+        let response = dispatch(&message(MsgType::RemoveRule, payload), &dummy_executor()).await;
         assert_eq!(response.msg_type, MsgType::ResponseError);
         let err = String::from_utf8(response.payload.clone()).unwrap();
-        assert!(err.contains("not yet implemented"));
+        assert!(err.contains("not implemented"));
+    }
+
+    #[tokio::test]
+    async fn remove_rule_with_invalid_payload_is_rejected() {
+        let response = dispatch(
+            &message(MsgType::RemoveRule, vec![1, 2, 3]),
+            &dummy_executor(),
+        )
+        .await;
+        assert_eq!(response.msg_type, MsgType::ResponseError);
     }
 
     #[tokio::test]

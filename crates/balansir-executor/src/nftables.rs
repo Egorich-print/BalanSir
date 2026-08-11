@@ -15,6 +15,22 @@ pub struct NftablesBackend {
     chain_name: String,
 }
 
+/// Parse `# handle N` from a line of `nft -a list chain` output for the rule
+/// whose comment matches `comment`. Returns `None` when absent.
+fn parse_handle_for_comment(line: &str, comment: &str) -> Option<String> {
+    let quoted = format!("\"{comment}\"");
+    if !line.contains(&quoted) {
+        return None;
+    }
+    if let Some(idx) = line.rfind("# handle ") {
+        let handle = line[idx + "# handle ".len()..].trim();
+        if !handle.is_empty() && handle.chars().all(|c| c.is_ascii_digit()) {
+            return Some(handle.to_string());
+        }
+    }
+    None
+}
+
 /// Valid identifier per nftables grammar: `[A-Za-z0-9_-]+`.
 fn validate_identifier(name: &str) -> Result<()> {
     if !name.is_empty()
@@ -122,6 +138,75 @@ impl NftablesBackend {
         Ok(())
     }
 
+    /// Remove the rule whose comment is exactly `comment` by resolving its
+    /// nft handle (`nft -a list chain` shows `# handle N`) and deleting it.
+    ///
+    /// Handle-based removal is deterministic and does not depend on fragile
+    /// flush-all semantics. The comment is matched exactly (quoted form), so
+    /// an attacker-controlled rule id cannot match an unrelated rule.
+    pub fn remove_rule_by_comment(&self, comment: &str) -> Result<()> {
+        let handle = self.find_handle_by_comment(comment)?;
+        let Some(handle) = handle else {
+            // Already absent — idempotent removal.
+            debug!(
+                "nft rule comment {:?} not present, nothing to remove",
+                comment
+            );
+            return Ok(());
+        };
+
+        let output = Command::new(nft_bin()?)
+            .args([
+                "delete",
+                "rule",
+                "inet",
+                &self.table_name,
+                &self.chain_name,
+                "handle",
+                &handle,
+            ])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(balansir_common::Error::Fatal(format!(
+                "nft delete rule failed: {}",
+                stderr
+            )));
+        }
+        info!(comment, handle, "Removed nftables rule by handle");
+        Ok(())
+    }
+
+    /// Return the handle (`# handle N`) of the rule tagged with `comment`, or
+    /// `None` if absent. Parses `nft -a list chain`.
+    fn find_handle_by_comment(&self, comment: &str) -> Result<Option<String>> {
+        let output = Command::new(nft_bin()?)
+            .args([
+                "-a",
+                "list",
+                "chain",
+                "inet",
+                &self.table_name,
+                &self.chain_name,
+            ])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(balansir_common::Error::Fatal(format!(
+                "nft list failed: {}",
+                stderr
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(handle) = parse_handle_for_comment(line, comment) {
+                return Ok(Some(handle));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn list_rules(&self) -> Result<Vec<String>> {
         let output = Command::new(nft_bin()?)
             .args(["list", "chain", "inet", &self.table_name, &self.chain_name])
@@ -172,6 +257,7 @@ impl fmt::Display for NftProto {
 pub enum NftVerdict {
     Accept,
     Drop,
+    Reject,
 }
 
 impl fmt::Display for NftVerdict {
@@ -179,6 +265,7 @@ impl fmt::Display for NftVerdict {
         f.write_str(match self {
             NftVerdict::Accept => "accept",
             NftVerdict::Drop => "drop",
+            NftVerdict::Reject => "reject",
         })
     }
 }
@@ -195,6 +282,11 @@ pub struct NftRuleSpec {
     /// Destination port.
     pub dport: Option<u16>,
     pub verdict: NftVerdict,
+    /// Firewall mark set by `meta mark set N` when the rule matches.
+    pub mark: Option<u32>,
+    /// Stable comment tagging this rule with its rule id, so it can be found
+    /// by handle for removal (e.g. `balansir:<id>`).
+    pub comment: Option<String>,
 }
 
 impl NftRuleSpec {
@@ -204,12 +296,14 @@ impl NftRuleSpec {
             src_cidr: None,
             dport: None,
             verdict,
+            mark: None,
+            comment: None,
         }
     }
 
     /// Render the rule into nft arguments (without the base add-rule prefix).
     pub fn render(&self) -> Vec<String> {
-        let mut args = Vec::with_capacity(6);
+        let mut args = Vec::with_capacity(10);
         if let Some(proto) = self.proto {
             args.push("meta".to_string());
             args.push("l4proto".to_string());
@@ -225,7 +319,17 @@ impl NftRuleSpec {
             args.push("dport".to_string());
             args.push(port.to_string());
         }
+        if let Some(mark) = self.mark {
+            args.push("meta".to_string());
+            args.push("mark".to_string());
+            args.push("set".to_string());
+            args.push(format!("{mark}"));
+        }
         args.push(self.verdict.to_string());
+        if let Some(comment) = &self.comment {
+            args.push("comment".to_string());
+            args.push(format!("\"{comment}\""));
+        }
         args
     }
 }
@@ -272,6 +376,8 @@ mod tests {
             src_cidr: Some("10.0.0.0/8".to_string()),
             dport: Some(443),
             verdict: NftVerdict::Accept,
+            mark: None,
+            comment: None,
         };
         assert_eq!(
             spec.render(),
@@ -297,6 +403,8 @@ mod tests {
             verdict: NftVerdict::Drop,
             proto: None,
             dport: None,
+            mark: None,
+            comment: None,
         };
         assert_eq!(
             spec.render(),
@@ -317,6 +425,8 @@ mod tests {
             src_cidr: None,
             dport: Some(53),
             verdict: NftVerdict::Accept,
+            mark: None,
+            comment: None,
         };
         assert_eq!(
             backend.render_args(&spec),
@@ -335,5 +445,57 @@ mod tests {
                 "accept".to_string(),
             ]
         );
+    }
+
+    /// M3.7: fwmark (`meta mark set N`) and comment tagging render correctly.
+    #[test]
+    fn test_rule_spec_renders_mark_and_comment() {
+        let spec = NftRuleSpec {
+            proto: Some(NftProto::Tcp),
+            src_cidr: None,
+            dport: Some(443),
+            verdict: NftVerdict::Drop,
+            mark: Some(0x10),
+            comment: Some("balansir:7".to_string()),
+        };
+        assert_eq!(
+            spec.render(),
+            vec![
+                "meta".to_string(),
+                "l4proto".to_string(),
+                "tcp".to_string(),
+                "th".to_string(),
+                "dport".to_string(),
+                "443".to_string(),
+                "meta".to_string(),
+                "mark".to_string(),
+                "set".to_string(),
+                "16".to_string(),
+                "drop".to_string(),
+                "comment".to_string(),
+                "\"balansir:7\"".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_reject_verdict_renders() {
+        assert_eq!(NftVerdict::Reject.to_string(), "reject");
+    }
+
+    /// M3.7: handle extraction from `nft -a list chain` output is exact and
+    /// only matches the tagged comment.
+    #[test]
+    fn test_parse_handle_for_comment() {
+        let line = "\t\tmeta l4proto tcp th dport 443 drop comment \"balansir:7\" # handle 9\n";
+        assert_eq!(
+            parse_handle_for_comment(line, "balansir:7"),
+            Some("9".to_string())
+        );
+        // A different comment does not match this line.
+        assert_eq!(parse_handle_for_comment(line, "balansir:8"), None);
+        // Non-numeric trailing garbage is not a handle.
+        let bad = "\t\t... comment \"balansir:1\" # handle notanumber\n";
+        assert_eq!(parse_handle_for_comment(bad, "balansir:1"), None);
     }
 }

@@ -65,9 +65,24 @@ impl Executor for DaemonExecutorAdapter {
                 }
                 ReconciliationOperation::RemovePolicy(rule_id) => {
                     info!(rule_id, "Removing rule");
-                    let mut actual = self.actual.lock().await;
-                    actual.active_rules.retain(|r| r.id != *rule_id);
-                    succeeded += 1;
+                    // Ask the mechanism to remove the rule by its id (handle-
+                    // based, M3.7); a failure is surfaced, not silently
+                    // swallowed. ActualState is updated on success only.
+                    match self.executor.remove_rule(*rule_id).await {
+                        ActionResult::Applied { .. } | ActionResult::AlreadyApplied => {
+                            let mut actual = self.actual.lock().await;
+                            actual.active_rules.retain(|r| r.id != *rule_id);
+                            succeeded += 1;
+                        }
+                        ActionResult::Failed { message, .. } => {
+                            warn!(rule_id, error = ?message, "RemovePolicy failed");
+                            failed += 1;
+                        }
+                        other => {
+                            warn!(rule_id, ?other, "RemovePolicy returned unexpected result");
+                            failed += 1;
+                        }
+                    }
                 }
                 ReconciliationOperation::CreateDriver(id) => {
                     // Driver lifecycle is owned by the executor process; the
@@ -104,7 +119,9 @@ impl DaemonExecutorAdapter {
             protocol: 0,
             interface: 0,
             trace: DecisionTrace {
-                policy_id: 0,
+                // Carry the DesiredRule id so the executor can tag the rule and
+                // resolve it for precise handle-based removal (M3.7).
+                policy_id: rule.id,
                 steps: SmallVec::new(),
                 action: rule.action,
                 execution_time_us: 0,
