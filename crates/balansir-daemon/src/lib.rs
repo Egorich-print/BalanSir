@@ -14,6 +14,7 @@ pub mod netlink;
 pub mod policy;
 pub mod reconciliation;
 pub mod secrets;
+pub mod startup;
 #[cfg(feature = "wireguard")]
 pub mod wireguard;
 #[cfg(feature = "xray")]

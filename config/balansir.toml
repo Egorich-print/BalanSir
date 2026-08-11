@@ -1,0 +1,32 @@
+# BalanSir desired-state config (example).
+# Loaded at daemon start via:  BALANSIR_CONFIG=/etc/balansir/balansir.toml
+# Runtime reload via:         balansir-cli reload <this file>
+#
+# Rules are strict-compiled (ADR-010): a single malformed entry rejects the
+# whole config. At startup a rejected config is FATAL (the daemon never
+# silently starts empty when a config is pointed at); no BALANSIR_CONFIG means
+# start empty (dev/first-boot).
+
+[policy]
+# Empty-config semantics (P1, ADR-019): "pass" (fail-open, default) or "drop"
+# (fail-closed: install a single terminal drop).
+empty_config_action = "pass"
+
+[[rules]]
+id = 1
+action = "block"
+priority = 100
+
+# A flow-level rule (A3/ADR-018): optional matchers on src/dst IP, ports,
+# protocol, and/or domain (domain is resolved via the DNS plane at reload).
+# [[rules]]
+# id = 2
+# action = "allow"
+# priority = 90
+# dst_domain = "example.com"
+# dst_port = 443
+# protocol = "tcp"
+
+[[drivers]]
+id = "dns"
+action = "start"

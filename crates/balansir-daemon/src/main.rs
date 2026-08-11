@@ -59,11 +59,39 @@ async fn main() -> Result<()> {
     // the privileged executor server via ExecutorClient. If the executor is
     // unreachable the reconcile fails and rolls back — ActualState is never
     // faked. Driver lifecycle (above) remains a separate path.
+    //
+    // P7.2.1 (ADR-027) startup configuration recovery: BALANSIR_CONFIG is
+    // loaded and strictly validated BEFORE the first reconcile, so a reboot
+    // restores the last accepted DesiredState without an operator reload. A
+    // malformed or pointed-at-but-missing config is a fatal startup error —
+    // never silently substituted with an empty state. No env var means start
+    // empty (dev/first-boot).
+    let startup_desired =
+        match balansir_daemon::startup::load_startup_desired(std::env::var("BALANSIR_CONFIG")) {
+            Ok(balansir_daemon::startup::StartupDesired::Loaded(state)) => {
+                info!(rules = state.rules.len(), "Startup config loaded");
+                state
+            }
+            Ok(balansir_daemon::startup::StartupDesired::Empty) => {
+                warn!("No BALANSIR_CONFIG set; starting empty (no enforcement until reload)");
+                balansir_common::DesiredState::default()
+            }
+            Err(e) => {
+                error!("Startup config rejected: {e}");
+                std::process::exit(1);
+            }
+        };
+
     let reconciler = Arc::new(Reconciler::new(
-        balansir_common::DesiredState::default(),
+        startup_desired.clone(),
         Arc::new(ExecutorClient::default()),
         ReconcilerConfig::default(),
     ));
+    // P7.2.1 (ADR-027) + P4.8 (ADR-021): record the raw desired state and its
+    // fingerprint so `balansir-cli fingerprint` reflects exactly what was
+    // loaded at boot, and the DNS resync (P6) has the authored state to
+    // recompile. The flow compiler is registered below, after this.
+    reconciler.set_desired(startup_desired).await;
     // A2: seed ActualState from the executor's kernel inventory so any rule
     // left behind by an ack-gap/executor restart is reconciled (removed if not
     // desired). Non-authoritative — the daemon still decides what should be.

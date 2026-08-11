@@ -7,6 +7,10 @@ Wants=network.target
 [Service]
 Type=notify
 ExecStart=/usr/local/bin/balansir-daemon
+# Startup config (P7.2.1, ADR-027): the daemon restores the last accepted
+# desired state after reboot without an operator reload. A rejected config is
+# a fatal startup error (never silently empty).
+Environment=BALANSIR_CONFIG=/etc/balansir/balansir.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
