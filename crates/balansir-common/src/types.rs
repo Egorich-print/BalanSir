@@ -1,5 +1,6 @@
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 
 // --- Type aliases ---
 
@@ -335,8 +336,10 @@ pub enum ActionType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionRequest {
     pub action: Action,
-    pub src_ip: [u8; 4],
-    pub dst_ip: [u8; 4],
+    /// Source IP (IPv4 or IPv6). `IpAddr::V4(0.0.0.0)` / unspecified means "no
+    /// source matcher" (A4: IPv6 representable).
+    pub src_ip: IpAddr,
+    pub dst_ip: IpAddr,
     pub src_port: u16,
     pub dst_port: u16,
     pub protocol: u8,

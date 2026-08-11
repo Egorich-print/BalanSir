@@ -154,8 +154,8 @@ mod tests {
     fn make_request(action: Action) -> ActionRequest {
         ActionRequest {
             action,
-            src_ip: [192, 168, 1, 1],
-            dst_ip: [142, 250, 80, 46],
+            src_ip: std::net::IpAddr::from([192, 168, 1, 1]),
+            dst_ip: std::net::IpAddr::from([142, 250, 80, 46]),
             src_port: 12345,
             dst_port: 443,
             protocol: 6,

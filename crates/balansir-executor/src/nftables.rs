@@ -340,7 +340,10 @@ impl NftRuleSpec {
             args.push(proto.to_string());
         }
         if let Some(cidr) = &self.src_cidr {
-            args.push("ip".to_string());
+            // IPv6 CIDRs contain ':', so the nft family keyword (`ip` vs
+            // `ip6`) is derivable from the CIDR string itself (A4).
+            let family = if cidr.contains(':') { "ip6" } else { "ip" };
+            args.push(family.to_string());
             args.push("saddr".to_string());
             args.push(cidr.clone());
         }

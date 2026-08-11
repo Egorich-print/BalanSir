@@ -53,7 +53,7 @@ fn hash_domain(domain: &str) -> u32 {
     hasher.finish() as u32
 }
 
-fn parse_cidr(cidr: &str) -> PolicyResult<([u8; 4], u8)> {
+fn parse_cidr(cidr: &str) -> PolicyResult<(std::net::IpAddr, u8)> {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 {
         return Err(PolicyError::InvalidCidr {
@@ -62,35 +62,30 @@ fn parse_cidr(cidr: &str) -> PolicyResult<([u8; 4], u8)> {
         });
     }
 
-    let ip_parts: Vec<u8> = parts[0]
-        .split('.')
-        .map(|s| s.parse::<u8>())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| PolicyError::InvalidCidr {
-            cidr: cidr.to_string(),
-            reason: format!("invalid IP address: {e}"),
-        })?;
-
-    if ip_parts.len() != 4 {
-        return Err(PolicyError::InvalidCidr {
-            cidr: cidr.to_string(),
-            reason: format!("invalid IP address: {}", parts[0]),
-        });
-    }
+    let ip: std::net::IpAddr = parts[0].parse().map_err(|e| PolicyError::InvalidCidr {
+        cidr: cidr.to_string(),
+        reason: format!("invalid IP address: {e}"),
+    })?;
 
     let mask: u8 = parts[1].parse().map_err(|e| PolicyError::InvalidCidr {
         cidr: cidr.to_string(),
         reason: format!("invalid prefix length: {e}"),
     })?;
 
-    if mask > 32 {
+    // Prefix length must respect the address family (A4): 32-bit for IPv4,
+    // 128-bit for IPv6.
+    let max_mask = match ip {
+        std::net::IpAddr::V4(_) => 32,
+        std::net::IpAddr::V6(_) => 128,
+    };
+    if mask > max_mask {
         return Err(PolicyError::InvalidCidr {
             cidr: cidr.to_string(),
-            reason: format!("prefix length must be <= 32: {mask}"),
+            reason: format!("prefix length must be <= {max_mask}: {mask}"),
         });
     }
 
-    Ok(([ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3]], mask))
+    Ok((ip, mask))
 }
 
 impl PolicyRuleToml {
@@ -192,8 +187,15 @@ driver = "hysteria-primary"
     #[test]
     fn test_cidr_parsing() {
         let (ip, mask) = parse_cidr("192.168.1.0/24").unwrap();
-        assert_eq!(ip, [192, 168, 1, 0]);
+        assert_eq!(ip, std::net::IpAddr::from([192, 168, 1, 0]));
         assert_eq!(mask, 24);
+    }
+
+    #[test]
+    fn test_cidr_parsing_v6() {
+        let (ip, mask) = parse_cidr("2001:db8::1/64").unwrap();
+        assert_eq!(ip, std::net::IpAddr::V6("2001:db8::1".parse().unwrap()));
+        assert_eq!(mask, 64);
     }
 
     #[test]
@@ -201,6 +203,7 @@ driver = "hysteria-primary"
         assert!(parse_cidr("invalid").is_err());
         assert!(parse_cidr("192.168.1.0/33").is_err());
         assert!(parse_cidr("999.999.999.999/24").is_err());
+        assert!(parse_cidr("2001:db8::1/129").is_err());
     }
 
     #[test]

@@ -20,8 +20,8 @@ fn healthy() -> HealthView {
 /// Build a packet context with given dst port/domain
 fn ctx(dst_port: u16, domain_hash: Option<u32>) -> PacketContext {
     PacketContext {
-        src_ip: [192, 168, 1, 10],
-        dst_ip: [8, 8, 8, 8],
+        src_ip: std::net::IpAddr::from([192, 168, 1, 10]),
+        dst_ip: std::net::IpAddr::from([8, 8, 8, 8]),
         src_port: 40000,
         dst_port,
         protocol: 6,

@@ -124,8 +124,8 @@ impl PolicyEngine {
 /// Packet context for policy evaluation
 #[derive(Debug, Clone)]
 pub struct PacketContext {
-    pub src_ip: [u8; 4],
-    pub dst_ip: [u8; 4],
+    pub src_ip: std::net::IpAddr,
+    pub dst_ip: std::net::IpAddr,
     pub src_port: u16,
     pub dst_port: u16,
     pub protocol: u8,
@@ -139,8 +139,8 @@ mod tests {
 
     fn ctx_with_domain(hash: Option<u32>) -> PacketContext {
         PacketContext {
-            src_ip: [192, 168, 1, 1],
-            dst_ip: [142, 250, 80, 46],
+            src_ip: std::net::IpAddr::from([192, 168, 1, 1]),
+            dst_ip: std::net::IpAddr::from([142, 250, 80, 46]),
             src_port: 12345,
             dst_port: 443,
             protocol: 6,

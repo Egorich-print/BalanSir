@@ -12,7 +12,7 @@ pub enum Matcher {
     None,
     DomainSuffix { suffix: u32 },
     DomainExact { hash: u32 },
-    IpRange { base: [u8; 4], mask: u8 },
+    IpRange { base: std::net::IpAddr, mask: u8 },
     Port { port: u16 },
     PortRange { start: u16, end: u16 },
     Protocol { proto: u8 },
@@ -41,12 +41,7 @@ impl Matcher {
             Self::None => false,
             Self::DomainSuffix { suffix } => ctx.domain_hash == Some(*suffix),
             Self::DomainExact { hash } => ctx.domain_hash == Some(*hash),
-            Self::IpRange { base, mask } => {
-                let mask_bits = !((1u32 << (32 - mask)) - 1);
-                let base_u32 = u32::from_be_bytes(*base);
-                let dst_u32 = u32::from_be_bytes(ctx.dst_ip);
-                (base_u32 & mask_bits) == (dst_u32 & mask_bits)
-            }
+            Self::IpRange { base, mask } => ip_range_matches(*base, *mask, &ctx.dst_ip),
             Self::Port { port } => ctx.dst_port == *port,
             Self::PortRange { start, end } => ctx.dst_port >= *start && ctx.dst_port <= *end,
             Self::Protocol { proto } => ctx.protocol == *proto,
@@ -85,6 +80,35 @@ impl Matcher {
     }
 }
 
+/// Prefix-match an address against `base/mask` for either address family (A4).
+///
+/// IPv4 uses a 32-bit mask, IPv6 a 128-bit mask. A family mismatch never
+/// matches (an IPv4 base cannot match an IPv6 destination).
+fn ip_range_matches(base: std::net::IpAddr, mask: u8, dst: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match (base, dst) {
+        (IpAddr::V4(base), IpAddr::V4(dst)) => {
+            let mask_bits = if mask >= 32 {
+                u32::MAX
+            } else {
+                !((1u32 << (32 - mask)) - 1)
+            };
+            (u32::from_be_bytes(base.octets()) & mask_bits)
+                == (u32::from_be_bytes(dst.octets()) & mask_bits)
+        }
+        (IpAddr::V6(base), IpAddr::V6(dst)) => {
+            let mask_bits = if mask >= 128 {
+                u128::MAX
+            } else {
+                !((1u128 << (128 - mask)) - 1)
+            };
+            (u128::from_be_bytes(base.octets()) & mask_bits)
+                == (u128::from_be_bytes(dst.octets()) & mask_bits)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,8 +117,8 @@ mod tests {
     fn test_matcher_any() {
         let matcher = Matcher::Any;
         let ctx = PacketContext {
-            src_ip: [192, 168, 1, 1],
-            dst_ip: [142, 250, 80, 46],
+            src_ip: std::net::IpAddr::from([192, 168, 1, 1]),
+            dst_ip: std::net::IpAddr::from([142, 250, 80, 46]),
             src_port: 12345,
             dst_port: 443,
             protocol: 6,
@@ -105,11 +129,64 @@ mod tests {
     }
 
     #[test]
+    fn test_matcher_ip_range_v4() {
+        let matcher = Matcher::IpRange {
+            base: std::net::IpAddr::from([192, 168, 1, 0]),
+            mask: 24,
+        };
+        let ctx_ok = PacketContext {
+            src_ip: std::net::IpAddr::from([192, 168, 1, 1]),
+            dst_ip: std::net::IpAddr::from([192, 168, 1, 200]),
+            src_port: 12345,
+            dst_port: 443,
+            protocol: 6,
+            domain_hash: None,
+            interface: None,
+        };
+        let ctx_miss = PacketContext {
+            dst_ip: std::net::IpAddr::from([192, 168, 2, 1]),
+            ..ctx_ok
+        };
+        assert!(matcher.matches(&ctx_ok));
+        assert!(!matcher.matches(&ctx_miss));
+    }
+
+    #[test]
+    fn test_matcher_ip_range_v6() {
+        let matcher = Matcher::IpRange {
+            base: std::net::IpAddr::V6("2001:db8::".parse().unwrap()),
+            mask: 64,
+        };
+        let ctx_ok = PacketContext {
+            src_ip: std::net::IpAddr::from([192, 168, 1, 1]),
+            dst_ip: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
+            src_port: 12345,
+            dst_port: 443,
+            protocol: 6,
+            domain_hash: None,
+            interface: None,
+        };
+        let ctx_miss = PacketContext {
+            dst_ip: std::net::IpAddr::V6("2001:db9::1".parse().unwrap()),
+            ..ctx_ok
+        };
+        assert!(matcher.matches(&ctx_ok));
+        assert!(!matcher.matches(&ctx_miss));
+
+        // Family mismatch never matches: an IPv4 base cannot match an IPv6 dst.
+        let v4_base = Matcher::IpRange {
+            base: std::net::IpAddr::from([192, 168, 1, 0]),
+            mask: 24,
+        };
+        assert!(!v4_base.matches(&ctx_ok));
+    }
+
+    #[test]
     fn test_matcher_port() {
         let matcher = Matcher::Port { port: 443 };
         let ctx = PacketContext {
-            src_ip: [192, 168, 1, 1],
-            dst_ip: [142, 250, 80, 46],
+            src_ip: std::net::IpAddr::from([192, 168, 1, 1]),
+            dst_ip: std::net::IpAddr::from([142, 250, 80, 46]),
             src_port: 12345,
             dst_port: 443,
             protocol: 6,
@@ -126,8 +203,8 @@ mod tests {
             end: 444,
         };
         let ctx_ok = PacketContext {
-            src_ip: [192, 168, 1, 1],
-            dst_ip: [142, 250, 80, 46],
+            src_ip: std::net::IpAddr::from([192, 168, 1, 1]),
+            dst_ip: std::net::IpAddr::from([142, 250, 80, 46]),
             src_port: 12345,
             dst_port: 443,
             protocol: 6,
@@ -149,8 +226,8 @@ mod tests {
             Matcher::Port { port: 443 },
         ]);
         let ctx = PacketContext {
-            src_ip: [192, 168, 1, 1],
-            dst_ip: [142, 250, 80, 46],
+            src_ip: std::net::IpAddr::from([192, 168, 1, 1]),
+            dst_ip: std::net::IpAddr::from([142, 250, 80, 46]),
             src_port: 12345,
             dst_port: 443,
             protocol: 6,
@@ -164,8 +241,8 @@ mod tests {
     fn test_matcher_not() {
         let matcher = Matcher::Not(Box::new(Matcher::Port { port: 80 }));
         let ctx = PacketContext {
-            src_ip: [192, 168, 1, 1],
-            dst_ip: [142, 250, 80, 46],
+            src_ip: std::net::IpAddr::from([192, 168, 1, 1]),
+            dst_ip: std::net::IpAddr::from([142, 250, 80, 46]),
             src_port: 12345,
             dst_port: 443,
             protocol: 6,
@@ -195,8 +272,8 @@ mod tests {
                 .prop_map(
                     |(src_ip, dst_ip, src_port, dst_port, protocol, domain_hash, interface)| {
                         PacketContext {
-                            src_ip,
-                            dst_ip,
+                            src_ip: std::net::IpAddr::from(src_ip),
+                            dst_ip: std::net::IpAddr::from(dst_ip),
                             src_port,
                             dst_port,
                             protocol,
@@ -265,8 +342,8 @@ mod tests {
             ) {
                 let matcher = Matcher::Port { port };
                 let ctx = PacketContext {
-                    src_ip: [0; 4],
-                    dst_ip: [0; 4],
+                    src_ip: std::net::IpAddr::from([0, 0, 0, 0]),
+                    dst_ip: std::net::IpAddr::from([0, 0, 0, 0]),
                     src_port: 0,
                     dst_port,
                     protocol: 0,
@@ -298,8 +375,8 @@ mod tests {
         }
 
         let ctx = PacketContext {
-            src_ip: [0; 4],
-            dst_ip: [0; 4],
+            src_ip: std::net::IpAddr::from([0, 0, 0, 0]),
+            dst_ip: std::net::IpAddr::from([0, 0, 0, 0]),
             src_port: 0,
             dst_port: 80,
             protocol: 0,

@@ -163,8 +163,8 @@ mod tests {
     fn action_request(action: Action) -> ActionRequest {
         ActionRequest {
             action,
-            src_ip: [0; 4],
-            dst_ip: [0; 4],
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             src_port: 0,
             dst_port: 0,
             protocol: 0,

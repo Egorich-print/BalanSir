@@ -111,14 +111,7 @@ fn to_nft_spec(request: &ActionRequest) -> Option<crate::nftables::NftRuleSpec> 
         17 => Some(crate::nftables::NftProto::Udp),
         _ => None,
     };
-    let src_cidr = if request.src_ip == [0; 4] {
-        None
-    } else {
-        Some(format!(
-            "{}.{}.{}.{}/32",
-            request.src_ip[0], request.src_ip[1], request.src_ip[2], request.src_ip[3]
-        ))
-    };
+    let src_cidr = cidr_for_src(&request.src_ip);
     Some(NftRuleSpec {
         proto,
         src_cidr,
@@ -143,14 +136,7 @@ fn to_mark_spec(request: &ActionRequest, fwmark: u32) -> crate::nftables::NftRul
         17 => Some(crate::nftables::NftProto::Udp),
         _ => None,
     };
-    let src_cidr = if request.src_ip == [0; 4] {
-        None
-    } else {
-        Some(format!(
-            "{}.{}.{}.{}/32",
-            request.src_ip[0], request.src_ip[1], request.src_ip[2], request.src_ip[3]
-        ))
-    };
+    let src_cidr = cidr_for_src(&request.src_ip);
     NftRuleSpec {
         proto,
         src_cidr,
@@ -162,6 +148,18 @@ fn to_mark_spec(request: &ActionRequest, fwmark: u32) -> crate::nftables::NftRul
         verdict: crate::nftables::NftVerdict::Accept,
         mark: Some(fwmark),
         comment: Some(rule_comment(request.trace.policy_id)),
+    }
+}
+
+/// Render the source-address matcher as a CIDR string, or `None` for an
+/// unspecified address (no source matcher). IPv6 renders as `::/128`-style
+/// and is nft-rendered with the `ip6` keyword (A4).
+fn cidr_for_src(src_ip: &std::net::IpAddr) -> Option<String> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    match *src_ip {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED) | IpAddr::V6(Ipv6Addr::UNSPECIFIED) => None,
+        IpAddr::V4(addr) => Some(format!("{addr}/32")),
+        IpAddr::V6(addr) => Some(format!("{addr}/128")),
     }
 }
 
@@ -382,8 +380,8 @@ mod tests {
     async fn add_rule_with_valid_payload_returns_typed_result() {
         let request = ActionRequest {
             action: balansir_common::Action::Block,
-            src_ip: [0; 4],
-            dst_ip: [0; 4],
+            src_ip: std::net::IpAddr::from([0, 0, 0, 0]),
+            dst_ip: std::net::IpAddr::from([0, 0, 0, 0]),
             src_port: 0,
             dst_port: 0,
             protocol: 0,
@@ -439,8 +437,8 @@ mod tests {
 
         let block = ActionRequest {
             action: balansir_common::Action::Block,
-            src_ip: [10, 0, 0, 1],
-            dst_ip: [0; 4],
+            src_ip: std::net::IpAddr::from([10, 0, 0, 1]),
+            dst_ip: std::net::IpAddr::from([0, 0, 0, 0]),
             src_port: 0,
             dst_port: 443,
             protocol: 6,
@@ -460,8 +458,8 @@ mod tests {
 
         let allow = ActionRequest {
             action: balansir_common::Action::Allow,
-            src_ip: [0; 4],
-            dst_ip: [0; 4],
+            src_ip: std::net::IpAddr::from([0, 0, 0, 0]),
+            dst_ip: std::net::IpAddr::from([0, 0, 0, 0]),
             src_port: 0,
             dst_port: 0,
             protocol: 0,
@@ -483,8 +481,8 @@ mod tests {
             action: balansir_common::Action::Forward {
                 driver: balansir_common::DriverId::WireGuard,
             },
-            src_ip: [0; 4],
-            dst_ip: [0; 4],
+            src_ip: std::net::IpAddr::from([0, 0, 0, 0]),
+            dst_ip: std::net::IpAddr::from([0, 0, 0, 0]),
             src_port: 0,
             dst_port: 0,
             protocol: 0,
@@ -502,14 +500,50 @@ mod tests {
         assert!(to_nft_spec(&forward).is_none());
     }
 
+    /// A4 (ADR-017): IPv6 is representable — a v6 source renders as an
+    /// `ip6 saddr <addr>/128` matcher; unspecified addresses render no matcher.
+    #[test]
+    fn nft_spec_renders_ipv6_src_as_ip6_saddr() {
+        let v6 = ActionRequest {
+            action: balansir_common::Action::Block,
+            src_ip: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
+            dst_ip: std::net::IpAddr::V6("2001:db8::2".parse().unwrap()),
+            src_port: 0,
+            dst_port: 443,
+            protocol: 6,
+            interface: 0,
+            trace: balansir_common::DecisionTrace {
+                policy_id: 9,
+                steps: smallvec::SmallVec::new(),
+                action: balansir_common::Action::Block,
+                execution_time_us: 0,
+                correlation_id: 0,
+            },
+        };
+        let spec = to_nft_spec(&v6).expect("v6 Block must map to a spec");
+        assert_eq!(spec.src_cidr.as_deref(), Some("2001:db8::1/128"));
+        assert!(spec.render().contains(&"ip6".to_string()));
+        assert!(spec.render().contains(&"2001:db8::1/128".to_string()));
+
+        // Unspecified v6 is "no matcher", same as unspecified v4.
+        let unspecified_v6 = ActionRequest {
+            src_ip: std::net::IpAddr::V6("::".parse().unwrap()),
+            ..v6
+        };
+        assert!(to_nft_spec(&unspecified_v6)
+            .expect("Block must map to a spec")
+            .src_cidr
+            .is_none());
+    }
+
     /// A1 (ADR-015): the rule fingerprint is deterministic and distinguishes
     /// "same rule" from "different rule under the same id".
     #[test]
     fn rule_fingerprint_is_stable_and_semantic() {
         let mut base = ActionRequest {
             action: balansir_common::Action::Block,
-            src_ip: [10, 0, 0, 1],
-            dst_ip: [0; 4],
+            src_ip: std::net::IpAddr::from([10, 0, 0, 1]),
+            dst_ip: std::net::IpAddr::from([0, 0, 0, 0]),
             src_port: 0,
             dst_port: 443,
             protocol: 6,

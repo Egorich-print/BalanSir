@@ -79,41 +79,20 @@ impl balansir_executor::executor::Executor for NftablesExecutor {
         let result = match request.action {
             Action::Block => {
                 let rule = format!(
-                    "ip saddr {}.{}.{}.{}/32 ip daddr {}.{}.{}.{}/32 drop",
-                    request.src_ip[0],
-                    request.src_ip[1],
-                    request.src_ip[2],
-                    request.src_ip[3],
-                    request.dst_ip[0],
-                    request.dst_ip[1],
-                    request.dst_ip[2],
-                    request.dst_ip[3]
+                    "ip saddr {}/32 ip daddr {}/32 drop",
+                    request.src_ip, request.dst_ip
                 );
                 self.run_nft(&["add", "rule", "inet", &self.table_name, "forward", &rule])
             }
             Action::Reject => {
                 let rule = format!(
-                    "ip saddr {}.{}.{}.{}/32 ip daddr {}.{}.{}.{}/32 reject",
-                    request.src_ip[0],
-                    request.src_ip[1],
-                    request.src_ip[2],
-                    request.src_ip[3],
-                    request.dst_ip[0],
-                    request.dst_ip[1],
-                    request.dst_ip[2],
-                    request.dst_ip[3]
+                    "ip saddr {}/32 ip daddr {}/32 reject",
+                    request.src_ip, request.dst_ip
                 );
                 self.run_nft(&["add", "rule", "inet", &self.table_name, "forward", &rule])
             }
             Action::Mark { fwmark } => {
-                let rule = format!(
-                    "ip saddr {}.{}.{}.{}/32 mark set {}",
-                    request.src_ip[0],
-                    request.src_ip[1],
-                    request.src_ip[2],
-                    request.src_ip[3],
-                    fwmark
-                );
+                let rule = format!("ip saddr {}/32 mark set {}", request.src_ip, fwmark);
                 self.run_nft(&["add", "rule", "inet", &self.table_name, "forward", &rule])
             }
             _ => {
@@ -160,8 +139,8 @@ mod tests {
     fn make_request(action: Action) -> ActionRequest {
         ActionRequest {
             action,
-            src_ip: [192, 168, 1, 100],
-            dst_ip: [10, 0, 0, 1],
+            src_ip: std::net::IpAddr::from([192, 168, 1, 100]),
+            dst_ip: std::net::IpAddr::from([10, 0, 0, 1]),
             src_port: 12345,
             dst_port: 443,
             protocol: 6,
