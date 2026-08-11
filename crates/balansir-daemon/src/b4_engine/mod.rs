@@ -23,6 +23,10 @@
 pub mod classify;
 /// TOML configuration loading for B4 policy + engine.
 pub mod config;
+/// Controller wiring the engine to the executor boundary + ownership (P7.2).
+pub mod controller;
+/// Real host-stack + DNS observation sources (P7.2).
+pub mod host;
 /// Host-stack observation signals and the observer trait.
 pub mod observe;
 /// Policy: which mechanisms a flow may use and how to fail (STRICT default).

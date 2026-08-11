@@ -100,29 +100,58 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         dns_loop_reconciler.dns_loop().await;
     });
-
-    // P7.1 (ADR-024) B4 runtime loop: policy-controlled connectivity
-    // adaptation. Loads the optional B4 config (BALANSIR_B4_CONFIG) and runs
-    // the engine with a host-stack observer. The observer is the Noop source
-    // until a real TCP_INFO/DNS observer is wired (P7.2); the engine is fully
-    // testable regardless. Decisions are logged; execution of MTU/DNS-path
-    // changes is the P7.2 mechanism step.
+    // P7.2 (ADR-026) B4 runtime loop: policy-controlled connectivity
+    // adaptation with real host-stack observation and controlled execution
+    // through the existing executor boundary.
+    //
+    // Loads the optional B4 config (BALANSIR_B4_CONFIG). The controller runs
+    // the engine per configured flow, executes MTU/DNS-path decisions via the
+    // ExecutorAdapter, and records intent; the PathMtuReconciler converges the
+    // executor's reported state to that intent (P4.1 ownership — B4 never
+    // changes something the daemon does not know about).
     if let Ok(b4_path) = std::env::var("BALANSIR_B4_CONFIG") {
         match balansir_daemon::b4_engine::config::B4Toml::from_file(&b4_path) {
             Ok(b4_cfg) => match b4_cfg.policy() {
                 Ok(policy) => {
                     let engine_cfg = b4_cfg.engine_config();
+                    let dns_registry_for_observer =
+                        std::sync::Arc::new(balansir_daemon::reconciliation::DnsRegistry::new());
                     let observer: std::sync::Arc<dyn balansir_daemon::b4_engine::B4Observer> =
-                        std::sync::Arc::new(balansir_daemon::b4_engine::observe::NoopObserver);
-                    let mut engine = balansir_daemon::b4_engine::B4Engine::with_config(
-                        policy, observer, engine_cfg,
+                        std::sync::Arc::new(
+                            balansir_daemon::b4_engine::host::CompositeObserver::new(Some(
+                                dns_registry_for_observer,
+                            )),
+                        );
+                    let mut controller = balansir_daemon::b4_engine::controller::B4Controller::new(
+                        policy,
+                        observer,
+                        engine_cfg,
+                        reconciler.executor_adapter(),
                     );
                     tokio::spawn(async move {
-                        engine
-                            .run_loop(10, |flow, decision| async move {
-                                info!(flow, decision = ?decision, "B4 decision");
-                            })
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                            // Probe configured domains first, then any observed
+                            // flows, so policy domains are always evaluated.
+                            let mut flows = controller.policy_domains();
+                            for f in controller.flow_keys() {
+                                if !flows.contains(&f) {
+                                    flows.push(f);
+                                }
+                            }
+                            for flow in flows {
+                                controller.run_for(&flow).await;
+                            }
+                            // Ownership: converge the executor's reported MTU
+                            // state to the controller's intent.
+                            let intended = controller.intended_path_mtu();
+                            let executor = controller.executor_adapter();
+                            balansir_daemon::b4_engine::controller::PathMtuReconciler::reconcile(
+                                executor.as_ref(),
+                                &intended,
+                            )
                             .await;
+                        }
                     });
                     info!("B4 engine started from {b4_path}");
                 }
@@ -131,7 +160,6 @@ async fn main() -> Result<()> {
             Err(e) => warn!("B4 config {b4_path} rejected: {e} (engine disabled)"),
         }
     }
-
     // Setup signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;

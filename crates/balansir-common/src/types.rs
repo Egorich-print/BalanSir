@@ -478,6 +478,20 @@ pub struct ActualRule {
     pub flow: Option<FlowCriteria>,
 }
 
+// --- B4 path MTU (P7.2, ADR-026) ---
+
+/// A per-path MTU adjustment applied by the executor under the daemon's
+/// authority. The executor owns the applied state and reports it (like the
+/// rule inventory); the daemon reconciles desired-vs-reported.
+///
+/// `path` is the flow path key (e.g. a domain or destination). MTU is
+/// deliberately *per-path*, never a global interface setting (ADR-024 §6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathMtu {
+    pub path: String,
+    pub mtu: u16,
+}
+
 #[cfg(test)]
 mod driver_id_tests {
     use super::DriverId;

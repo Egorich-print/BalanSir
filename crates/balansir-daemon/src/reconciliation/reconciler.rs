@@ -7,7 +7,7 @@ use crate::reconciliation::sinks::TracingEventSink;
 use crate::reconciliation::{ReconciliationError, ReconciliationResult};
 use balansir_common::plan::ReconciliationPlan;
 use balansir_common::{
-    ActionRequest, ActionResult, ActualRule, ActualState, DesiredRule, DesiredState,
+    ActionRequest, ActionResult, ActualRule, ActualState, DesiredRule, DesiredState, PathMtu,
 };
 use balansir_control::planner::BasicPlanner;
 use balansir_control::snapshot_store::MemorySnapshotStore;
@@ -103,6 +103,25 @@ pub trait ExecutorAdapter: Send + Sync {
     /// Report the ids of rules currently present in the mechanism (A2,
     /// non-authoritative inventory). Default empty.
     async fn actual_rule_ids(&self) -> Vec<u32> {
+        Vec::new()
+    }
+    /// Apply a per-path MTU adjustment (P7.2, ADR-026). The executor owns the
+    /// applied state; the daemon decides what should be applied.
+    async fn set_path_mtu(&self, path: &str, mtu: u16) -> balansir_common::Result<()> {
+        let _ = (path, mtu);
+        Err(balansir_common::error::Error::Unsupported(
+            "set_path_mtu not implemented by this adapter".into(),
+        ))
+    }
+    /// Remove a per-path MTU adjustment (rollback).
+    async fn restore_path_mtu(&self, path: &str) -> balansir_common::Result<()> {
+        let _ = path;
+        Err(balansir_common::error::Error::Unsupported(
+            "restore_path_mtu not implemented by this adapter".into(),
+        ))
+    }
+    /// The executor's currently applied per-path MTU set (non-authority).
+    async fn path_mtu_state(&self) -> Vec<PathMtu> {
         Vec::new()
     }
 }
@@ -206,6 +225,13 @@ impl Reconciler {
         *self.desired_raw.lock().await = Some(raw);
         *self.config_fingerprint.lock().await = Some(balansir_common::config_fingerprint(&state));
         *self.desired_state.lock().await = state;
+    }
+
+    /// The executor adapter this reconciler commands (P7.2: the B4 controller
+    /// drives the same executor boundary the ownership loop uses, so every B4
+    /// change is known to the daemon).
+    pub fn executor_adapter(&self) -> Arc<dyn ExecutorAdapter> {
+        Arc::clone(&self.executor)
     }
 
     /// Get the fingerprint of the last accepted config (P4.8, ADR-021), or

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use balansir_common::Result;
-use balansir_common::{ActionRequest, ActionResult, ActionType, ExecutorCapabilities};
+use balansir_common::{ActionRequest, ActionResult, ActionType, ExecutorCapabilities, PathMtu};
 
 /// Executor trait - defines how actions are applied to the kernel/drivers
 #[async_trait]
@@ -61,6 +61,29 @@ pub trait Executor: Send + Sync {
         Err(balansir_common::error::Error::Unsupported(
             "remove_rule not implemented by this executor".into(),
         ))
+    }
+
+    /// Apply a per-path MTU adjustment (P7.2, ADR-026).
+    ///
+    /// The executor owns the applied path-MTU state; it reports it via
+    /// `path_mtu_state` so the daemon can reconcile. Default reports
+    /// Unsupported for mechanisms without MTU control.
+    async fn set_path_mtu(&self, _path: &str, _mtu: u16) -> Result<()> {
+        Err(balansir_common::error::Error::Unsupported(
+            "set_path_mtu not implemented by this executor".into(),
+        ))
+    }
+
+    /// Remove a per-path MTU adjustment (rollback), restoring the default.
+    async fn restore_path_mtu(&self, _path: &str) -> Result<()> {
+        Err(balansir_common::error::Error::Unsupported(
+            "restore_path_mtu not implemented by this executor".into(),
+        ))
+    }
+
+    /// The currently applied per-path MTU adjustments (non-authority).
+    async fn path_mtu_state(&self) -> Vec<PathMtu> {
+        Vec::new()
     }
 }
 

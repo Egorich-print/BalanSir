@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 use balansir_common::ipc::{IpcClientConnection, IpcMessage, MsgType};
-use balansir_common::{ActionRequest, ActionResult, Result};
+use balansir_common::{ActionRequest, ActionResult, PathMtu, Result};
 
 use crate::reconciliation::reconciler::ExecutorAdapter;
 
@@ -137,6 +137,54 @@ impl ExecutorAdapter for ExecutorClient {
                 error: balansir_common::ActionError::Unknown,
                 message: Some(format!("executor unreachable: {e}")),
             },
+        }
+    }
+
+    // P7.2 (ADR-026): per-path MTU execution over the existing IPC boundary.
+    async fn set_path_mtu(&self, path: &str, mtu: u16) -> Result<()> {
+        let adj = PathMtu {
+            path: path.to_string(),
+            mtu,
+        };
+        let payload = postcard::to_allocvec(&adj)
+            .map_err(|e| balansir_common::error::Error::Fatal(format!("encode: {e}")))?;
+        let resp = self.request(MsgType::SetPathMtu, payload).await?;
+        match resp.msg_type {
+            MsgType::ResponseOk => Ok(()),
+            MsgType::ResponseError => Err(balansir_common::error::Error::Fatal(format!(
+                "executor rejected SetPathMtu: {}",
+                String::from_utf8_lossy(&resp.payload)
+            ))),
+            _ => Err(balansir_common::error::Error::Fatal(
+                "unexpected SetPathMtu response".into(),
+            )),
+        }
+    }
+
+    async fn restore_path_mtu(&self, path: &str) -> Result<()> {
+        let adj = PathMtu {
+            path: path.to_string(),
+            mtu: 0,
+        };
+        let payload = postcard::to_allocvec(&adj)
+            .map_err(|e| balansir_common::error::Error::Fatal(format!("encode: {e}")))?;
+        let resp = self.request(MsgType::RestorePathMtu, payload).await?;
+        match resp.msg_type {
+            MsgType::ResponseOk => Ok(()),
+            MsgType::ResponseError => Err(balansir_common::error::Error::Fatal(format!(
+                "executor rejected RestorePathMtu: {}",
+                String::from_utf8_lossy(&resp.payload)
+            ))),
+            _ => Err(balansir_common::error::Error::Fatal(
+                "unexpected RestorePathMtu response".into(),
+            )),
+        }
+    }
+
+    async fn path_mtu_state(&self) -> Vec<PathMtu> {
+        match self.request(MsgType::GetPathMtuState, Vec::new()).await {
+            Ok(resp) => postcard::from_bytes::<Vec<PathMtu>>(&resp.payload).unwrap_or_default(),
+            Err(_) => Vec::new(),
         }
     }
 }
@@ -310,6 +358,63 @@ mod tests {
                 ..
             }
         ));
+        server_task.await.unwrap();
+    }
+
+    /// P7.2 (ADR-026): SetPathMtu round-trips over the existing IPC boundary —
+    /// the daemon sends a PathMtu, the executor acks, and GetPathMtuState
+    /// reports the applied set (non-authority).
+    #[tokio::test]
+    async fn executor_client_set_and_query_path_mtu_roundtrip() {
+        std::env::set_var(
+            "BALANSIR_ALLOWED_UIDS",
+            unsafe { libc::geteuid() }.to_string(),
+        );
+
+        let (daemon_stream, executor_stream) = UnixStream::pair().unwrap();
+        let mut server = IpcServerConnection::accept(executor_stream)
+            .await
+            .expect("peer auth on paired stream");
+
+        let server_task = tokio::spawn(async move {
+            let msg = server.recv().await.unwrap();
+            assert_eq!(msg.msg_type, MsgType::SetPathMtu);
+            let adj: PathMtu = postcard::from_bytes(&msg.payload).unwrap();
+            assert_eq!(adj.path, "example.com");
+            assert_eq!(adj.mtu, 1400);
+            let _ = server
+                .send(&IpcMessage::response_ok(msg.correlation_id))
+                .await;
+
+            let state_msg = server.recv().await.unwrap();
+            assert_eq!(state_msg.msg_type, MsgType::GetPathMtuState);
+            let state = vec![PathMtu {
+                path: "example.com".into(),
+                mtu: 1400,
+            }];
+            let payload = postcard::to_allocvec(&state).unwrap();
+            let _ = server
+                .send(&IpcMessage::response_data(
+                    state_msg.correlation_id,
+                    payload,
+                ))
+                .await;
+        });
+
+        let conn = IpcClientConnection::from_stream(daemon_stream)
+            .await
+            .unwrap();
+        let client = ExecutorClient {
+            socket: "unused".into(),
+            conn: tokio::sync::Mutex::new(Some(conn)),
+        };
+
+        client.set_path_mtu("example.com", 1400).await.unwrap();
+        let state = client.path_mtu_state().await;
+        assert_eq!(state.len(), 1);
+        assert_eq!(state[0].path, "example.com");
+        assert_eq!(state[0].mtu, 1400);
+
         server_task.await.unwrap();
     }
 }

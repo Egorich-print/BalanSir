@@ -41,6 +41,12 @@ pub enum MsgType {
     // P4.8: daemon reports the fingerprint of the last accepted desired-state
     // config so operators can verify what is actually loaded.
     GetConfigFingerprint,
+    // P7.2 (ADR-026): B4 execution — per-path MTU adjustments. The executor
+    // owns the applied path-MTU state and reports it (non-authority, like the
+    // rule inventory) so the daemon can reconcile.
+    SetPathMtu,
+    RestorePathMtu,
+    GetPathMtuState,
     ResponseOk,
     ResponseError,
     ResponseData,

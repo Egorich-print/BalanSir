@@ -13,7 +13,7 @@
 
 use async_trait::async_trait;
 use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
-use balansir_common::{ActionRequest, ActionResult, Result};
+use balansir_common::{ActionRequest, ActionResult, PathMtu, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -34,10 +34,13 @@ use crate::executor::Executor;
 /// `RemoveRule` can resolve the nft handle and delete precisely (never a
 /// fragile flush-all), and `execute` can distinguish "same rule" from
 /// "different rule under the same id" (A1, ADR-015).
-#[derive(Debug)]
 pub struct NftablesExecutor {
     backend: crate::nftables::NftablesBackend,
     installed: Mutex<HashMap<u32, u64>>,
+    /// Applied per-path MTU state (P7.2, ADR-026). The executor owns it and
+    /// reports it so the daemon can reconcile; the daemon decides what *should*
+    /// be applied.
+    path_mtu: crate::path_mtu::PathMtuStore,
 }
 
 impl NftablesExecutor {
@@ -45,6 +48,9 @@ impl NftablesExecutor {
         Self {
             backend,
             installed: Mutex::new(HashMap::new()),
+            path_mtu: crate::path_mtu::PathMtuStore::new(Box::new(
+                crate::path_mtu::RecordOnlyApplier,
+            )),
         }
     }
 
@@ -245,6 +251,26 @@ impl Executor for NftablesExecutor {
     async fn actual_rule_ids(&self) -> Vec<u32> {
         self.backend.list_rule_ids().unwrap_or_default()
     }
+
+    // P7.2 (ADR-026): per-path MTU. The executor owns the applied state and
+    // reports it (non-authority); the daemon decides what should be applied.
+    async fn set_path_mtu(&self, path: &str, mtu: u16) -> Result<()> {
+        self.path_mtu
+            .set(path, mtu)
+            .await
+            .map_err(balansir_common::Error::Fatal)
+    }
+
+    async fn restore_path_mtu(&self, path: &str) -> Result<()> {
+        self.path_mtu
+            .restore(path)
+            .await
+            .map_err(balansir_common::Error::Fatal)
+    }
+
+    async fn path_mtu_state(&self) -> Vec<PathMtu> {
+        self.path_mtu.state()
+    }
 }
 
 /// Allowed executor operations. Anything not in this set is rejected before
@@ -257,6 +283,9 @@ fn is_allowlisted(msg_type: MsgType) -> bool {
             | MsgType::FlushRules
             | MsgType::HealthCheck
             | MsgType::GetActualRules
+            | MsgType::SetPathMtu
+            | MsgType::RestorePathMtu
+            | MsgType::GetPathMtuState
     )
 }
 
@@ -331,6 +360,43 @@ pub async fn dispatch(msg: &IpcMessage, executor: &dyn Executor) -> IpcMessage {
                 }
             }
         }
+        // P7.2 (ADR-026): per-path MTU execution. The payload is a postcard
+        // `PathMtu { path, mtu }` for set/restore; the executor owns the applied
+        // state and reports it.
+        MsgType::SetPathMtu => {
+            let Ok(adj) = postcard::from_bytes::<PathMtu>(&msg.payload) else {
+                return IpcMessage::response_error(
+                    msg.correlation_id,
+                    "invalid SetPathMtu payload",
+                );
+            };
+            match executor.set_path_mtu(&adj.path, adj.mtu).await {
+                Ok(()) => IpcMessage::response_ok(msg.correlation_id),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+            }
+        }
+        MsgType::RestorePathMtu => {
+            let Ok(adj) = postcard::from_bytes::<PathMtu>(&msg.payload) else {
+                return IpcMessage::response_error(
+                    msg.correlation_id,
+                    "invalid RestorePathMtu payload",
+                );
+            };
+            match executor.restore_path_mtu(&adj.path).await {
+                Ok(()) => IpcMessage::response_ok(msg.correlation_id),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+            }
+        }
+        MsgType::GetPathMtuState => {
+            let state = executor.path_mtu_state().await;
+            match postcard::to_allocvec(&state) {
+                Ok(payload) => IpcMessage::response_data(msg.correlation_id, payload),
+                Err(_) => IpcMessage::response_error(
+                    msg.correlation_id,
+                    "failed to encode path mtu state",
+                ),
+            }
+        }
         _ => IpcMessage::response_error(msg.correlation_id, "operation not allowed"),
     }
 }
@@ -362,6 +428,34 @@ mod tests {
         assert_eq!(response.msg_type, MsgType::ResponseData);
         let ids: Vec<u32> = postcard::from_bytes(&response.payload).unwrap();
         assert!(ids.is_empty());
+    }
+
+    /// P7.2: SetPathMtu / RestorePathMtu / GetPathMtuState are allowlisted and
+    /// return typed results. DummyExecutor doesn't implement MTU, so set fails
+    /// honestly as Unsupported; state is empty.
+    #[tokio::test]
+    async fn path_mtu_ops_dispatch() {
+        // DummyExecutor does not implement set_path_mtu -> honest error.
+        let adj = PathMtu {
+            path: "example.com".into(),
+            mtu: 1400,
+        };
+        let set_payload = postcard::to_allocvec(&adj).unwrap();
+        let resp = dispatch(
+            &message(MsgType::SetPathMtu, set_payload),
+            &dummy_executor(),
+        )
+        .await;
+        assert_eq!(resp.msg_type, MsgType::ResponseError);
+
+        let state = dispatch(
+            &message(MsgType::GetPathMtuState, vec![]),
+            &dummy_executor(),
+        )
+        .await;
+        assert_eq!(state.msg_type, MsgType::ResponseData);
+        let mtu: Vec<PathMtu> = postcard::from_bytes(&state.payload).unwrap();
+        assert!(mtu.is_empty());
     }
 
     #[tokio::test]

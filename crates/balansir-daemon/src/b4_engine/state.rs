@@ -167,6 +167,11 @@ impl B4Engine {
         self.flows.keys().cloned().collect()
     }
 
+    /// The domains the engine's policy knows about (for pre-seeding the loop).
+    pub fn policy_domains(&self) -> Vec<String> {
+        self.policy.flow_domains()
+    }
+
     /// Run the B4 loop forever (P7.1): every `interval_secs`, evaluate each
     /// known flow and execute the decision via `executor`.
     ///
