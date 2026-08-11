@@ -11,8 +11,10 @@
 //! Cross-platform (macOS/Linux) for inspect/checksum; build/qemu need a Linux
 //! environment (the Buildroot VM), which the tool detects and reports.
 
+mod elf;
 mod image;
 mod qemu;
+mod verify;
 
 use std::process::ExitCode;
 
@@ -49,6 +51,19 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "verify" => {
+            let path = need_arg(&args, 2);
+            match verify::verify(path) {
+                Ok(out) => {
+                    println!("{out}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("balansir-image: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         "qemu" => {
             let path = need_arg(&args, 2);
             match qemu::boot_test(path) {
@@ -62,7 +77,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        "build" | "verify" | "help" | "-h" | "--help" => {
+        "build" | "help" | "-h" | "--help" => {
             usage();
             ExitCode::SUCCESS
         }
