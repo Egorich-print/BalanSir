@@ -21,9 +21,8 @@ pub struct DesiredConfig {
 impl DesiredConfig {
     /// Read and parse a desired-state config file (strict compile).
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> ControlResult<Self> {
-        let content = std::fs::read_to_string(path.as_ref()).map_err(|e| {
-            ControlError::DesiredProvider(format!("read {:?}: {e}", path.as_ref()))
-        })?;
+        let content = std::fs::read_to_string(path.as_ref())
+            .map_err(|e| ControlError::DesiredProvider(format!("read {:?}: {e}", path.as_ref())))?;
         let config: Self = toml::from_str(&content).map_err(|e| {
             ControlError::DesiredProvider(format!("parse {:?}: {e}", path.as_ref()))
         })?;

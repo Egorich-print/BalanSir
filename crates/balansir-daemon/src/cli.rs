@@ -24,9 +24,7 @@ use std::env;
 const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
 
 fn usage() -> ! {
-    eprintln!(
-        "usage: balansir-cli {{status|plan|explain|desired|actual|reload <config.toml>}}"
-    );
+    eprintln!("usage: balansir-cli {{status|plan|explain|desired|actual|reload <config.toml>}}");
     std::process::exit(2);
 }
 
@@ -70,8 +68,7 @@ async fn main() -> Result<()> {
                 eprintln!("error: {}", String::from_utf8_lossy(&resp.payload));
                 std::process::exit(1);
             }
-            let desired: balansir_common::DesiredState =
-                postcard::from_bytes(&resp.payload)?;
+            let desired: balansir_common::DesiredState = postcard::from_bytes(&resp.payload)?;
             println!("rules: {}", desired.rules.len());
             println!("drivers: {}", desired.drivers.len());
         }
@@ -81,8 +78,7 @@ async fn main() -> Result<()> {
                 eprintln!("error: {}", String::from_utf8_lossy(&resp.payload));
                 std::process::exit(1);
             }
-            let actual: balansir_common::ActualState =
-                postcard::from_bytes(&resp.payload)?;
+            let actual: balansir_common::ActualState = postcard::from_bytes(&resp.payload)?;
             println!("active_rules: {}", actual.active_rules.len());
         }
         "reload" => {
