@@ -236,4 +236,60 @@ mod tests {
         assert!(!executor.supports(ActionType::Forward));
         assert!(!executor.supports(ActionType::Shape));
     }
+
+    /// M3.7 privileged proof: the production `NftablesBackend` (typed rules,
+    /// handle-based removal) applies a fwmark rule to the kernel and removes it
+    /// precisely. Root-gated; run with
+    /// `sudo cargo test -p balansir-tests -- --ignored`.
+    #[test]
+    #[ignore]
+    fn test_nftables_backend_mark_and_handle_removal() {
+        if !is_root() {
+            eprintln!("Skipping: requires root/CAP_NET_ADMIN");
+            return;
+        }
+
+        use balansir_executor::nftables::{NftRuleSpec, NftVerdict, NftablesBackend};
+
+        let table = format!("balansir_m37_{}", std::process::id());
+        let backend = NftablesBackend::new(&table, "forward").unwrap();
+        backend.init().unwrap();
+
+        // Apply a typed rule with a fwmark and a stable comment (the exact M3.7
+        // mechanism the executor uses).
+        let spec = NftRuleSpec {
+            proto: Some(balansir_executor::nftables::NftProto::Tcp),
+            src_cidr: Some("10.0.0.0/8".to_string()),
+            dport: Some(443),
+            verdict: NftVerdict::Drop,
+            mark: Some(0x10),
+            comment: Some("balansir:42".to_string()),
+        };
+        backend.add_rule(&spec).unwrap();
+
+        // The rule is present in the kernel and carries the mark.
+        let listed = backend.list_rules().unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|l| l.contains("mark set 16") && l.contains("comment \"balansir:42\"")),
+            "installed rule must be present with mark + comment: {listed:?}"
+        );
+
+        // Remove precisely by comment (handle-based), not flush-all.
+        backend.remove_rule_by_comment("balansir:42").unwrap();
+        let after = backend.list_rules().unwrap();
+        assert!(
+            !after.iter().any(|l| l.contains("balansir:42")),
+            "rule must be gone after handle-based removal: {after:?}"
+        );
+
+        // Removing an absent comment is idempotent.
+        backend.remove_rule_by_comment("balansir:42").unwrap();
+
+        let _ = backend.flush();
+        let _ = std::process::Command::new("nft")
+            .args(["delete", "table", "inet", &table])
+            .output();
+    }
 }
