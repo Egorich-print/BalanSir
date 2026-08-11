@@ -6,6 +6,7 @@ members = [
     "crates/balansir-executor",
     "crates/balansir-api",
     "crates/balansir-tests",
+    "tools/balansir-image",
 ]
 resolver = "2"
 
