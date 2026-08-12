@@ -286,6 +286,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "balansir-image"
+version = "0.4.0"
+
+[[package]]
 name = "balansir-tests"
 version = "0.4.0"
 dependencies = [
