@@ -11,6 +11,7 @@
 //! Cross-platform (macOS/Linux) for inspect/checksum; build/qemu need a Linux
 //! environment (the Buildroot VM), which the tool detects and reports.
 
+mod collect;
 mod elf;
 mod image;
 mod qemu;
@@ -64,6 +65,19 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "collect" => {
+            let host = need_arg(&args, 2);
+            match collect::collect(host) {
+                Ok(out) => {
+                    println!("{out}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("balansir-image: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         "qemu" => {
             let path = need_arg(&args, 2);
             match qemu::boot_test(path) {
@@ -106,6 +120,7 @@ USAGE:
   balansir-image qemu <sdcard.img>          boot-test under QEMU (Linux host)
   balansir-image build [defconfig]          build via Buildroot (Linux env)
   balansir-image verify <sdcard.img>        verify manifest + ELF binaries
+  balansir-image collect <user@host>       collect diagnostics over SSH
   balansir-image help                       this message
 "
     );

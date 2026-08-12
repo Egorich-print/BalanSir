@@ -161,7 +161,7 @@ mod tests {
             h[32..40].copy_from_slice(&64u64.to_le_bytes()); // phoff
             h[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
             h[56..58].copy_from_slice(&1u16.to_le_bytes()); // phnum
-            // PT_LOAD (type 1), no PT_INTERP -> static.
+                                                            // PT_LOAD (type 1), no PT_INTERP -> static.
             h[64..68].copy_from_slice(&1u32.to_le_bytes());
             let info = parse_elf(&h);
             assert!(info.is_elf);
