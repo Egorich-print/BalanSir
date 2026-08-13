@@ -27,7 +27,7 @@ scp -q -o StrictHostKeyChecking=no -P "$PORT" "$TMP/snapshot.tgz" \
 
 ssh -o StrictHostKeyChecking=no -p "$PORT" builder@localhost '
     set -eu
-    cd /home/builder
+    cd /home/builder/balansir
     rm -rf buildroot-external Cargo.toml Cargo.lock crates config deploy docs tools Makefile *.md *.sh
     COPYFILE_DISABLE=1 tar xzf snapshot.tgz
     rm -f snapshot.tgz
