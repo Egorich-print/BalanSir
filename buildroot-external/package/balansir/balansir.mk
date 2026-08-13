@@ -9,15 +9,13 @@
 # which builds the whole dependency graph incl. the executor crate.
 #
 # SITE_METHOD = local: build from the checked-out repository the external
-# tree lives in (BR2_EXTERNAL_BALANSIR_PATH/../.. == repo root). For a
-# network-independent reproducible build, prefer this over a git checkout;
-# a git SITE can be substituted (BALANSIR_SITE_METHOD = git) for CI builds
+# tree lives in. The external tree sits at <repo>/buildroot-external, so the
+# repo root is one level up (BR2_EXTERNAL_BALANSIR_PATH/..), NOT ../.. (that
+# would recurse into the build host's parent dir and re-copy the output tree).
+# A git SITE can be substituted (BALANSIR_SITE_METHOD = git) for CI builds
 # from a pushed tag.
-#
-################################################################################
-
 BALANSIR_VERSION = 0.4.0
-BALANSIR_SITE = $(BR2_EXTERNAL_BALANSIR_PATH)/../..
+BALANSIR_SITE = $(BR2_EXTERNAL_BALANSIR_PATH)/..
 BALANSIR_SITE_METHOD = local
 BALANSIR_LICENSE = MIT OR Apache-2.0
 BALANSIR_LICENSE_FILES = LICENSE-MIT LICENSE-APACHE
