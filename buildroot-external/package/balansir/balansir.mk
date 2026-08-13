@@ -40,6 +40,10 @@ BALANSIR_PRE_BUILD_HOOKS = BALANSIR_VENDOR_DEPS
 # Install into /usr/local/bin to match the deploy/systemd units' ExecStart
 # (ADR-030); Buildroot's default /usr/bin is not what the units reference.
 define BALANSIR_INSTALL_TARGET_CMDS
+	# Remove stale copies from earlier builds that installed to /usr/bin.
+	rm -f $(TARGET_DIR)/usr/bin/balansir-daemon \
+	      $(TARGET_DIR)/usr/bin/balansir-cli \
+	      $(TARGET_DIR)/usr/bin/balansir-executor
 	mkdir -p $(TARGET_DIR)/usr/local/bin
 	install -m 0755 $(BALANSIR_SRCDIR)/target/$(RUSTC_TARGET_NAME)/release/balansir-daemon \
 		$(TARGET_DIR)/usr/local/bin/
