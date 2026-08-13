@@ -43,3 +43,13 @@ if ! grep -q '^balansir:' "${TARGET_DIR}/etc/passwd" 2>/dev/null; then
     echo 'balansir:x:1500:' >> "${TARGET_DIR}/etc/group"
 fi
 mkdir -p "${TARGET_DIR}/var/lib/balansir"
+
+# --- PATH convenience: /usr/local/bin (BalanSir install dir) ----------------
+# Buildroot's default PATH is /usr/bin:/sbin:/bin; symlink the BalanSir
+# binaries into /usr/bin so operators can call balansir-cli without PATH
+# changes. The systemd units keep using /usr/local/bin (ADR-030).
+for b in balansir-daemon balansir-cli balansir-executor; do
+    if [ -e "${TARGET_DIR}/usr/local/bin/${b}" ]; then
+        ln -sf "/usr/local/bin/${b}" "${TARGET_DIR}/usr/bin/${b}"
+    fi
+done
