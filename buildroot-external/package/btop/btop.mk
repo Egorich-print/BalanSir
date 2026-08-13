@@ -11,3 +11,6 @@ BTOP_LICENSE_FILES = LICENSE
 BTOP_DEPENDENCIES = host-cmake
 
 $(eval $(cmake-package))
+
+# btop forbids in-source builds (its CMakeLists errors on them).
+BTOP_SUPPORTS_IN_SOURCE_BUILD = NO
