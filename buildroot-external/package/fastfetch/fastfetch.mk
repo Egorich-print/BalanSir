@@ -10,7 +10,7 @@ FASTFETCH_LICENSE = MIT
 FASTFETCH_LICENSE_FILES = LICENSE
 FASTFETCH_DEPENDENCIES = host-cmake
 
-$(eval $(cmake-package))
-
-# fastfetch also uses out-of-source builds (buildroot-build subdir).
+# fastfetch also uses out-of-source builds; set before $(eval ...).
 FASTFETCH_SUPPORTS_IN_SOURCE_BUILD = NO
+
+$(eval $(cmake-package))
