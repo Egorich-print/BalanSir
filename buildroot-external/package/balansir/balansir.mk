@@ -37,14 +37,19 @@ BALANSIR_PRE_BUILD_HOOKS = BALANSIR_VENDOR_DEPS
 
 # The workspace root is a virtual manifest, so `cargo install` fails. Install
 # the built binaries directly from the cargo target dir (cross-compiled).
+# Install into /usr/local/bin to match the deploy/systemd units' ExecStart
+# (ADR-030); Buildroot's default /usr/bin is not what the units reference.
 define BALANSIR_INSTALL_TARGET_CMDS
-	mkdir -p $(TARGET_DIR)/usr/bin
+	mkdir -p $(TARGET_DIR)/usr/local/bin
 	install -m 0755 $(BALANSIR_SRCDIR)/target/$(RUSTC_TARGET_NAME)/release/balansir-daemon \
-		$(TARGET_DIR)/usr/bin/
+		$(TARGET_DIR)/usr/local/bin/
 	install -m 0755 $(BALANSIR_SRCDIR)/target/$(RUSTC_TARGET_NAME)/release/balansir-cli \
-		$(TARGET_DIR)/usr/bin/
+		$(TARGET_DIR)/usr/local/bin/
 	install -m 0755 $(BALANSIR_SRCDIR)/target/$(RUSTC_TARGET_NAME)/release/balansir-executor \
-		$(TARGET_DIR)/usr/bin/
+		$(TARGET_DIR)/usr/local/bin/
+	# Daemon unit (ADR-030) uses ProtectSystem=strict with
+	# ReadWritePaths=/var/lib/balansir /var/log/balansir — create them.
+	mkdir -p $(TARGET_DIR)/var/lib/balansir $(TARGET_DIR)/var/log/balansir
 endef
 
 # Runtime dependencies on the target: nft (executor mechanism) and iproute2.
