@@ -19,6 +19,11 @@ done
 KERNEL=$(sed -n 's/^kernel=//p' "${BINARIES_DIR}/rpi-firmware/config.txt")
 FILES+=( "${KERNEL}" )
 
+# Debug UART cmdline (console=ttyAMA0,115200 loglevel=8): copy our file into
+# the boot partition so the RPi firmware boot picks it up.
+cp "${BOARD_DIR}/cmdline.txt" "${BINARIES_DIR}/cmdline.txt"
+FILES+=( "cmdline.txt" )
+
 # Write the genimage config, embedding the boot-file list directly.
 {
     echo "image boot.vfat {"

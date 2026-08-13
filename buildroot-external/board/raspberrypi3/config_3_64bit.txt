@@ -1,0 +1,21 @@
+# BalanSir Raspberry Pi 3B+ (64-bit) boot configuration.
+# Debug UART enabled: console on ttyAMA0 @115200 (miniuart-bt overlay).
+
+start_file=start.elf
+fixup_file=fixup.dat
+
+kernel=Image
+
+# Disable overscan
+disable_overscan=1
+
+gpu_mem_256=100
+gpu_mem_512=100
+gpu_mem_1024=100
+
+# Debug UART: expose ttyAMA0 on GPIO 14/15 for serial console (recovery/logs).
+enable_uart=1
+dtoverlay=miniuart-bt
+
+# 64-bit support
+arm_64bit=1

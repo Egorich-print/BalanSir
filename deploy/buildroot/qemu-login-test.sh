@@ -18,7 +18,7 @@ QEMU="$(command -v qemu-system-aarch64 || echo /opt/homebrew/bin/qemu-system-aar
 
 "$QEMU" -M virt -cpu cortex-a53 -m 1G -smp 2 \
     -kernel "$KERNEL" \
-    -append "root=/dev/vda rootwait console=ttyAMA0 panic=-1" \
+    -append "root=/dev/vda rootwait console=ttyAMA0 panic=-1 loglevel=8 systemd.log_level=debug" \
     -drive "file=$ROOTFS,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
     -netdev "user,id=eth0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
     -device virtio-net-device,netdev=eth0 \

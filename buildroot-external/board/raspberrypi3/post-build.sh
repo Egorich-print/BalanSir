@@ -53,3 +53,14 @@ for b in balansir-daemon balansir-cli balansir-executor; do
         ln -sf "/usr/local/bin/${b}" "${TARGET_DIR}/usr/bin/${b}"
     fi
 done
+
+# --- Persistent journal (debug): keep systemd logs across reboots -----------
+if [ -d "${TARGET_DIR}/etc/systemd" ]; then
+    mkdir -p "${TARGET_DIR}/var/log/journal"
+    # Storage=persistent makes journal survive reboot for post-mortem analysis.
+    printf '[Journal]\nStorage=persistent\n' > \
+        "${TARGET_DIR}/etc/systemd/journald.conf.d/00-boot-debug.conf" 2>/dev/null || \
+        mkdir -p "${TARGET_DIR}/etc/systemd/journald.conf.d" && \
+        printf '[Journal]\nStorage=persistent\n' > \
+            "${TARGET_DIR}/etc/systemd/journald.conf.d/00-boot-debug.conf"
+fi

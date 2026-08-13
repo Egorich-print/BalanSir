@@ -26,7 +26,7 @@ echo ">> kernel: ${KERNEL}  rootfs: ${ROOTFS}  timeout: ${TIMEOUT}s"
 "${QEMU}" \
     -M virt -cpu cortex-a53 -m 1G -smp 2 \
     -kernel "${KERNEL}" \
-    -append "root=/dev/vda rootwait console=ttyAMA0 panic=-1" \
+    -append "root=/dev/vda rootwait console=ttyAMA0 panic=-1 loglevel=8 systemd.log_level=debug" \
     -drive "file=${ROOTFS},if=none,format=raw,id=hd0" \
     -device virtio-blk-device,drive=hd0 \
     -netdev user,id=eth0 \
