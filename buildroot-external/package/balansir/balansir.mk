@@ -35,6 +35,18 @@ define BALANSIR_VENDOR_DEPS
 endef
 BALANSIR_PRE_BUILD_HOOKS = BALANSIR_VENDOR_DEPS
 
+# The workspace root is a virtual manifest, so `cargo install` fails. Install
+# the built binaries directly from the cargo target dir (cross-compiled).
+define BALANSIR_INSTALL_TARGET_CMDS
+	mkdir -p $(TARGET_DIR)/usr/bin
+	install -m 0755 $(BALANSIR_SRCDIR)/target/$(RUSTC_TARGET_NAME)/release/balansir-daemon \
+		$(TARGET_DIR)/usr/bin/
+	install -m 0755 $(BALANSIR_SRCDIR)/target/$(RUSTC_TARGET_NAME)/release/balansir-cli \
+		$(TARGET_DIR)/usr/bin/
+	install -m 0755 $(BALANSIR_SRCDIR)/target/$(RUSTC_TARGET_NAME)/release/balansir-executor \
+		$(TARGET_DIR)/usr/bin/
+endef
+
 # Runtime dependencies on the target: nft (executor mechanism) and iproute2.
 BALANSIR_DEPENDENCIES = nftables iproute2
 
