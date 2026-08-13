@@ -11,6 +11,7 @@
 # Based on Buildroot's qemu_aarch64_virt_defconfig (2026.05.x).
 
 BR2_aarch64=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
 BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
 
