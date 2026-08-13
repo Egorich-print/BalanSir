@@ -18,11 +18,9 @@ done
 
 KERNEL=$(sed -n 's/^kernel=//p' "${BINARIES_DIR}/rpi-firmware/config.txt")
 FILES+=( "${KERNEL}" )
-
-# Debug UART cmdline (console=ttyAMA0,115200 loglevel=8): copy our file into
-# the boot partition so the RPi firmware boot picks it up.
-cp "${BOARD_DIR}/cmdline.txt" "${BINARIES_DIR}/cmdline.txt"
-FILES+=( "cmdline.txt" )
+# cmdline.txt is installed by the rpi-firmware package into
+# rpi-firmware/cmdline.txt (BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE), which is
+# already in FILES via rpi-firmware/*.
 
 # Write the genimage config, embedding the boot-file list directly.
 {
