@@ -62,8 +62,21 @@ balansir-cli reload /etc/balansir/balansir.toml
 | Buildroot external tree + RPi defconfig | VERIFIED (image produced) |
 | `sdcard.img` MBR/ext4 layout | VERIFIED (`balansir-image inspect` + `file`) |
 | Image checksum manifest | VERIFIED (`balansir-image checksum/verify`) |
-| QEMU `virt` full-stack boot/network test | PENDING (build in progress) |
+| QEMU `virt` full-stack boot/network test | **VERIFIED** — systemd multiuser, eth0 DHCP, balansir-daemon + balansir-executor active, `/run/balansir` sockets (split UID), `balansir-cli status/fingerprint/desired` respond, config loaded (fingerprint `0xdaa1…`), nft v1.1.4 |
 | QEMU `raspi3b` boot of sdcard.img | ENVIRONMENT-BLOCKED (no NIC; SD power-of-2 quirk; would need kernel+firmware boot args) |
 | Real Raspberry Pi 3B+ | NOT HARDWARE VERIFIED (human step) |
 
 QEMU results are never claimed as hardware verification.
+
+## Verification commands
+
+```sh
+# Build (in the QEMU aarch64 Ubuntu VM — see docs/BUILDROOT_IMAGE.md)
+make BR2_EXTERNAL=... balansir_qemu_virt_defconfig
+make BR2_EXTERNAL=... -j4
+
+# On the macOS host
+cargo run -p balansir-image -- inspect sdcard.img
+cargo run -p balansir-image -- checksum sdcard.img
+./deploy/buildroot/qemu-login-test.sh Image rootfs.ext4   # full-stack check
+```
