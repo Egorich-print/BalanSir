@@ -1,95 +1,69 @@
-# BalanSir Buildroot image for Raspberry Pi 3B+
+# BalanSir on Raspberry Pi 3B+ — Buildroot image
 
-Status: mission in progress · Acceptance labels: see "Verification" below.
+Status: **image built and verified (Buildroot, QEMU-virt pending)** ·
+Acceptance labels below.
 
-Buildroot is Linux-only. This mission builds the image inside an **aarch64
-Ubuntu VM under QEMU on the macOS host** — fully unprivileged (no sudo on the
-host, no Docker). The result is a bootable `sdcard.img` for the Raspberry Pi
-3B+ (AArch64).
+## Artifacts (Buildroot 2026.05.1, output/images)
 
-## Architecture
+| File | Size | Note |
+|---|---|---|
+| `sdcard.img` | 320 MiB | bootable SD image (MBR: boot.vfat 64M + rootfs.ext4 256M) |
+| `Image` | 23 MiB | ARM64 kernel (rpi custom, bcm2711 defconfig) |
+| `bcm2710-rpi-3-b-plus.dtb` | 35K | device tree (3B/3B+/CM3) |
+| `rootfs.ext4` | 256 MiB | ext4 rootfs (systemd, nftables, iproute2, openssh, balansir) |
 
-```text
-macOS host (Apple silicon, QEMU installed)
-   └── QEMU -M virt (aarch64, HVF/TCG)  →  Ubuntu 24.04 arm64 cloud VM
-          └── Buildroot 2025.02.16 LTS  →  BR2_EXTERNAL=buildroot-external
-                 └── balansir_rpi3b_64_defconfig
-                        ├── Linux kernel (rpi custom, bcmrpi3 defconfig)
-                        ├── RPi firmware + DTBs (3B/3B+/CM3)
-                        ├── systemd init
-                        ├── nftables + iproute2 (BalanSir runtime deps)
-                        ├── balansir package (daemon/executor/cli, cargo)
-                        └── genimage → sdcard.img (boot.vfat 64M + rootfs.ext4 256M)
-```
+Build metadata: Buildroot 2026.05.1 · Linux 6.18-ish rpi tree (commit
+21b4101) · Bootlin aarch64 glibc toolchain · host-rustc 1.96.1 ·
+`balansir_rpi3b_64_defconfig`.
 
-## Repo layout
-
-```text
-buildroot-external/
-├── external.desc                 BR2_EXTERNAL descriptor
-├── external.mk
-├── Config.in
-├── configs/balansir_rpi3b_64_defconfig
-├── package/balansir/             Buildroot package (cargo-package)
-└── board/raspberrypi3/
-    ├── rootfs-overlay/           /etc/balansir, systemd units, tmpfiles
-    ├── post-build.sh             enable services, serial console, balansir user
-    ├── post-image.sh             genimage wrapper
-    └── genimage.cfg.in           SD card layout
-tools/balansir-image/             Rust tool: inspect / checksum / qemu
-deploy/buildroot/sync-to-vm.sh    ship repo snapshot into the build VM
-```
-
-## Build (fresh)
-
-1. **Host tooling (once):**
-   ```sh
-   brew install qemu
-   # aarch64 cloud image + NoCloud seed, boot the VM (see VM section)
-   ```
-2. **In the VM:**
-   ```sh
-   # Buildroot + deps
-   sudo apt-get install -y build-essential gcc g++ make flex bison bc \
-       libssl-dev libncurses-dev unzip cpio rsync wget file patch python3 git
-   curl -L -o buildroot.tar.xz \
-       https://buildroot.org/downloads/buildroot-2025.02.16.tar.xz
-   tar xf buildroot.tar.xz
-
-   # Repo (from host: deploy/buildroot/sync-to-vm.sh)
-   cd buildroot-2025.02.16
-   make BR2_EXTERNAL=/home/builder/buildroot-external balansir_rpi3b_64_defconfig
-   make BR2_EXTERNAL=/home/builder/buildroot-external -j4
-   ```
-3. **Artifacts:** `output/images/sdcard.img`, `Image`, DTBs, `rootfs.ext4`.
-
-## VM setup (macOS host, no admin)
+## Verify the image (on the macOS host)
 
 ```sh
-# Ubuntu arm64 cloud image + NoCloud seed (user-data with your SSH key)
-curl -L -o ubuntu-arm64.img \
-    https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img
-qemu-img create -f qcow2 -F qcow2 -b ubuntu-arm64.img ubuntu-work.qcow2 8G
-# seed.iso: hdiutil makehybrid of {user-data, meta-data} (cidata)
-qemu-system-aarch64 -M virt -cpu max -m 4G -smp 4 \
-    -bios /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
-    -drive file=ubuntu-work.qcow2,if=none,id=hd0 -device virtio-blk-device,drive=hd0 \
-    -drive file=seed.iso,media=cdrom,if=none,id=cd0 -device virtio-scsi-device,id=scsi -device scsi-cd,drive=cd0 \
-    -netdev user,id=net0,hostfwd=tcp::2222-:22 -device virtio-net-device,netdev=net0 \
-    -display none -serial file:serial.log -monitor none -daemonize -pidfile vm.pid
-ssh -p 2222 builder@localhost
+cargo run -p balansir-image -- inspect path/to/sdcard.img
+cargo run -p balansir-image -- checksum path/to/sdcard.img
+cargo run -p balansir-image -- verify path/to/sdcard.img path/to/Image
 ```
 
-## Verification labels
+## Flash to the SD card (HUMAN EXECUTION REQUIRED — needs physical access)
+
+```sh
+# On Linux (or macOS with the SD device):
+# sudo dd if=sdcard.img of=/dev/sdX bs=4M conv=fsync   # ⚠ replaces the disk!
+```
+
+On macOS the device is `/dev/diskN`; unmount first (`diskutil unmountDisk`).
+**`dd` is destructive — confirm the target device.**
+
+## First boot (factory behavior)
+
+- Networking: DHCP on `eth0`.
+- SSH: openssh server; root login — **change the root password / keys on
+  first boot** (no password is set by default).
+- BalanSir: `balansir-daemon` + `balansir-executor` auto-start (systemd,
+  ADR-030 units). `/etc/balansir/balansir.toml` is the factory policy
+  (fail-open on empty; operator should `balansir-cli reload` their config).
+- Startup recovery (P7.2.1/ADR-027): the daemon loads `BALANSIR_CONFIG` at
+  boot, before the first reconcile — a malformed file is a fatal startup
+  error, never silently empty.
+
+## Operate
+
+```sh
+balansir-cli status          # health + plan + actual
+balansir-cli fingerprint     # config fingerprint
+balansir-cli reload /etc/balansir/balansir.toml
+```
+
+## Acceptance labels
 
 | Item | Status |
 |---|---|
 | BalanSir cross-build (aarch64 musl static, host) | VERIFIED (ADR-029) |
-| Buildroot external tree configures | VERIFIED (defconfig applied) |
-| Buildroot full image build | IN PROGRESS |
-| QEMU boot of sdcard.img (raspi3b machine) | PENDING |
-| QEMU `virt` network boot test (init → network → executor → daemon → config) | PENDING |
+| Buildroot external tree + RPi defconfig | VERIFIED (image produced) |
+| `sdcard.img` MBR/ext4 layout | VERIFIED (`balansir-image inspect` + `file`) |
+| Image checksum manifest | VERIFIED (`balansir-image checksum/verify`) |
+| QEMU `virt` full-stack boot/network test | PENDING (build in progress) |
+| QEMU `raspi3b` boot of sdcard.img | ENVIRONMENT-BLOCKED (no NIC; SD power-of-2 quirk; would need kernel+firmware boot args) |
 | Real Raspberry Pi 3B+ | NOT HARDWARE VERIFIED (human step) |
 
-Every label is assigned strictly: QEMU results are never claimed as hardware
-verification.
+QEMU results are never claimed as hardware verification.
