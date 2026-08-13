@@ -1,8 +1,9 @@
 #!/bin/bash
 # BalanSir post-image: assemble the SD card image with genimage.
 #
-# Based on Buildroot's raspberrypi3-64 post-image.sh; kept here so the
-# external tree is self-contained.
+# Based on Buildroot's raspberrypi3-64 post-image.sh; the genimage config is
+# generated directly (no placeholder substitution, avoiding sed/awk newline
+# issues).
 
 set -e
 
@@ -18,9 +19,36 @@ done
 KERNEL=$(sed -n 's/^kernel=//p' "${BINARIES_DIR}/rpi-firmware/config.txt")
 FILES+=( "${KERNEL}" )
 
-BOOT_FILES=$(printf '\t\t\t"%s",\n' "${FILES[@]}")
-sed "s|#BOOT_FILES#|${BOOT_FILES}|" "${BOARD_DIR}/genimage.cfg.in" \
-    > "${GENIMAGE_CFG}"
+# Write the genimage config, embedding the boot-file list directly.
+{
+    echo "image boot.vfat {"
+    echo "	vfat {"
+    echo "		files = {"
+    for f in "${FILES[@]}"; do
+        printf '\t\t\t"%s",\n' "$f"
+    done
+    echo "		}"
+    echo "	}"
+    echo ""
+    echo "	size = 64M"
+    echo "}"
+    echo ""
+    echo "image sdcard.img {"
+    echo "	hdimage {"
+    echo "	}"
+    echo ""
+    echo "	partition boot {"
+    echo "		partition-type = 0xC"
+    echo "		bootable = \"true\""
+    echo "		image = \"boot.vfat\""
+    echo "	}"
+    echo ""
+    echo "	partition rootfs {"
+    echo "		partition-type = 0x83"
+    echo "		image = \"rootfs.ext4\""
+    echo "	}"
+    echo "}"
+} > "${GENIMAGE_CFG}"
 
 # Pass an empty rootpath: genimage only inserts the pre-built rootfs image.
 trap 'rm -rf "${ROOTPATH_TMP}"' EXIT
