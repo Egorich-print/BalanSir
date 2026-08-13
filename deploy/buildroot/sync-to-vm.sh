@@ -21,9 +21,11 @@ echo ">> creating snapshot from git tree (tracked files only)"
 git -C "$ROOT" archive --format=tar HEAD | tar -xf - -C "$TMP"
 
 echo ">> shipping to builder@localhost:${PORT}"
-COPYFILE_DISABLE=1 tar czf "$TMP/snapshot.tgz" -C "$TMP" .
-scp -q -o StrictHostKeyChecking=no -P "$PORT" "$TMP/snapshot.tgz" \
-    "builder@localhost:/home/builder/"
+# Create the archive OUTSIDE the snapshot dir (avoid adding the archive to
+# itself), then copy it into the VM's repo dir.
+(cd "$TMP" && COPYFILE_DISABLE=1 tar czf "$TMP.tgz" .)
+scp -q -o StrictHostKeyChecking=no -P "$PORT" "$TMP.tgz" \
+    "builder@localhost:/home/builder/balansir/snapshot.tgz"
 
 ssh -o StrictHostKeyChecking=no -p "$PORT" builder@localhost '
     set -eu
@@ -34,4 +36,5 @@ ssh -o StrictHostKeyChecking=no -p "$PORT" builder@localhost '
     echo ">> synced: $(ls buildroot-external/configs/)"
 '
 
+rm -f "$TMP.tgz"
 echo ">> done"
