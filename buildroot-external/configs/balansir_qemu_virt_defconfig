@@ -12,8 +12,11 @@
 
 BR2_aarch64=y
 BR2_TOOLCHAIN_EXTERNAL=y
-BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
-BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_AARCH64_GLIBC_STABLE=y
+# ARM (not Bootlin): Bootlin toolchains require an x86_64 host, but the build
+# VM is aarch64. The ARM aarch64 toolchain works on aarch64 hosts (matches
+# how Buildroot's raspberrypi3_64 defconfig resolves on this host).
+BR2_TOOLCHAIN_EXTERNAL_ARM_AARCH64=y
+BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
 BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
 

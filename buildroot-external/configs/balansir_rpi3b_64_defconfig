@@ -9,13 +9,14 @@
 # Build:  make BR2_EXTERNAL=buildroot-external balansir_rpi3b_64_defconfig
 #         make
 
-# Architecture / toolchain (aarch64; Bootlin external glibc toolchain — no
-# host gcc build, faster and reproducible)
+# Architecture / toolchain (aarch64). ARM external glibc toolchain: Bootlin
+# toolchains require an x86_64 host, but the build VM is aarch64, so the ARM
+# aarch64 toolchain (download) is used — faster than building a toolchain.
 BR2_aarch64=y
 BR2_ARM_FPU_VFPV4=y
 BR2_TOOLCHAIN_EXTERNAL=y
-BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
-BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_AARCH64_GLIBC_STABLE=y
+BR2_TOOLCHAIN_EXTERNAL_ARM_AARCH64=y
+BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
 
 # Kernel (Raspberry Pi custom tree, bcm2711 defconfig, 3B/3B+/CM3 DTBs)
 BR2_LINUX_KERNEL=y
