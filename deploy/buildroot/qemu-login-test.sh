@@ -22,7 +22,7 @@ mkfifo "$IN"
     -append "root=/dev/vda rootwait console=ttyAMA0 panic=-1" \
     -drive "file=$ROOTFS,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
     -netdev user,id=eth0 -device virtio-net-device,netdev=eth0 \
-    -nographic -no-reboot -serial stdio >"$LOG" 2>&1 <"$IN" &
+    -display none -serial stdio -no-reboot >"$LOG" 2>&1 <"$IN" &
 QPID=$!
 exec 9>"$IN"   # keep FIFO writer open
 

@@ -28,6 +28,10 @@ elif [ -d "${TARGET_DIR}/etc/systemd" ]; then
     mkdir -p "${TARGET_DIR}/etc/systemd/system/getty.target.wants"
     ln -sf /lib/systemd/system/getty@.service \
         "${TARGET_DIR}/etc/systemd/system/getty.target.wants/getty@tty1.service"
+    # Serial getty on ttyAMA0 (QEMU virt console / RPi UART). The drop-in in
+    # the rootfs overlay autologs root for the dev/QEMU image.
+    ln -sf /lib/systemd/system/serial-getty@.service \
+        "${TARGET_DIR}/etc/systemd/system/getty.target.wants/serial-getty@ttyAMA0.service"
 fi
 
 # --- balansir unprivileged daemon user --------------------------------------
