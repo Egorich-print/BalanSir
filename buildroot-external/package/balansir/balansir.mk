@@ -30,7 +30,7 @@ BALANSIR_CARGO_BUILD_OPTS = --workspace
 # (offline, --locked) build, and point cargo at the vendor dir via .cargo/config.
 define BALANSIR_VENDOR_DEPS
 	cd $(BALANSIR_SRCDIR) && \
-	cargo vendor --locked --manifest-path Cargo.toml VENDOR && \
+	$(HOST_DIR)/bin/cargo vendor --locked --manifest-path Cargo.toml VENDOR && \
 	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "VENDOR"\n' > .cargo/config
 endef
 BALANSIR_PRE_BUILD_HOOKS = BALANSIR_VENDOR_DEPS
