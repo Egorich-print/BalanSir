@@ -6,7 +6,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 pub const MAX_PAYLOAD_SIZE: usize = 65536;
-pub const DEFAULT_ALLOWED_UIDS: &[u32] = &[0]; // Only root by default
+// Default: root (operator CLI / privileged diagnostics) and UID 1500 (the
+// unprivileged daemon account, ADR-030). Both daemon and executor accept
+// these peers out of the box; an operator can override via BALANSIR_ALLOWED_UIDS.
+pub const DEFAULT_ALLOWED_UIDS: &[u32] = &[0, 1500];
 
 /// Allowed peer UIDs, from $BALANSIR_ALLOWED_UIDS (comma-separated) or default.
 pub fn allowed_uids() -> Vec<u32> {

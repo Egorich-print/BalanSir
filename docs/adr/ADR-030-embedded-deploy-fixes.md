@@ -31,7 +31,11 @@ every reconcile fails, silently, on any real deployment.
 
 **Fix:** both units set `BALANSIR_ALLOWED_UIDS=0,1500` (root for operator CLI +
 the daemon's fixed UID). The daemon's UID is pinned to 1500 via `useradd --uid
-1500` in the install path and via the Buildroot package user table.
+1500` in the install path and via the Buildroot package user table. The
+**default** allowlist is also widened from `[0]` to `[0, 1500]`: peer auth is
+mutual, so the CLI (running as root) must accept the daemon's UID 1500 — a
+root-only default made every `balansir-cli status` fail with `Unauthorized`.
+Both daemon and executor now accept root + UID 1500 out of the box.
 
 ### 3. `User=balansir` with no user created
 The daemon unit ran as `balansir`, but no install path created the user.
