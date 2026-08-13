@@ -1,0 +1,13 @@
+################################################################################
+#
+# fastfetch
+#
+################################################################################
+
+FASTFETCH_VERSION = 2.67.0
+FASTFETCH_SITE = $(call github,fastfetch-cli,fastfetch,$(FASTFETCH_VERSION))
+FASTFETCH_LICENSE = MIT
+FASTFETCH_LICENSE_FILES = LICENSE
+FASTFETCH_DEPENDENCIES = host-cmake
+
+$(eval $(cmake-package))
