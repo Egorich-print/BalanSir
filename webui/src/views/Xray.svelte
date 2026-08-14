@@ -103,7 +103,7 @@
       <thead>
         <tr>
           <th>Endpoint</th><th>Server</th><th>Transport</th><th>TLS</th>
-          <th>Priority</th><th>Health</th><th>Probe failures</th><th>Latency</th><th></th>
+          <th>Priority</th><th>Health</th><th>Probe failures</th><th>Latency</th><th>Why</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -126,6 +126,19 @@
             </td>
             <td>{p.failure_count}</td>
             <td>{p.latency_ms != null ? `${p.latency_ms} ms` : '—'}</td>
+            <td>
+              {#if p.path && p.path.reasons && p.path.reasons.length && (p.health === 'Degraded' || p.health === 'Unhealthy')}
+                <ul class="why">
+                  {#each p.path.reasons as r}
+                    <li>{r}</li>
+                  {/each}
+                </ul>
+              {:else if p.path && p.path.reasons && p.path.reasons.length && p.health === 'Healthy'}
+                <span class="muted">{p.path.reasons[0]}</span>
+              {:else}
+                <span class="muted">—</span>
+              {/if}
+            </td>
             <td>
               {#if p.enabled}
                 <button class="btn small" on:click={() => selectProfile(p.name)} disabled={busy || p.active}>
@@ -171,4 +184,5 @@
     border: 1px solid var(--border);
   }
   tr.inactive td { opacity: 0.55; }
+  ul.why { margin: 0; padding-left: 1rem; font-size: 0.8rem; color: var(--warn); }
 </style>

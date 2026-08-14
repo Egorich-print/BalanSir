@@ -24,9 +24,22 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Notify, RwLock};
 use tracing::{info, warn};
 
+use balansir_common::path_health::{PathHealth, PathHealthConfig, PathSample, PathState};
 use balansir_common::subsystems::{
     SharedSubsystemSnapshot, SubsystemEvent, XrayProfileView, XraySnapshot,
 };
+
+/// Build the path-health tracker config for Xray endpoints. `enter_degraded`
+/// is the existing `failover_threshold` (consecutive bad probes), so failover
+/// timing is unchanged; hysteresis and cooldown add anti-flapping on top.
+fn path_config_for(cfg: &XrayToml) -> PathHealthConfig {
+    PathHealthConfig {
+        enter_degraded: cfg.failover_threshold.unwrap_or(3).max(1),
+        exit_degraded: 2,
+        cooldown: std::time::Duration::from_secs(10),
+        ..PathHealthConfig::default()
+    }
+}
 
 use crate::driver::ComponentDriver;
 use crate::xray::{XrayConfig, XrayDriver, XrayTls, XrayTransport};
@@ -172,8 +185,10 @@ pub struct XrayManager {
     pinned: Arc<RwLock<Option<String>>>,
     wake: Arc<Notify>,
     active: RwLock<Option<usize>>,
-    failure_counts: RwLock<Vec<u32>>,
-    health: RwLock<Vec<String>>,
+    /// Unified hysteresis-aware health tracker per endpoint (mission §9).
+    /// This is the source of truth for `health` / `failure_count` projections
+    /// and for failover: a tracker reaching `Failing` triggers the switch.
+    paths: RwLock<Vec<PathHealth>>,
     /// Best-effort connect latency per endpoint (ms), None until probed.
     latency: RwLock<Vec<Option<u64>>>,
     last_error: RwLock<Option<String>>,
@@ -204,8 +219,13 @@ impl XrayManager {
             pinned: Arc::new(RwLock::new(None)),
             wake: Arc::new(Notify::new()),
             active: RwLock::new(None),
-            failure_counts: RwLock::new(vec![0; n]),
-            health: RwLock::new(vec!["Unknown".to_string(); n]),
+            paths: RwLock::new(
+                xray_cfg
+                    .profiles
+                    .iter()
+                    .map(|_| PathHealth::new(path_config_for(xray_cfg)))
+                    .collect(),
+            ),
             latency: RwLock::new(vec![None; n]),
             last_error: RwLock::new(None),
             switch_reason: RwLock::new(None),
@@ -317,8 +337,7 @@ impl XrayManager {
         let prev_name = self.active_name().await;
         self.stop_driver().await;
         self.start_endpoint(idx).await?;
-        self.failure_counts.write().await[idx] = 0;
-        self.health.write().await[idx] = "Healthy".to_string();
+        self.paths.write().await[idx].reset();
         *self.switch_reason.write().await = Some(reason.clone());
         *self.last_switch_ms.write().await = now_ms();
         let to = self.endpoints[idx].name.clone();
@@ -335,8 +354,7 @@ impl XrayManager {
         let prev_name = self.active_name().await;
         self.stop_driver().await;
         self.start_endpoint(idx).await?;
-        self.failure_counts.write().await[idx] = 0;
-        self.health.write().await[idx] = "Healthy".to_string();
+        self.paths.write().await[idx].reset();
         *self.switch_reason.write().await = Some(reason.clone());
         *self.last_switch_ms.write().await = now_ms();
         let to = self.endpoints[idx].name.clone();
@@ -349,8 +367,10 @@ impl XrayManager {
         Ok(())
     }
 
-    /// Health-check the running endpoint; failover when it degrades past the
-    /// threshold. Returns the name that ended up active.
+    /// Health-check the running endpoint; failover when the shared path-health
+    /// tracker reaches `Failing` (hysteresis + anti-flapping cooldown). The
+    /// failover reason comes from the tracker so it is always explainable.
+    /// Returns the name that ended up active.
     async fn health_and_failover(&self) -> Option<String> {
         let active = *self.active.read().await;
         let idx = match active {
@@ -358,35 +378,42 @@ impl XrayManager {
             None => return None,
         };
         let driver = self.driver.read().await;
-        let health = match &*driver {
-            Some(d) => format!("{:?}", d.health_check().await),
+        let status = match &*driver {
+            Some(d) => d.health_check().await,
             None => return None,
         };
         drop(driver);
 
-        let mut health_vec = self.health.write().await;
-        if health_vec[idx] != health {
+        let sample = match status {
+            balansir_common::types::HealthStatus::Healthy => PathSample::healthy(),
+            _ => PathSample::failure(),
+        };
+
+        let mut paths = self.paths.write().await;
+        let label_before = paths[idx].state().label().to_string();
+        let transition = paths[idx].observe(sample);
+        let view = paths[idx].view();
+        if paths[idx].state().label() != label_before {
             let name = self.endpoints[idx].name.clone();
+            let health = view.state.clone();
             let _ = self.events.send(SubsystemEvent::XrayHealthChanged {
                 profile: name,
-                health: health.clone(),
+                health,
             });
         }
-        health_vec[idx] = health.clone();
-        drop(health_vec);
+        let failing = paths[idx].state() == PathState::Failing;
+        let reasons = view.reasons.join("; ");
+        drop(paths);
 
-        let healthy = health == "Healthy";
-        let mut failures = self.failure_counts.write().await;
-        if healthy {
-            failures[idx] = 0;
+        if transition.is_some() && !failing {
             return Some(self.endpoints[idx].name.clone());
         }
-        failures[idx] += 1;
-        let threshold = self.failover_threshold;
-        if failures[idx] < threshold {
+
+        // Only a *sustained* Failing state (already hysteresis-smoothed)
+        // triggers failover.
+        if !failing {
             return Some(self.endpoints[idx].name.clone());
         }
-        drop(failures);
 
         // Endpoint is failing: fail over to the next enabled endpoint.
         let enabled = self.enabled_indices();
@@ -398,10 +425,11 @@ impl XrayManager {
         match next {
             Some(next) if next != idx => {
                 let name = self.endpoints[idx].name.clone();
-                let reason = format!(
-                    "endpoint '{name}' failed {} consecutive health probes",
-                    self.failover_threshold
-                );
+                let reason = if reasons.is_empty() {
+                    format!("endpoint '{name}' failed health probes")
+                } else {
+                    format!("endpoint '{name}' failing: {reasons}")
+                };
                 let to = self.endpoints[next].name.clone();
                 if self.switch_to_index(next, reason).await.is_err() {
                     return Some(name);
@@ -414,8 +442,13 @@ impl XrayManager {
 
     async fn observe_snapshot(&self) -> XraySnapshot {
         let active = *self.active.read().await;
-        let health = self.health.read().await.clone();
-        let failures = self.failure_counts.read().await.clone();
+        let path_views = self
+            .paths
+            .read()
+            .await
+            .iter()
+            .map(|p| p.view())
+            .collect::<Vec<_>>();
         let latency = self.latency.read().await.clone();
         let paused = self.paused.load(Ordering::Relaxed);
         let pinned = self.pinned.read().await.clone();
@@ -427,18 +460,31 @@ impl XrayManager {
             .endpoints
             .iter()
             .enumerate()
-            .map(|(i, e)| XrayProfileView {
-                name: e.name.clone(),
-                server: e.server.clone(),
-                port: e.port,
-                transport: format!("{:?}", e.transport),
-                tls: e.tls.is_some(),
-                priority: e.priority,
-                enabled: e.enabled,
-                active: active == Some(i),
-                health: health.get(i).cloned().unwrap_or_else(|| "Unknown".into()),
-                failure_count: failures.get(i).copied().unwrap_or(0),
-                latency_ms: latency.get(i).copied().flatten(),
+            .map(|(i, e)| {
+                // Flatten the unified path-health view to the WebUI-compatible
+                // projection. "failing" is the shared model's terminal state,
+                // exposed as "Unhealthy" for UI/API compatibility.
+                let path = path_views.get(i).cloned().unwrap_or_default();
+                let health = match path.state.as_str() {
+                    "healthy" => "Healthy".to_string(),
+                    "degraded" => "Degraded".to_string(),
+                    "failing" => "Unhealthy".to_string(),
+                    _ => "Unknown".to_string(),
+                };
+                XrayProfileView {
+                    name: e.name.clone(),
+                    server: e.server.clone(),
+                    port: e.port,
+                    transport: format!("{:?}", e.transport),
+                    tls: e.tls.is_some(),
+                    priority: e.priority,
+                    enabled: e.enabled,
+                    active: active == Some(i),
+                    health,
+                    failure_count: path.consecutive_failures,
+                    latency_ms: latency.get(i).copied().flatten(),
+                    path,
+                }
             })
             .collect();
 
@@ -641,5 +687,40 @@ priority = 20
         let snap = manager.observe_snapshot().await;
         assert_eq!(snap.profiles[0].latency_ms, Some(42));
         assert_eq!(snap.profiles[1].latency_ms, None);
+    }
+
+    #[tokio::test]
+    async fn snapshot_flattens_unified_path_health() {
+        let cfg = sample_toml(); // failover_threshold = 2
+        let manager = XrayManager::from_toml(
+            &cfg,
+            SharedSubsystemSnapshot::new(),
+            broadcast::channel(16).0,
+        )
+        .expect("valid");
+
+        // Two consecutive failed probes push endpoint 0 into Failing.
+        {
+            let mut paths = manager.paths.write().await;
+            assert!(paths[0].observe(PathSample::failure()).is_none());
+            let t = paths[0].observe(PathSample::failure());
+            assert_eq!(t, Some(balansir_common::path_health::PathTransition::EnteredFailing));
+        }
+
+        let snap = manager.observe_snapshot().await;
+        assert_eq!(snap.profiles[0].health, "Unhealthy", "model Failing maps to UI Unhealthy");
+        assert_eq!(snap.profiles[0].failure_count, 2);
+        assert_eq!(snap.profiles[0].path.state, "failing");
+        assert!(
+            snap.profiles[0]
+                .path
+                .reasons
+                .iter()
+                .any(|r| r.contains("probe failures")),
+            "reasons must explain the failing state: {:?}",
+            snap.profiles[0].path.reasons
+        );
+        assert_eq!(snap.profiles[1].health, "Unknown", "untouched endpoint stays Unknown");
+        assert_eq!(snap.profiles[1].failure_count, 0);
     }
 }

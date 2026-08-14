@@ -168,9 +168,12 @@ export function xrayStatus(snap) {
   }
   const active = xray.profiles.find((p) => p.name === xray.active);
   if (active && (active.health === 'Unhealthy' || active.health === 'Degraded')) {
+    const why = (active.path && active.path.reasons || [])
+      .map((r) => r.toLowerCase())
+      .join(', ');
     reasons.push(
-      `Active endpoint '${active.name}' is ${active.health.toLowerCase()} ` +
-        `(${active.failure_count} failed probe(s))`,
+      `Active endpoint '${active.name}' is ${active.health.toLowerCase()}` +
+        (why ? ` — ${why}` : ` (${active.failure_count} failed probe(s))`),
     );
     return { status: DEGRADED, title: 'Degraded', reasons };
   }

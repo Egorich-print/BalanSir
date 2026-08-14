@@ -123,6 +123,11 @@ pub struct XrayProfileView {
     /// unreachable or not yet probed. Observability only — failover uses the
     /// local inbound liveness probe.
     pub latency_ms: Option<u64>,
+    /// Unified path-health view (mission §9): hysteresis-smoothed state and
+    /// the reasons behind the current state. `health`/`failure_count` above
+    /// are the flattened WebUI-compatible projections of this.
+    #[serde(default)]
+    pub path: crate::path_health::PathHealthView,
 }
 
 /// Xray component view: endpoint profiles, the active transport endpoint,
