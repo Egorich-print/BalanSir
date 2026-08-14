@@ -103,7 +103,7 @@
       <thead>
         <tr>
           <th>Endpoint</th><th>Server</th><th>Transport</th><th>TLS</th>
-          <th>Priority</th><th>Health</th><th>Probe failures</th><th></th>
+          <th>Priority</th><th>Health</th><th>Probe failures</th><th>Latency</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -125,6 +125,7 @@
               >{p.health}</span>
             </td>
             <td>{p.failure_count}</td>
+            <td>{p.latency_ms != null ? `${p.latency_ms} ms` : '—'}</td>
             <td>
               {#if p.enabled}
                 <button class="btn small" on:click={() => selectProfile(p.name)} disabled={busy || p.active}>

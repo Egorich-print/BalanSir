@@ -174,6 +174,8 @@ pub struct XrayManager {
     active: RwLock<Option<usize>>,
     failure_counts: RwLock<Vec<u32>>,
     health: RwLock<Vec<String>>,
+    /// Best-effort connect latency per endpoint (ms), None until probed.
+    latency: RwLock<Vec<Option<u64>>>,
     last_error: RwLock<Option<String>>,
     switch_reason: RwLock<Option<String>>,
     last_switch_ms: RwLock<i64>,
@@ -204,6 +206,7 @@ impl XrayManager {
             active: RwLock::new(None),
             failure_counts: RwLock::new(vec![0; n]),
             health: RwLock::new(vec!["Unknown".to_string(); n]),
+            latency: RwLock::new(vec![None; n]),
             last_error: RwLock::new(None),
             switch_reason: RwLock::new(None),
             last_switch_ms: RwLock::new(0),
@@ -229,6 +232,21 @@ impl XrayManager {
             .collect();
         order.sort_by_key(|&i| (self.endpoints[i].priority, i));
         order
+    }
+
+    /// Best-effort TCP connect latency to each enabled endpoint's server.
+    /// Observability only: failover is driven by the local inbound liveness
+    /// probe, so an endpoint outage shows as `latency_ms = None` without
+    /// influencing selection. Timeouts are short to keep the loop cheap.
+    async fn probe_latencies(&self) {
+        let mut lat = self.latency.write().await;
+        for (i, e) in self.endpoints.iter().enumerate() {
+            if !e.enabled {
+                continue;
+            }
+            lat[i] =
+                measure_latency_ms(&e.server, e.port, std::time::Duration::from_secs(3)).await;
+        }
     }
 
     fn preferred(&self) -> Option<usize> {
@@ -398,6 +416,7 @@ impl XrayManager {
         let active = *self.active.read().await;
         let health = self.health.read().await.clone();
         let failures = self.failure_counts.read().await.clone();
+        let latency = self.latency.read().await.clone();
         let paused = self.paused.load(Ordering::Relaxed);
         let pinned = self.pinned.read().await.clone();
         let last_error = self.last_error.read().await.clone();
@@ -419,6 +438,7 @@ impl XrayManager {
                 active: active == Some(i),
                 health: health.get(i).cloned().unwrap_or_else(|| "Unknown".into()),
                 failure_count: failures.get(i).copied().unwrap_or(0),
+                latency_ms: latency.get(i).copied().flatten(),
             })
             .collect();
 
@@ -468,6 +488,10 @@ impl XrayManager {
                     self.health_and_failover().await;
                 }
             }
+            // Latency observability is independent of driver state (still useful
+            // when paused so the operator can compare endpoint paths).
+            self.probe_latencies().await;
+
             let snapshot = self.observe_snapshot().await;
             self.snapshot
                 .update(move |s| {
@@ -483,6 +507,17 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Best-effort TCP connect latency to `server:port` in milliseconds. Returns
+/// `None` on failure or timeout (host unreachable, DNS failure, firewall).
+async fn measure_latency_ms(server: &str, port: u16, timeout: std::time::Duration) -> Option<u64> {
+    let addr = format!("{server}:{port}");
+    let start = std::time::Instant::now();
+    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await {
+        Ok(Ok(_stream)) => Some(start.elapsed().as_millis() as u64),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -577,5 +612,34 @@ priority = 20
         assert_eq!(snap.socks_port, 11080);
         assert_eq!(snap.profiles[0].transport, "Tcp");
         assert!(snap.profiles[1].tls);
+    }
+
+    #[tokio::test]
+    async fn latency_probe_measures_reachable_and_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+
+        let measured = measure_latency_ms("127.0.0.1", port, std::time::Duration::from_secs(2)).await;
+        assert!(measured.is_some(), "reachable endpoint must yield latency");
+
+        // A port with no listener yields None (unreachable), not a panic.
+        let unreachable = measure_latency_ms("127.0.0.1", 1, std::time::Duration::from_millis(200)).await;
+        assert!(unreachable.is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_exposes_latency_per_profile() {
+        let cfg = sample_toml();
+        let manager = XrayManager::from_toml(
+            &cfg,
+            SharedSubsystemSnapshot::new(),
+            broadcast::channel(16).0,
+        )
+        .expect("valid");
+        *manager.latency.write().await = vec![Some(42), None];
+        let snap = manager.observe_snapshot().await;
+        assert_eq!(snap.profiles[0].latency_ms, Some(42));
+        assert_eq!(snap.profiles[1].latency_ms, None);
     }
 }

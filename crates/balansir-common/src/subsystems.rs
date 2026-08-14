@@ -119,6 +119,10 @@ pub struct XrayProfileView {
     pub health: String,
     /// Consecutive failed health probes (drives failover).
     pub failure_count: u32,
+    /// Best-effort TCP connect latency to the endpoint server (ms). None when
+    /// unreachable or not yet probed. Observability only — failover uses the
+    /// local inbound liveness probe.
+    pub latency_ms: Option<u64>,
 }
 
 /// Xray component view: endpoint profiles, the active transport endpoint,
