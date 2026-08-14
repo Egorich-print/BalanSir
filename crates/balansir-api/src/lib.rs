@@ -208,6 +208,24 @@ mod tests {
     use super::*;
     use axum::http::StatusCode;
 
+    /// GET with retries: the in-test server is spawned right before the first
+    /// request and under heavy parallel CI load the connect can transiently
+    /// fail; retry instead of panicking on a spurious network error.
+    async fn retry_get(url: &str) -> reqwest::Response {
+        let mut last = None;
+        for attempt in 0..5 {
+            match reqwest::get(url).await {
+                Ok(resp) => return resp,
+                Err(e) => {
+                    last = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt + 1)))
+                        .await;
+                }
+            }
+        }
+        panic!("GET {url} failed after retries: {last:?}");
+    }
+
     #[tokio::test]
     async fn test_index() {
         let state = Arc::new(ApiState::new(Arc::new(
@@ -222,7 +240,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+        let resp = retry_get(&format!("http://{}/", addr)).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let body: serde_json::Value = resp.json().await.unwrap();
