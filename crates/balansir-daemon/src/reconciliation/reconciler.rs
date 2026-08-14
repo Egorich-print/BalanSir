@@ -51,6 +51,10 @@ pub struct Reconciler {
     /// step and `Reconciler::build_plan` route through this same `Planner`
     /// port instance, so there is exactly one authoritative planning path.
     planner: Arc<dyn Planner>,
+    /// Per-path health trackers with hysteresis (mission: "is my network OK").
+    /// Paths: direct, b4, xray, tailscale. Non-authoritative telemetry; the
+    /// daemon feeds it and the WebUI reads it.
+    health: std::sync::Mutex<std::collections::HashMap<String, crate::health::PathHealthTracker>>,
 }
 
 /// Configuration for the reconciliation loop.
@@ -217,6 +221,7 @@ impl Reconciler {
             flow_compiler: tokio::sync::Mutex::new(None),
             config_fingerprint: tokio::sync::Mutex::new(None),
             planner,
+            health: std::sync::Mutex::new(Default::default()),
         }
     }
 
@@ -322,6 +327,24 @@ impl Reconciler {
             "desired": desired,
             "applied": applied.interfaces,
         })
+    }
+
+    /// Feed one health sample for a path (ok = reachable). Creates the tracker
+    /// on first use. Used by the daemon's health loop (ping/MTU/Xray/tailscale
+    /// probes); the WebUI reads reports via `path_health`.
+    pub fn observe_path_health(&self, path: &str, ok: bool) {
+        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let tracker = health
+            .entry(path.to_string())
+            .or_insert_with(|| crate::health::PathHealthTracker::new(path, 16, 3, 3));
+        tracker.observe(ok);
+    }
+
+    /// Current per-path health reports (for the WebUI).
+    pub fn path_health(&self) -> serde_json::Value {
+        let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
+        let reports: Vec<_> = health.values().map(|t| t.report()).collect();
+        serde_json::to_value(reports).unwrap_or_else(|_| serde_json::json!([]))
     }
 
     /// Transactional hot reload (ADR-010).

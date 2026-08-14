@@ -1,129 +1,223 @@
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+//! Unified path-health model with hysteresis (mission: "is my network OK,
+//! why not, what is BalanSir doing").
+//!
+//! Each tracked path (Direct, B4, Xray, Tailscale) feeds binary samples —
+//! "reachable / healthy" or not — into a `PathHealthTracker`. The tracker
+//! applies hysteresis so short blips don't flap the UI state: N consecutive
+//! unhealthy samples degrade the path, M consecutive healthy samples recover
+//! it. The daemon exposes one human-facing state per path plus the raw sample
+//! series, so the WebUI can say *why*.
 
-use balansir_common::CircuitState;
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Circuit breaker for health monitoring
-pub struct CircuitBreaker {
-    inner: Mutex<CircuitBreakerInner>,
-    config: CircuitBreakerConfig,
+/// Stable, human-facing health state of a single path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PathState {
+    /// Healthy: last M samples all good.
+    Healthy,
+    /// Degrading: this sample was bad but we haven't hit the degrade threshold.
+    Degrading,
+    /// Degraded: N consecutive bad samples; something is wrong.
+    Degraded,
+    /// Recovering: a good sample after degradation but not yet cleared.
+    Recovering,
+    /// Not enabled / no data.
+    Unknown,
 }
 
-struct CircuitBreakerInner {
-    state: CircuitState,
-    failure_count: u32,
-    last_failure: Option<Instant>,
-    last_success: Option<Instant>,
+impl PathState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PathState::Healthy => "healthy",
+            PathState::Degrading => "degrading",
+            PathState::Degraded => "degraded",
+            PathState::Recovering => "recovering",
+            PathState::Unknown => "unknown",
+        }
+    }
 }
 
-/// Configuration for circuit breaker
-#[derive(Debug, Clone)]
-pub struct CircuitBreakerConfig {
-    pub failure_threshold: u32,
-    pub recovery_timeout: Duration,
-    pub max_retries: u32,
+/// Per-path live health report exposed to the WebUI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathHealth {
+    pub path: String,
+    pub state: PathState,
+    /// Why: short free-text reason for the current state (e.g. "3/3 probes
+    /// timed out", "mtu mismatch", "process not running").
+    pub reason: String,
+    /// Recent binary samples, oldest first.
+    pub samples: Vec<bool>,
+    /// Sample history capacity.
+    pub window: usize,
+    pub last_change_ts: u64,
 }
 
-impl Default for CircuitBreakerConfig {
-    fn default() -> Self {
+/// Tracks one path's health with hysteresis.
+pub struct PathHealthTracker {
+    path: String,
+    degrade_after: usize,
+    recover_after: usize,
+    samples: VecDeque<bool>,
+    state: PathState,
+    consecutive_bad: usize,
+    consecutive_good: usize,
+    last_change_ts: u64,
+}
+
+impl PathHealthTracker {
+    pub fn new(path: &str, window: usize, degrade_after: usize, recover_after: usize) -> Self {
         Self {
-            failure_threshold: 3,
-            recovery_timeout: Duration::from_secs(30),
-            max_retries: 2,
-        }
-    }
-}
-
-impl CircuitBreaker {
-    /// Create a new circuit breaker with the given configuration
-    pub fn new(config: CircuitBreakerConfig) -> Self {
-        Self {
-            inner: Mutex::new(CircuitBreakerInner {
-                state: CircuitState::Closed,
-                failure_count: 0,
-                last_failure: None,
-                last_success: None,
-            }),
-            config,
+            path: path.to_string(),
+            degrade_after: degrade_after.max(1),
+            recover_after: recover_after.max(1),
+            samples: VecDeque::with_capacity(window),
+            state: PathState::Unknown,
+            consecutive_bad: 0,
+            consecutive_good: 0,
+            last_change_ts: now_secs(),
         }
     }
 
-    /// Get current circuit state
-    pub fn state(&self) -> CircuitState {
-        self.inner
-            .lock()
-            .map(|inner| inner.state)
-            .unwrap_or(CircuitState::Open)
-    }
-
-    /// Record a successful operation
-    pub fn record_success(&self) {
-        let Ok(mut inner) = self.inner.lock() else {
-            tracing::error!("Failed to acquire circuit breaker lock");
-            return;
-        };
-
-        inner.failure_count = 0;
-        inner.last_success = Some(Instant::now());
-
-        if inner.state == CircuitState::HalfOpen {
-            inner.state = CircuitState::Closed;
-            tracing::info!("Circuit breaker closed (recovered)");
+    /// Record one health sample (`ok` = reachable) and advance the state
+    /// machine with hysteresis. Returns the new state.
+    pub fn observe(&mut self, ok: bool) -> PathState {
+        if self.samples.len() == self.samples.capacity() {
+            self.samples.pop_front();
         }
-    }
+        self.samples.push_back(ok);
 
-    /// Record a failed operation
-    pub fn record_failure(&self) {
-        let Ok(mut inner) = self.inner.lock() else {
-            tracing::error!("Failed to acquire circuit breaker lock");
-            return;
-        };
-
-        inner.failure_count += 1;
-        inner.last_failure = Some(Instant::now());
-
-        if inner.failure_count >= self.config.failure_threshold {
-            if inner.state != CircuitState::Open {
-                tracing::warn!(failures = inner.failure_count, "Circuit breaker opened");
-            }
-            inner.state = CircuitState::Open;
-        }
-    }
-
-    /// Check if a request should be allowed
-    pub fn allow_request(&self) -> bool {
-        let Ok(mut inner) = self.inner.lock() else {
-            return false;
-        };
-
-        match inner.state {
-            CircuitState::Closed => true,
-            CircuitState::Open => {
-                if let Some(last_failure) = inner.last_failure {
-                    if last_failure.elapsed() >= self.config.recovery_timeout {
-                        inner.state = CircuitState::HalfOpen;
-                        tracing::info!("Circuit breaker half-open (probing)");
-                        return true;
+        match self.state {
+            PathState::Unknown | PathState::Recovering => {
+                if ok {
+                    self.consecutive_good += 1;
+                    self.consecutive_bad = 0;
+                    if self.consecutive_good >= self.recover_after {
+                        self.transition(PathState::Healthy);
+                    }
+                } else {
+                    self.consecutive_good = 0;
+                    self.consecutive_bad += 1;
+                    if self.state == PathState::Unknown
+                        && self.consecutive_bad >= self.degrade_after
+                    {
+                        self.transition(PathState::Degraded);
+                    } else if self.state == PathState::Unknown {
+                        self.transition(PathState::Degrading);
+                    } else {
+                        // Recovering + bad sample: snap back to degraded.
+                        self.transition(PathState::Degraded);
                     }
                 }
-                false
             }
-            CircuitState::HalfOpen => true,
+            PathState::Healthy => {
+                if ok {
+                    self.consecutive_good += 1;
+                    self.consecutive_bad = 0;
+                } else {
+                    self.consecutive_good = 0;
+                    self.consecutive_bad += 1;
+                    if self.consecutive_bad >= self.degrade_after {
+                        self.transition(PathState::Degraded);
+                    } else {
+                        self.transition(PathState::Degrading);
+                    }
+                }
+            }
+            PathState::Degrading => {
+                if ok {
+                    self.consecutive_good += 1;
+                    self.consecutive_bad = 0;
+                    if self.consecutive_good >= self.recover_after {
+                        self.transition(PathState::Healthy);
+                    } else {
+                        self.transition(PathState::Recovering);
+                    }
+                } else {
+                    self.consecutive_good = 0;
+                    self.consecutive_bad += 1;
+                    if self.consecutive_bad >= self.degrade_after {
+                        self.transition(PathState::Degraded);
+                    }
+                }
+            }
+            PathState::Degraded => {
+                if ok {
+                    self.consecutive_bad = 0;
+                    self.consecutive_good += 1;
+                    self.transition(PathState::Recovering);
+                } else {
+                    self.consecutive_good = 0;
+                    self.consecutive_bad += 1;
+                }
+            }
+        }
+        self.state
+    }
+
+    fn transition(&mut self, next: PathState) {
+        if self.state != next {
+            self.state = next;
+            self.last_change_ts = now_secs();
         }
     }
 
-    /// Reset circuit breaker to closed state
-    pub fn reset(&self) {
-        let Ok(mut inner) = self.inner.lock() else {
-            tracing::error!("Failed to acquire circuit breaker lock");
-            return;
-        };
-
-        inner.state = CircuitState::Closed;
-        inner.failure_count = 0;
-        inner.last_failure = None;
-        tracing::info!("Circuit breaker reset");
+    /// Current state (without recording a sample).
+    pub fn state(&self) -> PathState {
+        self.state
     }
+
+    /// Report for the WebUI.
+    pub fn report(&self) -> PathHealth {
+        let reason = match self.state {
+            PathState::Healthy => "probes passing".to_string(),
+            PathState::Degrading | PathState::Degraded => format!(
+                "{}/{} recent probes failed",
+                self.consecutive_bad,
+                self.samples.len()
+            ),
+            PathState::Recovering => {
+                format!("recovering after {} bad probe(s)", self.consecutive_bad)
+            }
+            PathState::Unknown => "no data yet".to_string(),
+        };
+        PathHealth {
+            path: self.path.clone(),
+            state: self.state,
+            reason,
+            samples: self.samples.iter().copied().collect(),
+            window: self.samples.capacity(),
+            last_change_ts: self.last_change_ts,
+        }
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Probe reachability with a single ICMP echo (used for the "direct" path).
+/// Returns false on timeout / missing `ping` / permission denied. Never panics.
+pub async fn probe_ping(host: &str) -> bool {
+    let Some(bin) = balansir_common::paths::resolve_bin("ping") else {
+        return false;
+    };
+    let host = host.to_string();
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new(bin)
+            .args(["-c", "1", "-W", "3", &host])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -131,52 +225,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_circuit_breaker_basic() {
-        let cb = CircuitBreaker::new(CircuitBreakerConfig::default());
-
-        assert_eq!(cb.state(), CircuitState::Closed);
-        assert!(cb.allow_request());
-
-        cb.record_failure();
-        cb.record_failure();
-        assert_eq!(cb.state(), CircuitState::Closed);
-
-        cb.record_failure();
-        assert_eq!(cb.state(), CircuitState::Open);
-        assert!(!cb.allow_request());
+    fn healthy_requires_recover_after_good_from_unknown() {
+        let mut t = PathHealthTracker::new("direct", 16, 3, 3);
+        assert_eq!(t.observe(true), PathState::Unknown);
+        assert_eq!(t.observe(true), PathState::Unknown);
+        assert_eq!(t.observe(true), PathState::Healthy);
     }
 
     #[test]
-    fn test_circuit_breaker_recovery() {
-        let config = CircuitBreakerConfig {
-            failure_threshold: 1,
-            recovery_timeout: Duration::from_millis(0),
-            max_retries: 2,
-        };
-        let cb = CircuitBreaker::new(config);
+    fn degrades_after_n_bad_and_recovers_after_m_good() {
+        let mut t = PathHealthTracker::new("direct", 16, 3, 3);
+        for _ in 0..3 {
+            let _ = t.observe(true);
+        }
+        assert_eq!(t.state(), PathState::Healthy);
 
-        cb.record_failure();
-        assert_eq!(cb.state(), CircuitState::Open);
+        // One blip: Degrading, not Degraded.
+        assert_eq!(t.observe(false), PathState::Degrading);
+        assert_eq!(t.observe(false), PathState::Degrading);
+        assert_eq!(t.observe(false), PathState::Degraded);
 
-        // After recovery timeout, should be half-open
-        assert!(cb.allow_request());
-        assert_eq!(cb.state(), CircuitState::HalfOpen);
-
-        cb.record_success();
-        assert_eq!(cb.state(), CircuitState::Closed);
+        // Recovery needs 3 good samples.
+        assert_eq!(t.observe(true), PathState::Recovering);
+        assert_eq!(t.observe(true), PathState::Recovering);
+        assert_eq!(t.observe(true), PathState::Healthy);
     }
 
     #[test]
-    fn test_circuit_breaker_reset() {
-        let cb = CircuitBreaker::new(CircuitBreakerConfig::default());
+    fn degraded_snaps_back_on_bad_during_recovery() {
+        let mut t = PathHealthTracker::new("xray", 16, 2, 2);
+        for _ in 0..2 {
+            let _ = t.observe(true);
+        }
+        assert_eq!(t.state(), PathState::Healthy);
+        for _ in 0..2 {
+            let _ = t.observe(false);
+        }
+        assert_eq!(t.state(), PathState::Degraded);
+        assert_eq!(t.observe(true), PathState::Recovering);
+        // Bad sample during recovery -> back to Degraded.
+        assert_eq!(t.observe(false), PathState::Degraded);
+    }
 
-        cb.record_failure();
-        cb.record_failure();
-        cb.record_failure();
-        assert_eq!(cb.state(), CircuitState::Open);
-
-        cb.reset();
-        assert_eq!(cb.state(), CircuitState::Closed);
-        assert!(cb.allow_request());
+    #[test]
+    fn report_carries_samples_and_reason() {
+        let mut t = PathHealthTracker::new("b4", 8, 2, 2);
+        for _ in 0..2 {
+            let _ = t.observe(true);
+        }
+        for _ in 0..2 {
+            let _ = t.observe(false);
+        }
+        let r = t.report();
+        assert_eq!(r.state, PathState::Degraded);
+        assert!(r.reason.contains("failed"));
+        assert_eq!(r.samples.len(), 4);
+        assert_eq!(r.window, 8);
     }
 }

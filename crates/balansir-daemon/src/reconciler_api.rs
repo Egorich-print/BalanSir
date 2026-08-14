@@ -103,6 +103,10 @@ impl ApiSurface for ReconcilerApi {
     async fn qos_status(&self) -> serde_json::Value {
         self.reconciler.qos_status().await
     }
+
+    async fn path_health(&self) -> serde_json::Value {
+        self.reconciler.path_health()
+    }
 }
 
 #[cfg(test)]

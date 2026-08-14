@@ -386,3 +386,14 @@ pub async fn qos_status(State(state): State<Arc<ApiState>>) -> impl IntoResponse
     };
     (StatusCode::OK, Json(api.qos_status().await))
 }
+
+/// Per-path health reports (hysteresis-smoothed).
+pub async fn path_health(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let Some(api) = state.api.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Control plane not available" })),
+        );
+    };
+    (StatusCode::OK, Json(api.path_health().await))
+}

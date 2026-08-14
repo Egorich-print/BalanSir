@@ -83,4 +83,7 @@ pub trait ApiSurface: Send + Sync {
 
     /// Desired QoS plans + applied interfaces (non-authoritative).
     async fn qos_status(&self) -> serde_json::Value;
+
+    /// Per-path health reports (hysteresis-smoothed) for the WebUI.
+    async fn path_health(&self) -> serde_json::Value;
 }

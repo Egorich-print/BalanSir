@@ -118,6 +118,8 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/tailscale/down", post(handlers::tailscale_down))
         // QoS / traffic shaping
         .route("/qos/status", get(handlers::qos_status))
+        // Path health
+        .route("/health/paths", get(handlers::path_health))
         .with_state(state.clone())
         // Token auth is opt-in: only enforced when BALANSIR_API_TOKEN is set,
         // so it does not break health probes or local unauthenticated installs.

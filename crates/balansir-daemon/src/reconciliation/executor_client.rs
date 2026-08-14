@@ -67,6 +67,14 @@ impl ExecutorClient {
         }
     }
 
+    /// Mechanism-level health probe: does the executor answer HealthCheck?
+    pub async fn health_check(&self) -> bool {
+        matches!(
+            self.request(MsgType::HealthCheck, Vec::new()).await,
+            Ok(resp) if resp.msg_type == MsgType::ResponseOk
+        )
+    }
+
     /// Send a rule-application request and decode the typed result.
     async fn apply(&self, msg_type: MsgType, request: &ActionRequest) -> ActionResult {
         let payload = match postcard::to_allocvec(request) {

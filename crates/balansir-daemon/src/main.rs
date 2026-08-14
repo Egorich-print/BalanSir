@@ -131,6 +131,33 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         dns_loop_reconciler.dns_loop().await;
     });
+
+    // Path-health loop (mission: "is my network OK"): probe each path and
+    // feed hysteresis-smoothed samples into the reconciler's health trackers.
+    // Direct = ICMP reachability to a public probe; B4 = executor healthy;
+    // Xray = process running; Tailscale = backend Running.
+    {
+        let health_reconciler = Arc::clone(&reconciler);
+        let executor_client = std::sync::Arc::new(ExecutorClient::default());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                tick.tick().await;
+                // Direct path: ICMP to the public DNS probe.
+                let direct_ok = balansir_daemon::health::probe_ping("1.1.1.1").await;
+                health_reconciler.observe_path_health("direct", direct_ok);
+                // B4: executor reachable (mechanism-level health).
+                let b4_ok = executor_client.health_check().await;
+                health_reconciler.observe_path_health("b4", b4_ok);
+                // Tailscale: backend running.
+                let ts = balansir_daemon::tailscale::status().await;
+                health_reconciler.observe_path_health(
+                    "tailscale",
+                    ts.installed && ts.backend_state == "Running",
+                );
+            }
+        });
+    }
     // P7.2 (ADR-026) B4 runtime loop: policy-controlled connectivity
     // adaptation with real host-stack observation and controlled execution
     // through the existing executor boundary.

@@ -19,6 +19,7 @@
   let tsBusy = false;
   let tsError = null;
   let qos = null;
+  let paths = [];
 
   let pollTimer = null;
   let es = null;
@@ -66,6 +67,11 @@
       qos = await api.qosStatus();
     } catch (e) {
       qos = null;
+    }
+    try {
+      paths = await api.pathHealth();
+    } catch (e) {
+      paths = [];
     }
     try {
       const resp = await fetch('/api/metrics');
@@ -174,6 +180,21 @@
   {#if tab === 'overview'}
     <section>
       <div class="grid">
+        <div class="card">
+          <h2>Path health</h2>
+          {#if paths.length === 0}
+            <p>No path telemetry yet (daemon probing).</p>
+          {:else}
+            {#each paths as p}
+              <div class="path-row {p.state}">
+                <span class="path-name">{p.path}</span>
+                <span class="path-state">{p.state}</span>
+                <span class="path-reason">{p.reason}</span>
+              </div>
+            {/each}
+          {/if}
+        </div>
+
         <div class="card">
           <h2>Desired state</h2>
           {#if desired}
@@ -390,5 +411,12 @@
   .qos-classes { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   .qos-class, .qos-applied { background: #1a237e; border-radius: 6px; padding: 4px 8px; font-size: 0.85em; }
   .qos-applied { background: #2e7d32; margin-right: 6px; }
+  .path-row { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid #0f3460; }
+  .path-name { font-weight: bold; min-width: 90px; }
+  .path-state { text-transform: capitalize; font-weight: bold; min-width: 90px; }
+  .path-row.healthy .path-state { color: #4ecdc4; }
+  .path-row.degraded .path-state, .path-row.degrading .path-state { color: #ffb74d; }
+  .path-row.unknown .path-state { color: #888; }
+  .path-reason { color: #aaa; font-size: 0.85em; }
   .footer { text-align: center; margin-top: 30px; color: #666; font-size: 0.9em; }
 </style>
