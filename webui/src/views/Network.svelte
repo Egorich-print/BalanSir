@@ -5,16 +5,34 @@
   export let healthError;
 
   let action = {};
+  let macInput = {};
 
   async function restoreMac(iface) {
     action[iface.name] = 'working';
     try {
-      await api.restoreMac(iface.mac);
+      await api.restoreMac(iface.name);
       action[iface.name] = 'ok';
     } catch (e) {
       action[iface.name] = e.message;
     }
     setTimeout(() => (action[iface.name] = ''), 3000);
+  }
+
+  async function applyCloneMac(iface) {
+    const mac = (macInput[iface.name] || '').trim().toLowerCase();
+    if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac)) {
+      action[iface.name] = 'invalid MAC (expected aa:bb:cc:dd:ee:ff)';
+      return;
+    }
+    action[iface.name] = 'working';
+    try {
+      await api.setMac(iface.name, mac);
+      action[iface.name] = 'ok';
+      macInput[iface.name] = '';
+    } catch (e) {
+      action[iface.name] = e.message;
+    }
+    setTimeout(() => (action[iface.name] = ''), 4000);
   }
 
   $: interfaces = snapshot ? snapshot.interfaces : [];
@@ -58,10 +76,20 @@
           <td>
             {iface.mac || '—'}
             {#if iface.mac}
-              {#if action[iface.name] === 'working'}<span class="sub">restoring…</span>
-              {:else if action[iface.name] === 'ok'}<span class="ok">restored</span>
+              {#if action[iface.name] === 'working'}<span class="sub">working…</span>
+              {:else if action[iface.name] === 'ok'}<span class="ok">ok</span>
               {:else if action[iface.name]}<span class="err">{action[iface.name]}</span>
-              {:else}<button class="link" on:click={() => restoreMac(iface)}>restore MAC</button>
+              {:else}
+                <div class="mac-ctl">
+                  <input
+                    type="text"
+                    placeholder="aa:bb:cc:dd:ee:ff"
+                    value={macInput[iface.name] || ''}
+                    on:input={(e) => (macInput[iface.name] = e.target.value)}
+                  />
+                  <button class="link" on:click={() => applyCloneMac(iface)}>clone</button>
+                  <button class="link" on:click={() => restoreMac(iface)}>restore</button>
+                </div>
               {/if}
             {/if}
           </td>
@@ -99,5 +127,10 @@
   .err { color: #ff6b6b; font-size: 0.85rem; }
   .ok { color: #4cd07d; font-size: 0.8rem; margin-left: 6px; }
   .link { background: none; border: none; color: #4cc9f0; cursor: pointer; font-size: 0.8rem; text-decoration: underline; }
+  .mac-ctl { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+  .mac-ctl input {
+    background: #0f1524; color: #e8ecf4; border: 1px solid #1f2a44;
+    border-radius: 4px; padding: 3px 6px; font-size: 0.75rem; width: 150px;
+  }
   h2 { color: #4ecdc4; font-size: 1.05rem; }
 </style>
