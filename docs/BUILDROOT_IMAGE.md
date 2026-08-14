@@ -80,3 +80,66 @@ cargo run -p balansir-image -- inspect sdcard.img
 cargo run -p balansir-image -- checksum sdcard.img
 ./deploy/buildroot/qemu-login-test.sh Image rootfs.ext4   # full-stack check
 ```
+
+## Production baseline (2026-08-15)
+
+Reproducible production Buildroot image for Raspberry Pi 3B+, built from the
+Git tree at `main`. Validated autonomously in QEMU; physical RPi steps are
+listed as MANUAL.
+
+### Defconfig / kernel
+
+- `buildroot-external/configs/balansir_rpi3b_64_defconfig`
+- Kernel 6.12.61-v8 (`bcm2711` defconfig + `linux.fragment`)
+- Fragment builds in: `CONFIG_TUN=y`, `CONFIG_NET_SCH_HTB/FQ_CODEL/CAKE/INGRESS/NETEM=y`,
+  classifiers (`NET_CLS_FW/U32/FLOWER/BASIC`), actions, `NF_TABLES` (inet/ipv4/ipv6/netdev),
+  `NFT_CT/NAT/MASQ/REJECT/LOG/LIMIT/COUNTER=y`, `NETLINK_DIAG=y`.
+- Runtime packages: `nftables`, `iproute2` (tc), `iptables` (ip6tables, tailscaled dep),
+  `tailscale`, `openssh`, `systemd`.
+
+### What ships
+
+- `balansir-daemon` / `balansir-executor` / `balansir-cli` → `/usr/local/bin` (aarch64, glibc)
+- WebUI Svelte dist → `/usr/share/balansir/webui` (served by the daemon, `BALANSIR_WEBUI_DIR`)
+- `tailscaled` real daemon ELF → `/usr/bin/tailscaled` (usrmerge-safe install hook)
+- systemd units: `balansir-daemon`, `balansir-executor`, `tailscaled`, tmpfiles for `/run/balansir`
+- Factory policy: `/etc/balansir/balansir.toml` (fail-open, provisioning-safe)
+
+### Build
+
+```sh
+# in the aarch64 Ubuntu build VM
+make BR2_EXTERNAL=/path/to/buildroot-external balansir_rpi3b_64_defconfig
+make BR2_EXTERNAL=/path/to/buildroot-external -j$(nproc)
+# NOTE: for SITE_METHOD=local, a source change requires a balansir rebuild:
+rm -f output/build/balansir-0.4.0/.stamp_{built,target_installed,rsynced}
+# (Buildroot does not track local-source changes automatically.)
+```
+
+### Verification status
+
+**QEMU VERIFIED** (this baseline)
+- Boot: kernel 6.18.7 (QEMU) → systemd → balansir-daemon + balansir-executor + tailscaled active
+- Networking: eth0 UP, DHCP, gateway ping, DNS via systemd-resolved (A/AAAA resolve)
+- BalanSir: `/health /state /qos /b4 /xray /tailscale /metrics /events` respond;
+  desired==actual, drift 0; WebUI served at `/` with assets
+- QoS: CAKE + HTB + fq_codel attach on eth0 via `/qos`, real `tc` readback,
+  external-drift self-heal (deleted qdisc re-applied by reconcile)
+- nftables: `inet balansir` table with policy rules; startup recovery re-applies
+- B4: engine starts from `BALANSIR_B4_CONFIG`, observes/classifies `example.com`,
+  DNS-path adaptation requested on loop (interval 10s); MTU state tracked
+- Xray: graceful degraded (profiles empty, no binary — honest)
+- Tailscale: `NeedsLogin` backend state (no tailnet in QEMU), TUN `tailscale0` created
+- Recovery: daemon restart, executor restart (IPC reconnect), network ok,
+  external nft/qdisc drift corrected, full reboot restores services + policy
+- Resources (1 GB guest): daemon ~5 MB RSS, executor ~4 MB RSS, tailscaled ~47 MB RSS,
+  WebUI 140 KB; stable over a 3+ min soak (no growth/event storm)
+
+**PHYSICAL RPI MANUAL VERIFICATION REQUIRED**
+- Real boot on RPi 3B+ (firmware/DTB, UART, SD power delivery)
+- Real Ethernet (lan78xx) DHCP + LAN reachability of API/WebUI
+- Tailscale auth flow + tailnet connectivity (needs interactive login)
+- Real WAN QoS effect under actual load
+- B4 real-path MTU/DNS adaptation against a real remote host
+- Xray against a real proxy endpoint
+- Physical long-run stability / reboot from SD
