@@ -12,6 +12,7 @@ include $(sort $(wildcard $(BR2_EXTERNAL_BALANSIR_PATH)/package/*/*.mk))
 # The real daemon ELF is built at $(TAILSCALE_DIR)/bin/tailscaled but never
 # installed; copy it here and repoint the symlinks.
 define BALANSIR_TAILSCALED_FIX
+	rm -f $(TARGET_DIR)/usr/bin/tailscaled $(TARGET_DIR)/usr/sbin/tailscaled $(TARGET_DIR)/bin/tailscaled
 	$(INSTALL) -D -m 0755 $(TAILSCALE_DIR)/bin/tailscaled $(TARGET_DIR)/usr/bin/tailscaled
 	ln -sf /usr/bin/tailscaled $(TARGET_DIR)/usr/sbin/tailscaled
 	ln -sf /usr/bin/tailscaled $(TARGET_DIR)/bin/tailscaled
