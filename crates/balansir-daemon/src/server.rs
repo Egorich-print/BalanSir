@@ -57,11 +57,11 @@ pub async fn start_api_server(
     }
 
     if let Some(handle) = b4_control {
-        manager.set_b4_handle(handle);
+        manager.set_b4_handle(handle).await;
     }
     #[cfg(feature = "xray")]
     if let Some(handle) = xray_control {
-        manager.set_xray_handle(handle);
+        manager.set_xray_handle(handle).await;
     }
 
     let control: Arc<dyn balansir_common::subsystems::SubsystemControl> =

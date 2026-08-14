@@ -138,14 +138,16 @@ impl SubsystemManager {
     }
 
     /// Attach the B4 controller handle (pause/resume for the API seam).
-    pub fn set_b4_handle(&self, handle: crate::b4_manager::B4ManagerHandle) {
-        *self.b4.blocking_write() = Some(handle);
+    /// Async: never `blocking_*` on a tokio lock inside the runtime (that
+    /// panics with "Cannot block the current thread from within a runtime").
+    pub async fn set_b4_handle(&self, handle: crate::b4_manager::B4ManagerHandle) {
+        *self.b4.write().await = Some(handle);
     }
 
     /// Attach the Xray manager handle (pause/select/rotate for the API seam).
     #[cfg(feature = "xray")]
-    pub fn set_xray_handle(&self, handle: crate::xray_manager::XrayManagerHandle) {
-        *self.xray.blocking_write() = Some(handle);
+    pub async fn set_xray_handle(&self, handle: crate::xray_manager::XrayManagerHandle) {
+        *self.xray.write().await = Some(handle);
     }
 
     pub fn snapshot(&self) -> SharedSubsystemSnapshot {
