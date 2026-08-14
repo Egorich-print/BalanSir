@@ -12,8 +12,12 @@ After=network-pre.target NetworkManager.service systemd-resolved.service
 # /etc/default/tailscaled is absent, causing an infinite restart loop
 # (observed: restart every 100ms, pinning CPU and starving systemd). The '-'
 # makes the file optional — defaults are used when it doesn't exist.
+#
+# No --port= flag: with an empty ${PORT} (missing EnvironmentFile) tailscaled
+# exits immediately, which combined with Restart=on-failure produces the same
+# 100ms restart loop.
 EnvironmentFile=-/etc/default/tailscaled
-ExecStart=/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=${PORT} $FLAGS
+ExecStart=/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock $FLAGS
 ExecStopPost=/usr/sbin/tailscaled --cleanup
 
 Restart=on-failure
