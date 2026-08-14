@@ -53,24 +53,64 @@ impl XrayDriver {
     }
 
     fn generate_config(&self) -> String {
-        // ... existing config generation code ...
-        format!(
-            r#"{{
-  "inbounds": [
-    {{ "port": 10808, "protocol": "socks", "settings": {{ "udp": true }} }},
-    {{ "port": 10809, "protocol": "http" }}
-  ],
-  "outbounds": [{{
-    "protocol": "vless",
-    "settings": {{ "vnext": [{{ "address": "{}", "port": {}, "users": [{{ "id": "{}", "flow": "{}" }}] }}] }},
-    "streamSettings": {{ "network": "tcp", "security": "tls" }}
-  }}]
-}}"#,
-            self.config.server,
-            self.config.port,
-            self.config.uuid.expose_secret(),
-            self.config.flow.as_deref().unwrap_or("")
-        )
+        use serde_json::json;
+
+        let (network, stream_extra) = match &self.config.transport {
+            XrayTransport::Tcp => ("tcp", json!({})),
+            XrayTransport::WebSocket { path } => ("ws", json!({ "wsSettings": { "path": path } })),
+            XrayTransport::Grpc { service_name } => (
+                "grpc",
+                json!({ "grpcSettings": { "serviceName": service_name } }),
+            ),
+            XrayTransport::HttpUpgrade { path } => (
+                "httpupgrade",
+                json!({ "httpupgradeSettings": { "path": path } }),
+            ),
+        };
+
+        let tls = match &self.config.tls {
+            Some(tls) => json!({
+                "security": "tls",
+                "tlsSettings": {
+                    "serverName": tls.server_name,
+                    "allowInsecure": tls.allow_insecure,
+                }
+            }),
+            None => json!({ "security": "none" }),
+        };
+
+        let flow = self.config.flow.as_deref().unwrap_or("");
+
+        let mut stream_settings = json!({ "network": network });
+        if let Some(extra) = stream_extra.as_object() {
+            stream_settings
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.clone());
+        }
+        if let Some(t) = tls.as_object() {
+            stream_settings.as_object_mut().unwrap().extend(t.clone());
+        }
+
+        let config = json!({
+            "log": { "loglevel": "warning" },
+            "inbounds": [
+                { "port": 10808, "protocol": "socks", "settings": { "udp": true } },
+                { "port": 10809, "protocol": "http" }
+            ],
+            "outbounds": [{
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{
+                        "address": self.config.server,
+                        "port": self.config.port,
+                        "users": [{ "id": self.config.uuid.expose_secret(), "flow": flow }]
+                    }]
+                },
+                "streamSettings": stream_settings
+            }]
+        });
+        serde_json::to_string_pretty(&config).unwrap_or_default()
     }
 
     fn start_process(&mut self, config_path: &str) -> Result<(), DriverError> {
@@ -193,20 +233,97 @@ impl ComponentDriver for XrayDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::SecretString;
+
+    fn cfg(transport: XrayTransport, tls: Option<XrayTls>) -> XrayConfig {
+        XrayConfig {
+            server: "vpn.example.com".into(),
+            port: 443,
+            uuid: SecretString::from("deadbeef-0000-0000-0000-000000000001"),
+            flow: Some("xtls-rprx-vision".into()),
+            transport,
+            tls,
+        }
+    }
 
     #[test]
-    fn test_xray_driver_creation() {
-        let config = XrayConfig {
-            server: "proxy.example.com".to_string(),
-            port: 443,
-            uuid: secrecy::SecretString::from("test-uuid"),
-            flow: Some("xtls-rprx-vision".to_string()),
-            transport: XrayTransport::Tcp,
-            tls: None,
-        };
+    fn tcp_tls_config() {
+        let c = cfg(
+            XrayTransport::Tcp,
+            Some(XrayTls {
+                server_name: "vpn.example.com".into(),
+                allow_insecure: false,
+            }),
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&XrayDriver::new(DriverId::Xray, c).generate_config()).unwrap();
+        assert_eq!(json["outbounds"][0]["streamSettings"]["network"], "tcp");
+        assert_eq!(json["outbounds"][0]["streamSettings"]["security"], "tls");
+        assert_eq!(
+            json["outbounds"][0]["streamSettings"]["tlsSettings"]["serverName"],
+            "vpn.example.com"
+        );
+    }
 
-        let driver = XrayDriver::new(DriverId::Xray, config);
-        assert_eq!(driver.id(), DriverId::Xray);
-        assert!(driver.child.is_none());
+    #[test]
+    fn ws_transport_config() {
+        let c = cfg(XrayTransport::WebSocket { path: "/ws".into() }, None);
+        let json: serde_json::Value =
+            serde_json::from_str(&XrayDriver::new(DriverId::Xray, c).generate_config()).unwrap();
+        assert_eq!(json["outbounds"][0]["streamSettings"]["network"], "ws");
+        assert_eq!(
+            json["outbounds"][0]["streamSettings"]["wsSettings"]["path"],
+            "/ws"
+        );
+        assert_eq!(json["outbounds"][0]["streamSettings"]["security"], "none");
+    }
+
+    #[test]
+    fn grpc_and_httpupgrade_transports() {
+        let g = cfg(
+            XrayTransport::Grpc {
+                service_name: "svc".into(),
+            },
+            None,
+        );
+        let gjson: serde_json::Value =
+            serde_json::from_str(&XrayDriver::new(DriverId::Xray, g).generate_config()).unwrap();
+        assert_eq!(gjson["outbounds"][0]["streamSettings"]["network"], "grpc");
+        assert_eq!(
+            gjson["outbounds"][0]["streamSettings"]["grpcSettings"]["serviceName"],
+            "svc"
+        );
+
+        let h = cfg(
+            XrayTransport::HttpUpgrade {
+                path: "/hup".into(),
+            },
+            None,
+        );
+        let hjson: serde_json::Value =
+            serde_json::from_str(&XrayDriver::new(DriverId::Xray, h).generate_config()).unwrap();
+        assert_eq!(
+            hjson["outbounds"][0]["streamSettings"]["network"],
+            "httpupgrade"
+        );
+        assert_eq!(
+            hjson["outbounds"][0]["streamSettings"]["httpupgradeSettings"]["path"],
+            "/hup"
+        );
+    }
+
+    #[test]
+    fn config_contains_uuid_and_flow() {
+        let c = cfg(XrayTransport::Tcp, None);
+        let json: serde_json::Value =
+            serde_json::from_str(&XrayDriver::new(DriverId::Xray, c).generate_config()).unwrap();
+        assert_eq!(
+            json["outbounds"][0]["settings"]["vnext"][0]["users"][0]["id"],
+            "deadbeef-0000-0000-0000-000000000001"
+        );
+        assert_eq!(
+            json["outbounds"][0]["settings"]["vnext"][0]["users"][0]["flow"],
+            "xtls-rprx-vision"
+        );
     }
 }
