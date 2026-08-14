@@ -78,6 +78,7 @@ pub async fn get_desired(State(state): State<Arc<ApiState>>) -> impl IntoRespons
 pub struct DesiredPayload {
     pub rules: Option<Vec<serde_json::Value>>,
     pub drivers: Option<Vec<serde_json::Value>>,
+    pub qos: Option<Vec<serde_json::Value>>,
 }
 
 pub async fn set_desired(
@@ -97,6 +98,7 @@ pub async fn set_desired(
     let state = serde_json::from_value::<balansir_common::DesiredState>(serde_json::json!({
         "rules": payload.rules.unwrap_or_default(),
         "drivers": payload.drivers.unwrap_or_default(),
+        "qos": payload.qos.unwrap_or_default(),
     }));
     match state {
         Ok(state) => match api.reload(state).await {
