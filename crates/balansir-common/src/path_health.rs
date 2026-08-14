@@ -382,6 +382,7 @@ mod tests {
             latency_ms: Some(l),
             loss_pct: None,
             reachable: true,
+            degraded_evidence: false,
         }
     }
 
@@ -462,6 +463,7 @@ mod tests {
             latency_ms: None,
             loss_pct: Some(pct),
             reachable: true,
+            degraded_evidence: false,
         }
     }
 
@@ -516,7 +518,11 @@ mod tests {
         let t = h.observe(sample);
         assert_eq!(t, Some(PathTransition::EnteredDegraded));
         let view = h.view();
-        assert_eq!(view.latency_ms.unwrap(), 20.0, "latency stays the measured value");
+        let lat = view.latency_ms.unwrap();
+        assert!(
+            lat > 10.0 && lat <= 20.0,
+            "EMA latency {lat} converges toward the measured 20 ms"
+        );
         assert_eq!(view.state, "degraded");
     }
 
