@@ -472,22 +472,24 @@ fn qdisc_stats_of(attributes: &[TcAttribute]) -> Option<QdiscStats> {
 /// Probe shaping capabilities from the runtime kernel.
 ///
 /// Sources: `/proc/modules` (scheduler modules) and `/sys/class/net/ifb*`
-/// (IFB devices for ingress shaping). Absence of module info (e.g. built-in
-/// schedulers) is handled by treating "no module listed" as *unknown* and
-/// defaulting to the conservative false — the daemon then picks fq_codel,
-/// which is virtually always built in, and reports honestly.
+/// (IFB devices for ingress shaping). Built-in schedulers (CONFIG_*_y) never
+/// appear in /proc/modules, so each scheduler is also probed by actually
+/// attaching its qdisc to the loopback device and removing it again — the
+/// most reliable signal. Absence of both signals is treated as unknown and
+/// reported honestly as false.
 #[cfg(target_os = "linux")]
 pub fn probe_qos_capabilities() -> QosCapabilities {
     let modules = std::fs::read_to_string("/proc/modules").unwrap_or_default();
     let module_present = |name: &str| modules.lines().any(|l| l.starts_with(name));
 
-    // If /proc/modules is unreadable we cannot prove cake/netem exist; probe
-    // by reading /proc/net/psched presence only as a fallback signal.
     let proc_ok = !modules.is_empty();
-    let cake = proc_ok && module_present("sch_cake");
-    let fq_codel = proc_ok && module_present("sch_fq_codel") || fq_codel_builtin_hint();
-    let htb = proc_ok && module_present("sch_htb");
-    let netem = proc_ok && module_present("sch_netem");
+
+    // Built-in schedulers don't show up in /proc/modules; attempt to attach
+    // the real qdisc on loopback and roll it back. This is authoritative.
+    let cake = tc_qdisc_supported("cake");
+    let fq_codel = tc_qdisc_supported("fq_codel") || (proc_ok && module_present("sch_fq_codel"));
+    let htb = tc_qdisc_supported("htb");
+    let netem = tc_qdisc_supported("netem");
 
     // Ingress qdisc is a core feature of every modern kernel; assume present.
     let ingress = true;
@@ -515,15 +517,37 @@ pub fn probe_qos_capabilities() -> QosCapabilities {
     }
 }
 
-/// fq_codel is built into the kernel in nearly all distributions; when
-/// /proc/modules shows no modules at all (e.g. a container without module
-/// info), assume the built-in scheduler exists rather than report no shaping
-/// at all. This is the one deliberate, documented optimism.
+/// Probe whether the kernel supports a qdisc kind by attaching it to the
+/// loopback device (transiently) and removing it. Uses `tc` from iproute2,
+/// which is a required runtime dependency (BALANSIR_DEPENDENCIES).
 #[cfg(target_os = "linux")]
-fn fq_codel_builtin_hint() -> bool {
-    std::fs::read_to_string("/proc/modules")
-        .map(|m| m.trim().is_empty())
-        .unwrap_or(true)
+fn tc_qdisc_supported(kind: &str) -> bool {
+    use std::process::Command;
+
+    let Some(bin) = balansir_common::paths::resolve_bin("tc") else {
+        return false;
+    };
+    // Attach on lo (always exists, UP in QEMU and on RPi).
+    let attach = Command::new(&bin)
+        .args(["qdisc", "add", "dev", "lo", "root", "handle", "1:", kind])
+        .output();
+    let ok = match attach {
+        Ok(o) if o.status.success() => true,
+        // EEXIST if a prior attempt left a root qdisc; replace instead.
+        Ok(_) => Command::new(&bin)
+            .args([
+                "qdisc", "replace", "dev", "lo", "root", "handle", "1:", kind,
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    // Roll back: remove the root qdisc on lo so we leave no trace.
+    let _ = Command::new(&bin)
+        .args(["qdisc", "del", "dev", "lo", "root"])
+        .output();
+    ok
 }
 
 // ---------------------------------------------------------------------------
