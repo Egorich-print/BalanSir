@@ -223,9 +223,11 @@ async fn main() -> Result<()> {
         let xray_control: Option<()> = None;
 
         let api_bind_clone = api_bind.clone();
+        let api_reconciler = Arc::clone(&reconciler);
         tokio::spawn(async move {
             if let Err(e) = balansir_daemon::server::start_api_server(
                 manager,
+                api_reconciler,
                 b4_control,
                 #[cfg(feature = "xray")]
                 xray_control,

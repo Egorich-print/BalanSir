@@ -62,6 +62,12 @@ impl ApiState {
         self.subsystem_events = Some(events);
         self
     }
+
+    /// Attach the shared control plane (the daemon's reconciler coordinator).
+    pub fn with_control(mut self, control: Arc<crate::control::ControlPlane>) -> Self {
+        self.control = Some(control);
+        self
+    }
 }
 
 /// Health check response

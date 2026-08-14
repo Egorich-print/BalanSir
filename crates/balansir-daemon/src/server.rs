@@ -6,9 +6,13 @@
 //! the axum router serves them read-only + action endpoints. Enable it with
 //! `BALANSIR_API_BIND=127.0.0.1:8080` (or `[api]` in the config file).
 
+use balansir_api::control::{ControlPlane, DesiredUpdater};
+use balansir_common::DesiredState;
+use balansir_control::ControlResult;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::reconciliation::reconciler::Reconciler;
 use crate::subsystems::{ControlImpl, SubsystemManager};
 
 /// Bind address resolution order: `[api] bind` from BALANSIR_CONFIG, then
@@ -42,6 +46,7 @@ pub fn api_bind() -> String {
 /// caller (main); this function only wires the API and runs until it exits.
 pub async fn start_api_server(
     manager: Arc<SubsystemManager>,
+    reconciler: Arc<Reconciler>,
     b4_control: Option<crate::b4_manager::B4ManagerHandle>,
     #[cfg(feature = "xray")] xray_control: Option<crate::xray_manager::XrayManagerHandle>,
     bind: String,
@@ -64,10 +69,41 @@ pub async fn start_api_server(
     let snapshot = manager.snapshot();
     let events = manager.event_sender();
 
+    // Wire the policy control plane to the daemon's single reconciler
+    // coordinator: same desired/actual stores, same coordinator, same executor.
+    // The event bridge is attached to the coordinator's dynamic sink so both
+    // background-loop and API-triggered reconciles flow to the WebUI.
+    let bridge = Arc::new(balansir_api::control::EventBridge::new(256));
+    reconciler.attach_event_sink(bridge.clone());
+    let plane = ControlPlane::wrap(
+        reconciler.coordinator(),
+        reconciler.desired_provider(),
+        reconciler.actual_provider(),
+        bridge,
+        Some(Arc::new(ReconcilerUpdater(Arc::clone(&reconciler)))),
+    );
+
     let state = Arc::new(
         balansir_api::ApiState::new(Arc::new(balansir_common::metrics::SharedMetrics::new()))
-            .with_subsystems(control, snapshot, events),
+            .with_subsystems(control, snapshot, events)
+            .with_control(plane),
     );
 
     balansir_api::start_server(state, &bind).await
+}
+
+/// Writable desired-state seam for transactional `/reload`: writes go through
+/// the reconciler's `set_desired` (flow compilation + fingerprint included),
+/// so an API reload is exactly equivalent to a startup config load.
+struct ReconcilerUpdater(Arc<Reconciler>);
+
+#[async_trait::async_trait]
+impl DesiredUpdater for ReconcilerUpdater {
+    async fn set_desired(&self, state: DesiredState) {
+        self.0.set_desired(state).await;
+    }
+
+    async fn desired(&self) -> ControlResult<DesiredState> {
+        Ok(self.0.desired().await)
+    }
 }

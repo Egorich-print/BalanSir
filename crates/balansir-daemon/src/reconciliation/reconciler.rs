@@ -11,7 +11,7 @@ use balansir_common::{
 };
 use balansir_control::planner::BasicPlanner;
 use balansir_control::snapshot_store::MemorySnapshotStore;
-use balansir_control::traits::{Executor, Planner};
+use balansir_control::traits::{DesiredProvider, DynamicEventSink, EventSink, Executor, Planner, StateProvider};
 use balansir_control::{Coordinator, CoordinatorConfig, ReconcileReason};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -31,6 +31,13 @@ pub struct Reconciler {
     actual_state: Arc<tokio::sync::Mutex<ActualState>>,
     config: ReconcilerConfig,
     coordinator: Arc<Coordinator>,
+    /// Coordinator event fan-out; the API bridge (and any other observer) can
+    /// attach after construction without rebuilding the coordinator.
+    events: Arc<DynamicEventSink>,
+    /// Shared desired-state provider (the same handle the coordinator reads).
+    desired_provider: Arc<dyn DesiredProvider>,
+    /// Shared actual-state provider (the same handle the coordinator reads).
+    actual_provider: Arc<dyn StateProvider>,
     runner: Arc<DaemonExecutorAdapter>,
     /// Raw mechanism adapter, retained so the daemon can query the executor's
     /// kernel inventory (A2, non-authoritative) and reconcile orphans.
@@ -153,18 +160,29 @@ impl Reconciler {
         // shared by the coordinator and by `Reconciler::build_plan`.
         let planner: Arc<dyn Planner> = Arc::new(BasicPlanner);
 
+        // Coordinator events fan out to logging now and to the API event bus
+        // later (attached by the API server, one coordinator / one event path).
+        let events = Arc::new(DynamicEventSink::new());
+        events.attach(Arc::new(TracingEventSink));
+
+        let desired_provider: Arc<dyn DesiredProvider> =
+            Arc::new(DaemonDesiredProvider {
+                desired: desired.clone(),
+            });
+        let actual_provider: Arc<dyn StateProvider> = Arc::new(DaemonActualStore {
+            actual: actual.clone(),
+        });
+
         let coordinator = Arc::new(Coordinator::new(
             CoordinatorConfig::new(
-                Arc::new(DaemonDesiredProvider {
-                    desired: desired.clone(),
-                }),
+                desired_provider.clone(),
                 actual_store,
                 planner.clone(),
                 executor.clone(),
                 Arc::new(MemorySnapshotStore::new()),
             )
             .with_rollback(rollback)
-            .with_event_sink(Arc::new(TracingEventSink)),
+            .with_event_sink(events.clone()),
         ));
 
         Self {
@@ -173,6 +191,9 @@ impl Reconciler {
             actual_state: actual,
             config,
             coordinator,
+            events,
+            desired_provider,
+            actual_provider,
             runner: executor,
             executor: executor_inner,
             flow_compiler: tokio::sync::Mutex::new(None),
@@ -232,6 +253,32 @@ impl Reconciler {
     /// change is known to the daemon).
     pub fn executor_adapter(&self) -> Arc<dyn ExecutorAdapter> {
         Arc::clone(&self.executor)
+    }
+
+    /// The authoritative coordinator (shared with the API control plane so
+    /// there is exactly one reconciliation authority and one event path).
+    pub fn coordinator(&self) -> Arc<Coordinator> {
+        Arc::clone(&self.coordinator)
+    }
+
+    /// The coordinator's desired-state provider (same shared handle).
+    pub fn desired_provider(&self) -> Arc<dyn DesiredProvider> {
+        Arc::clone(&self.desired_provider)
+    }
+
+    /// The coordinator's actual-state provider (same shared handle).
+    pub fn actual_provider(&self) -> Arc<dyn StateProvider> {
+        Arc::clone(&self.actual_provider)
+    }
+
+    /// Attach an additional coordinator event sink (e.g. the API event bridge).
+    pub fn attach_event_sink(&self, sink: Arc<dyn EventSink>) {
+        self.events.attach(sink);
+    }
+
+    /// Current desired state (read snapshot).
+    pub async fn desired(&self) -> DesiredState {
+        self.desired_state.lock().await.clone()
     }
 
     /// Get the fingerprint of the last accepted config (P4.8, ADR-021), or
