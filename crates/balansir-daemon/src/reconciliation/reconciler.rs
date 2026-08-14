@@ -127,11 +127,30 @@ pub trait ExecutorAdapter: Send + Sync {
 }
 
 impl Reconciler {
-    /// Create a new reconciler.
+    /// Create a new reconciler (events only to tracing).
     pub fn new(
         desired_state: DesiredState,
         executor: Arc<dyn ExecutorAdapter>,
         config: ReconcilerConfig,
+    ) -> Self {
+        Self::new_inner(desired_state, executor, config, None)
+    }
+
+    /// Create a reconciler that also streams control events to a WebUI bridge.
+    pub fn new_with_api(
+        desired_state: DesiredState,
+        executor: Arc<dyn ExecutorAdapter>,
+        config: ReconcilerConfig,
+        api_bridge: Arc<balansir_api::surface::ApiEventBridge>,
+    ) -> Self {
+        Self::new_inner(desired_state, executor, config, Some(api_bridge))
+    }
+
+    fn new_inner(
+        desired_state: DesiredState,
+        executor: Arc<dyn ExecutorAdapter>,
+        config: ReconcilerConfig,
+        api_bridge: Option<Arc<balansir_api::surface::ApiEventBridge>>,
     ) -> Self {
         let desired = Arc::new(tokio::sync::Mutex::new(desired_state));
         let actual = Arc::new(tokio::sync::Mutex::new(ActualState::default()));
@@ -164,7 +183,7 @@ impl Reconciler {
                 Arc::new(MemorySnapshotStore::new()),
             )
             .with_rollback(rollback)
-            .with_event_sink(Arc::new(TracingEventSink)),
+            .with_event_sink(Self::build_event_sink(api_bridge)),
         ));
 
         Self {
@@ -178,6 +197,21 @@ impl Reconciler {
             flow_compiler: tokio::sync::Mutex::new(None),
             config_fingerprint: tokio::sync::Mutex::new(None),
             planner,
+        }
+    }
+
+    /// Build the coordinator's event sink: tracing always, plus the WebUI
+    /// bridge when the daemon provides one (fan-out, single authority).
+    fn build_event_sink(
+        api_bridge: Option<Arc<balansir_api::surface::ApiEventBridge>>,
+    ) -> Arc<dyn balansir_control::traits::EventSink> {
+        use crate::reconciliation::sinks::{ApiBridgeEventSink, FanoutEventSink};
+        match api_bridge {
+            Some(bridge) => Arc::new(FanoutEventSink::new(vec![
+                Arc::new(TracingEventSink),
+                Arc::new(ApiBridgeEventSink::new(bridge)),
+            ])),
+            None => Arc::new(TracingEventSink),
         }
     }
 
@@ -340,6 +374,12 @@ impl Reconciler {
     /// Get current generation (for testing and monitoring).
     pub fn generation(&self) -> u64 {
         self.coordinator.generation()
+    }
+
+    /// The reconciliation configuration (intervals, resync policy) — exposed
+    /// for the WebUI status page.
+    pub fn config(&self) -> ReconcilerConfig {
+        self.config.clone()
     }
 
     /// Apply plan (delegates to the daemon's plan runner).

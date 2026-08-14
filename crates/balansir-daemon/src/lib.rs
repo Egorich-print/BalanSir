@@ -12,6 +12,7 @@ pub mod hysteria;
 #[cfg(target_os = "linux")]
 pub mod netlink;
 pub mod policy;
+pub mod reconciler_api;
 pub mod reconciliation;
 pub mod secrets;
 pub mod startup;

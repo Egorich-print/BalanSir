@@ -25,6 +25,8 @@ proptest = "1"
 [dependencies]
 balansir-common = { path = "../balansir-common" }
 balansir-control = { path = "../balansir-control" }
+balansir-api = { path = "../balansir-api" }
+chrono.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "macros", "io-util", "fs", "time", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

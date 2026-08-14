@@ -82,10 +82,13 @@ async fn main() -> Result<()> {
             }
         };
 
-    let reconciler = Arc::new(Reconciler::new(
+    let api_bridge = Arc::new(balansir_api::surface::ApiEventBridge::new(1024));
+
+    let reconciler = Arc::new(Reconciler::new_with_api(
         startup_desired.clone(),
         Arc::new(ExecutorClient::default()),
         ReconcilerConfig::default(),
+        Arc::clone(&api_bridge),
     ));
     // P7.2.1 (ADR-027) + P4.8 (ADR-021): record the raw desired state and its
     // fingerprint so `balansir-cli fingerprint` reflects exactly what was
@@ -188,6 +191,32 @@ async fn main() -> Result<()> {
             Err(e) => warn!("B4 config {b4_path} rejected: {e} (engine disabled)"),
         }
     }
+
+    // WebUI/API server: the operational console backend. Serves health,
+    // metrics, desired/actual/drift/plan/explain/fingerprint, reload/reconcile
+    // and an SSE event stream over the live ReconcilerApi surface. Binds
+    // loopback; optional bearer auth via BALANSIR_API_TOKEN.
+    let api_surface: Arc<dyn balansir_api::surface::ApiSurface> =
+        Arc::new(balansir_daemon::reconciler_api::ReconcilerApi::new(
+            Arc::clone(&reconciler),
+            Arc::clone(&metrics),
+            Arc::clone(&api_bridge),
+        ));
+    let api_state = balansir_api::ApiState::new(Arc::clone(&metrics)).with_api(api_surface);
+    let api_port: u16 = std::env::var("BALANSIR_API_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080);
+    {
+        let state = Arc::new(api_state);
+        tokio::spawn(async move {
+            if let Err(e) = balansir_api::start_server(state, api_port).await {
+                error!("API server error: {e}");
+            }
+        });
+        info!("BalanSir API listening on 127.0.0.1:{}", api_port);
+    }
+
     // Setup signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
