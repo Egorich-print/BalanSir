@@ -4,3 +4,43 @@
 # it in so /dev/net/tun exists without loading a module, and keep the module
 # as fallback.
 CONFIG_TUN=y
+
+# QoS / traffic shaping (LibreQoS-inspired HTB + fq_codel/CAKE). The kernel
+# ships these as modules (=m); BalanSir's executor applies shaping at boot and
+# the daemon may apply it before any module autoload runs, so build the
+# schedulers + classifier into the kernel. Guarantees HTB/fq_codel/CAKE work
+# on a fresh boot with no /lib/modules.
+CONFIG_NET_SCHED=y
+CONFIG_NET_SCH_HTB=y
+CONFIG_NET_SCH_FQ_CODEL=y
+CONFIG_NET_SCH_CAKE=y
+CONFIG_NET_SCH_INGRESS=y
+CONFIG_NET_SCH_NETEM=y
+# Packet classifier used to bind flows to HTB classes (fwmark / u32 / flower).
+CONFIG_NET_CLS_FW=y
+CONFIG_NET_CLS_U32=y
+CONFIG_NET_CLS_FLOWER=y
+CONFIG_NET_CLS_BASIC=y
+CONFIG_NET_CLS_ACT=y
+CONFIG_NET_ACT_IPT=y
+CONFIG_NET_ACT_PEDIT=y
+
+# nftables: the executor's rule mechanism. Build the core + families in so
+# policy enforcement needs no module load at boot.
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_NETLINK=y
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NF_TABLES_IPV6=y
+CONFIG_NF_TABLES_INET=y
+CONFIG_NFT_CT=y
+CONFIG_NFT_FIB_INET=y
+CONFIG_NFT_NAT=y
+CONFIG_NFT_MASQ=y
+CONFIG_NFT_REJECT=y
+CONFIG_NFT_LOG=y
+CONFIG_NFT_LIMIT=y
+CONFIG_NFT_COUNTER=y
+
+# Netlink (needed by rtnetlink-based executor drivers).
+CONFIG_NETLINK_DIAG=y
