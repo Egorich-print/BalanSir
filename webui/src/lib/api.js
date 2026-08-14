@@ -1,7 +1,15 @@
 // Thin client for the BalanSir REST API. All system logic lives in the Rust
 // daemon; this file only maps HTTP/SSE to JS-friendly shapes.
+//
+// `VITE_BALANSIR_API_BASE` lets the Tauri desktop console (embedded SPA)
+// point at a daemon without a same-origin webserver; the daemon-served build
+// keeps the default '' (same origin).
 
-const BASE = '';
+const BASE =
+  (typeof import.meta !== 'undefined' &&
+    import.meta.env &&
+    import.meta.env.VITE_BALANSIR_API_BASE) ||
+  '';
 
 let token = (typeof localStorage !== 'undefined' && localStorage.getItem('balansir_token')) || '';
 

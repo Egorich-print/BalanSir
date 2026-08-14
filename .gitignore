@@ -8,3 +8,5 @@ build/
 *.swp
 *.swo
 *~
+webui/src-tauri/target
+webui/src-tauri/gen
