@@ -17,6 +17,39 @@
   $: status = qosStatus(snapshot);
   $: qos = snapshot ? snapshot.qos : null;
 
+  function configuredBandwidth(iface) {
+    if (!qos || !qos.desired) return null;
+    const cfg = qos.desired.find((c) => c.interface === iface);
+    return cfg ? cfg.bandwidth_bps : null;
+  }
+
+  function fmtBits(bps) {
+    if (!bps) return 'unlimited';
+    if (bps >= 1e9) return `${(bps / 1e9).toFixed(1)} Gbit/s`;
+    return `${(bps / 1e6).toFixed(0)} Mbit/s`;
+  }
+
+  // Actionable saturation hint: when the queue is persistently backed up and
+  // dropping, tell the operator what is configured vs. demanded, and the
+  // implied queue delay — instead of a raw errno.
+  function saturationHint(a) {
+    const s = a && a.stats;
+    if (!s || !a.our_identity) return null;
+    const backlogBits = s.backlog_bytes * 8;
+    const bw = configuredBandwidth(a.interface);
+    const delayMs = bw ? Math.round((backlogBits / bw) * 1000) : null;
+    if (!(s.drops > 0 && backlogBits > 0)) return null;
+    const demand = s.bps || null;
+    return {
+      label: 'queue saturated',
+      title:
+        `WAN queue is saturated.\n` +
+        `Configured: ${fmtBits(bw)}\n` +
+        (demand ? `Current demand: ${fmtBits(demand)}\n` : '') +
+        (delayMs ? `Queue delay: ${delayMs} ms` : `Backlog: ${fmtBytes(s.backlog_bytes)}`),
+    };
+  }
+
   async function apply() {
     busy = true;
     notice = '';
@@ -136,9 +169,15 @@
     <h3>Applied in kernel</h3>
     {#if qos && qos.applied.length}
       <table>
-        <thead><tr><th>Interface</th><th>Kind</th><th>Handle</th><th>BalanSir</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Interface</th><th>Kind</th><th>Handle</th><th>BalanSir</th>
+            <th>Drops</th><th>Backlog</th><th>Throughput</th><th>Health</th>
+          </tr>
+        </thead>
         <tbody>
           {#each qos.applied as a}
+            {@const hint = saturationHint(a)}
             <tr>
               <td>{a.interface}</td>
               <td>{a.kind || '—'}</td>
@@ -146,6 +185,18 @@
               <td>{a.our_identity ? 'yes' : 'no'}
                 {#if a.our_identity}
                   <button class="link" on:click={() => removeOne(a.interface)} disabled={busy}>remove</button>
+                {/if}
+              </td>
+              <td>{a.stats ? a.stats.drops : '—'}</td>
+              <td>{a.stats ? fmtBytes(a.stats.backlog_bytes) : '—'}</td>
+              <td>{a.stats && a.stats.bps ? `${(a.stats.bps / 1e6).toFixed(1)} Mb/s` : '—'}</td>
+              <td>
+                {#if hint}
+                  <span class="saturate" title={hint.title}>{hint.label}</span>
+                {:else if a.stats && a.stats.drops > 0}
+                  <span class="warn">drops</span>
+                {:else}
+                  <span class="ok">healthy</span>
                 {/if}
               </td>
             </tr>
@@ -192,4 +243,7 @@
   th { color: #7a8aa5; font-size: 0.72rem; text-transform: uppercase; }
   .empty { color: #5a6a85; font-size: 0.85rem; }
   .link { background: none; border: none; color: #4cc9f0; text-decoration: underline; cursor: pointer; font-size: 0.8rem; padding: 0; }
+  .saturate { background: #3d1f1f; color: #ff8a8a; font-weight: 700; font-size: 0.75rem; padding: 2px 8px; border-radius: 8px; cursor: help; }
+  .warn { color: #e8a44c; font-size: 0.75rem; font-weight: 700; }
+  .ok { color: #4cd07d; font-size: 0.75rem; font-weight: 700; }
 </style>
