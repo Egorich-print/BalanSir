@@ -13,7 +13,8 @@ include $(sort $(wildcard $(BR2_EXTERNAL_BALANSIR_PATH)/package/*/*.mk))
 # installed; copy it here and repoint the symlinks.
 define BALANSIR_TAILSCALED_FIX
 	rm -f $(TARGET_DIR)/usr/bin/tailscaled $(TARGET_DIR)/usr/sbin/tailscaled $(TARGET_DIR)/bin/tailscaled
-	$(INSTALL) -D -m 0755 $(TAILSCALE_DIR)/bin/tailscaled $(TARGET_DIR)/usr/bin/tailscaled
+	cp -f $(TAILSCALE_DIR)/bin/tailscaled $(TARGET_DIR)/usr/bin/tailscaled
+	chmod 0755 $(TARGET_DIR)/usr/bin/tailscaled
 	ln -sf /usr/bin/tailscaled $(TARGET_DIR)/usr/sbin/tailscaled
 	ln -sf /usr/bin/tailscaled $(TARGET_DIR)/bin/tailscaled
 endef
