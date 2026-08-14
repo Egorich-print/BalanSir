@@ -17,6 +17,11 @@ After=network-pre.target NetworkManager.service systemd-resolved.service
 # exits immediately, which combined with Restart=on-failure produces the same
 # 100ms restart loop.
 EnvironmentFile=-/etc/default/tailscaled
+# Create /dev/net/tun before starting (kernel has CONFIG_TUN=y; tmpfiles '
+# c ' device lines are finicky across systemd versions). mknod is idempotent
+# when the node already exists (EEXIST is ignored by --prefix).
+ExecStartPre=-/bin/mkdir -p /dev/net
+ExecStartPre=-/bin/mknod /dev/net/tun c 10 200
 ExecStart=/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock $FLAGS
 ExecStopPost=/usr/sbin/tailscaled --cleanup
 
