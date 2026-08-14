@@ -27,13 +27,14 @@ BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2710-rpi-3-b broadcom/bcm2710-rpi-3-b-plus broadcom/bcm2710-rpi-cm3"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 
-# Firmware + boot files
+# Firmware + boot files. Paths are relative to the Buildroot root unless
+# BR2_EXTERNAL_* is used; our board files live in the external tree.
 BR2_PACKAGE_RPI_FIRMWARE=y
 BR2_PACKAGE_RPI_FIRMWARE_BOOTCODE_BIN=y
 BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI=y
-BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="board/raspberrypi3/config_3_64bit.txt"
+BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="$(BR2_EXTERNAL_BALANSIR_PATH)/board/raspberrypi3/config_3_64bit.txt"
 # Debug UART kernel cmdline (console=tty1 console=serial0,115200 loglevel=8).
-BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE="board/raspberrypi3/cmdline.txt"
+BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE="$(BR2_EXTERNAL_BALANSIR_PATH)/board/raspberrypi3/cmdline.txt"
 
 # Debug UART: serial console on ttyAMA0 @115200 for recovery + boot logs.
 BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"
