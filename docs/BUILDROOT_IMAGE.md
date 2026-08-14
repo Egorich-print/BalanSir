@@ -151,8 +151,8 @@ rm -f output/build/balansir-0.4.0/.stamp_{built,target_installed,rsynced}
 - Toolchain: ARM aarch64 external (download), glibc
 - `BR2_REPRODUCIBLE=y`
 - Final production image (2026-08-15):
-  `sdcard-rpi-baseline.img`, 335544832 bytes (320 MiB),
-  SHA256 `598caf8329e96c85d2047dd30c2e30ea9909a981cc664bde88628e37c76a3401`
+  `sdcard-rpi-baseline.img` (built from Git `main` @ 3f1c9be), 335544832 bytes (320 MiB),
+  SHA256 `0bfc140a9de8a008f9cfeda682045e80efcec7b453248ce616ce0f1cb5c9a123`
 - Boot partition: `Image`, `bcm2710-rpi-3-b{-plus,cm3}.dtb`, `bootcode.bin`,
   `fixup.dat`, `start.elf`, `overlays/`, `cmdline.txt`
   (`... net.ifnames=0 biosdevname=0`), `config.txt` (UART debug, arm_64bit)
