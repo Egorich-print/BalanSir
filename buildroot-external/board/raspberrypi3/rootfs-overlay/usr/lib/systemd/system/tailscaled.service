@@ -8,7 +8,11 @@ After=network-pre.target NetworkManager.service systemd-resolved.service
 # Type=simple: the Buildroot build of tailscaled is not compiled with
 # sd_notify support (no systemd build tag), so Type=notify would time out and
 # FAILED (same fix as BalanSir units, ADR-030).
-EnvironmentFile=/etc/default/tailscaled
+# EnvironmentFile without the leading '-' fails the unit when
+# /etc/default/tailscaled is absent, causing an infinite restart loop
+# (observed: restart every 100ms, pinning CPU and starving systemd). The '-'
+# makes the file optional — defaults are used when it doesn't exist.
+EnvironmentFile=-/etc/default/tailscaled
 ExecStart=/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=${PORT} $FLAGS
 ExecStopPost=/usr/sbin/tailscaled --cleanup
 
