@@ -106,6 +106,8 @@ pub struct SubsystemManager {
     cpu_prev: RwLock<Option<crate::system_stats::CpuSample>>,
     /// Previous interface counters for throughput deltas: name → (rx, tx, ms).
     last_counters: RwLock<std::collections::HashMap<String, (u64, u64, u64)>>,
+    /// Detected capability profile (once, on the first refresh).
+    capabilities: RwLock<Option<balansir_common::subsystems::CapabilityProfile>>,
 }
 
 /// Map an executor QoS result to an error when the executor reported failure
@@ -120,14 +122,9 @@ fn qos_result_to_result(result: balansir_common::qos::QosResult) -> Result<(), S
 impl SubsystemManager {
     pub fn new(exec: Arc<dyn SubsystemExec>) -> Self {
         let (events, _) = broadcast::channel(128);
-        let snapshot = SharedSubsystemSnapshot::new();
-        // Publish the detected capability profile once at startup (it is
-        // derived from hardware and does not change at runtime).
-        let capabilities = crate::capability::detect();
-        snapshot.update_blocking(move |s| s.capabilities = capabilities);
         Self {
             exec,
-            snapshot,
+            snapshot: SharedSubsystemSnapshot::new(),
             qos_intent: RwLock::new(Vec::new()),
             events,
             interface_filter: RwLock::new(String::new()),
@@ -136,6 +133,7 @@ impl SubsystemManager {
             xray: RwLock::new(None),
             cpu_prev: RwLock::new(None),
             last_counters: RwLock::new(std::collections::HashMap::new()),
+            capabilities: RwLock::new(None),
         }
     }
 
@@ -208,6 +206,14 @@ impl SubsystemManager {
                     detail: format!("interface refresh: {e}"),
                 });
             }
+        }
+
+        // Capability profile (detected once, hardware-derived) ---------------
+        if self.capabilities.read().await.is_none() {
+            *self.capabilities.write().await = Some(crate::capability::detect());
+        }
+        if let Some(caps) = self.capabilities.read().await.clone() {
+            self.snapshot.update(|s| s.capabilities = caps).await;
         }
 
         // System resources (CPU/RAM/load/uptime) ---------------------------
