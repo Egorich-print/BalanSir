@@ -397,3 +397,14 @@ pub async fn path_health(State(state): State<Arc<ApiState>>) -> impl IntoRespons
     };
     (StatusCode::OK, Json(api.path_health().await))
 }
+
+/// Xray status (installed / running).
+pub async fn xray_status(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let Some(api) = state.api.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Control plane not available" })),
+        );
+    };
+    (StatusCode::OK, Json(api.xray_status().await))
+}

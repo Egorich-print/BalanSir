@@ -107,6 +107,10 @@ impl ApiSurface for ReconcilerApi {
     async fn path_health(&self) -> serde_json::Value {
         self.reconciler.path_health()
     }
+
+    async fn xray_status(&self) -> serde_json::Value {
+        crate::xray::probe_status()
+    }
 }
 
 #[cfg(test)]

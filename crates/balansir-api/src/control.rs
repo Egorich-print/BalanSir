@@ -312,6 +312,9 @@ impl crate::surface::ApiSurface for ControlPlane {
     async fn path_health(&self) -> serde_json::Value {
         serde_json::json!([])
     }
+    async fn xray_status(&self) -> serde_json::Value {
+        serde_json::json!({ "installed": false, "running": false })
+    }
 }
 
 /// A desired-state store that is both readable (`DesiredProvider`) and

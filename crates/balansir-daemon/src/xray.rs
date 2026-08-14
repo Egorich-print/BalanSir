@@ -155,6 +155,22 @@ impl XrayDriver {
     }
 }
 
+/// Probe whether an xray process is currently running (for the WebUI
+/// Xray panel). Binary may be absent — that's "not installed", not "failed".
+pub fn probe_status() -> serde_json::Value {
+    let installed = balansir_common::paths::resolve_bin("xray")
+        .or_else(|| balansir_common::paths::resolve_bin("xray-core"))
+        .is_some();
+    let running = std::process::Command::new("pgrep")
+        .args(["-x", "xray"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    serde_json::json!({ "installed": installed, "running": running })
+}
+
 impl Drop for XrayDriver {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {

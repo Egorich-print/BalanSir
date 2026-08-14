@@ -20,6 +20,7 @@
   let tsError = null;
   let qos = null;
   let paths = [];
+  let xray = null;
 
   let pollTimer = null;
   let es = null;
@@ -72,6 +73,11 @@
       paths = await api.pathHealth();
     } catch (e) {
       paths = [];
+    }
+    try {
+      xray = await api.xrayStatus();
+    } catch (e) {
+      xray = null;
     }
     try {
       const resp = await fetch('/api/metrics');
@@ -172,6 +178,7 @@
     <button class:active={tab === 'overview'} on:click={() => tab = 'overview'}>Overview</button>
     <button class:active={tab === 'policy'} on:click={() => tab = 'policy'}>Policy</button>
     <button class:active={tab === 'qos'} on:click={() => tab = 'qos'}>QoS</button>
+    <button class:active={tab === 'xray'} on:click={() => tab = 'xray'}>Xray</button>
     <button class:active={tab === 'tailscale'} on:click={() => tab = 'tailscale'}>Tailscale</button>
     <button class:active={tab === 'events'} on:click={() => tab = 'events'}>Events</button>
     <button class:active={tab === 'metrics'} on:click={() => tab = 'metrics'}>Metrics</button>
@@ -323,6 +330,25 @@
           {/if}
         {:else}
           <p>QoS status unavailable.</p>
+        {/if}
+      </div>
+    </section>
+  {/if}
+
+  {#if tab === 'xray'}
+    <section>
+      <div class="card">
+        <h2>Xray (proxy path)</h2>
+        {#if xray}
+          <div class="ts-grid">
+            <div class="ts-item"><span>Installed</span><b>{xray.installed ? 'yes' : 'no'}</b></div>
+            <div class="ts-item"><span>Running</span><b>{xray.running ? 'yes' : 'no'}</b></div>
+          </div>
+          {#if !xray.installed}
+            <p class="error">xray binary not found. Install it to enable the proxy path.</p>
+          {/if}
+        {:else}
+          <p>Xray status unavailable.</p>
         {/if}
       </div>
     </section>

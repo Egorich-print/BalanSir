@@ -40,6 +40,7 @@ export const api = {
   tailscaleDown: () => post('/tailscale/down'),
   qosStatus: () => get('/qos/status'),
   pathHealth: () => get('/health/paths'),
+  xrayStatus: () => get('/xray/status'),
 };
 
 export function eventsStream(onEvent, onStatus) {

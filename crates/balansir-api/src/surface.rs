@@ -86,4 +86,7 @@ pub trait ApiSurface: Send + Sync {
 
     /// Per-path health reports (hysteresis-smoothed) for the WebUI.
     async fn path_health(&self) -> serde_json::Value;
+
+    /// Xray status (installed / running).
+    async fn xray_status(&self) -> serde_json::Value;
 }
