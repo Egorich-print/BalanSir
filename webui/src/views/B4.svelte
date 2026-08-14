@@ -125,7 +125,7 @@
       <thead>
         <tr>
           <th>Flow</th><th>Health</th><th>State</th><th>Profile</th>
-          <th>Last decision</th><th>Effective MTU</th><th>Signals</th><th>Hint</th>
+          <th>Last decision</th><th>Effective MTU</th><th>Signals</th><th>Why</th><th>Hint</th>
         </tr>
       </thead>
       <tbody>
@@ -138,6 +138,15 @@
             <td>{decisionKind(f.last_decision)}</td>
             <td>{f.mtu ?? '—'}</td>
             <td class="signals">{signals(f)}</td>
+            <td>
+              {#if f.path && f.path.reasons && f.path.reasons.length && ['degraded', 'failing'].includes(f.path.state)}
+                <ul class="why">
+                  {#each f.path.reasons as r}<li>{r}</li>{/each}
+                </ul>
+              {:else}
+                <span class="muted">—</span>
+              {/if}
+            </td>
             <td class="muted">{STATE_HINT[f.state] || '—'}</td>
           </tr>
         {/each}
@@ -181,6 +190,7 @@
   .muted { color: #7a8aa5; }
   .err { color: #ff9c9c; font-size: 0.85rem; }
   .ok { color: #4cd07d; font-size: 0.85rem; }
+  ul.why { margin: 0; padding-left: 1rem; font-size: 0.8rem; color: #e8d44c; }
   .btn {
     background: #1e5c3d; color: #e8ecf4; border: 1px solid #2a7a52;
     padding: 7px 14px; border-radius: 8px; cursor: pointer; font-size: 0.85rem;

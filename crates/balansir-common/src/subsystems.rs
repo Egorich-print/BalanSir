@@ -76,6 +76,11 @@ pub struct B4FlowView {
     pub dns_ok: Option<bool>,
     /// Whether a reset/timeout was observed for this flow.
     pub reset_or_timeout: Option<bool>,
+    /// Unified path-health view (mission §9): hysteresis-smoothed state and
+    /// the reasons behind the current state, built from the same
+    /// host-stack observation as `health`.
+    #[serde(default)]
+    pub path: crate::path_health::PathHealthView,
 }
 
 /// B4 component view: policy intent, per-flow adaptation state, ownership

@@ -90,6 +90,10 @@ pub struct PathSample {
     /// Connectivity success. `false` means the probe failed outright
     /// (timeout/reset) — much stronger evidence than a slow RTT.
     pub reachable: bool,
+    /// Explicit evidence of degradation that has no clean numeric form (e.g.
+    /// heavy retransmits with a low RTT, throughput collapse). Lets consumers
+    /// feed qualitive signals without inventing fake latency/loss numbers.
+    pub degraded_evidence: bool,
 }
 
 impl PathSample {
@@ -98,6 +102,7 @@ impl PathSample {
             latency_ms: None,
             loss_pct: None,
             reachable: true,
+            degraded_evidence: false,
         }
     }
 
@@ -106,6 +111,7 @@ impl PathSample {
             latency_ms: None,
             loss_pct: None,
             reachable: false,
+            degraded_evidence: false,
         }
     }
 }
@@ -195,6 +201,7 @@ impl PathHealth {
         self.update_ema(sample);
 
         let degraded = !sample.reachable
+            || sample.degraded_evidence
             || self
                 .config
                 .latency_threshold_ms
@@ -492,6 +499,25 @@ mod tests {
             PathState::Failing,
             "cooldown must hold the state until the interval elapses"
         );
+    }
+
+    #[test]
+    fn degraded_evidence_counts_without_fake_numbers() {
+        let mut h = PathHealth::new(cfg());
+        h.observe(PathSample::healthy());
+        // Heavy retransmits with a low RTT: qualitative evidence only.
+        let sample = PathSample {
+            latency_ms: Some(20.0),
+            loss_pct: None,
+            reachable: true,
+            degraded_evidence: true,
+        };
+        assert_eq!(h.observe(sample), None, "below enter_degraded");
+        let t = h.observe(sample);
+        assert_eq!(t, Some(PathTransition::EnteredDegraded));
+        let view = h.view();
+        assert_eq!(view.latency_ms.unwrap(), 20.0, "latency stays the measured value");
+        assert_eq!(view.state, "degraded");
     }
 
     #[test]
