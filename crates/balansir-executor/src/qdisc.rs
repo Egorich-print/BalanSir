@@ -287,40 +287,46 @@ impl QosBackend for TcNetlinkBackend {
     }
 }
 
-/// Build CAKE `TCA_OPTIONS` attributes. Attribute numbering follows the Linux
-/// `tc_cake.h` ABI (TCA_CAKE_BASE_RATE=1 … TCA_CAKE_FWMARK=16).
+/// Build CAKE `TCA_OPTIONS` attributes.
+///
+/// The attribute numbers and encodings below were verified empirically
+/// against the running kernel's ABI (captured from `tc` netlink messages,
+/// kernel 7.x): TCA_CAKE_BASE_RATE=2 (u64 bytes/sec), TCA_CAKE_OVERHEAD=6
+/// (s32), TCA_CAKE_RTT=7 / TCA_CAKE_TARGET=8 (u32 usec), TCA_CAKE_MEMORY=10
+/// (u32 bytes), TCA_CAKE_WASH=13 (u32). Values are stored in native byte
+/// order — identical to what `tc` sends. CAKE has no netlink knob to disable
+/// ECN in this ABI (it is always enabled), so `ecn: false` is intentionally
+/// not turned into a fake flag; fq_codel still honours the `ecn` config.
 fn cake_options(config: &QosConfig) -> Vec<TcOption> {
     let mut opts = Vec::new();
     if let Some(bps) = config.bandwidth_bps {
         // base_rate is bytes/sec in the netlink ABI (tc converts `rate`).
-        let bytes_per_sec = (bps / 8).min(u64::from(u32::MAX)) as u32;
-        opts.push(TcOption::Other(DefaultNla::new(
-            1,
-            bytes_per_sec.to_ne_bytes().to_vec(),
-        )));
+        let bytes_per_sec = bps / 8;
+        let mut data = Vec::new();
+        data.extend_from_slice(&(bytes_per_sec as u32).to_ne_bytes());
+        data.extend_from_slice(&0u32.to_ne_bytes());
+        opts.push(TcOption::Other(DefaultNla::new(2, data)));
     }
     if let Some(target_ms) = config.latency_target_ms {
-        let target_ns = target_ms * 1_000_000;
+        // TCA_CAKE_TARGET, u32 usec; the kernel clamps it to the interval.
+        let target_us = (target_ms * 1000).min(u64::from(u32::MAX)) as u32;
         opts.push(TcOption::Other(DefaultNla::new(
-            6,
-            target_ns.to_ne_bytes().to_vec(),
+            8,
+            target_us.to_ne_bytes().to_vec(),
         )));
     }
     if let Some(overhead) = config.overhead_bytes {
         opts.push(TcOption::Other(DefaultNla::new(
-            4,
+            6,
             overhead.to_ne_bytes().to_vec(),
         )));
     }
     if config.wash {
-        opts.push(TcOption::Other(DefaultNla::new(11, 1u32.to_ne_bytes().to_vec())));
-    }
-    if config.ecn {
-        opts.push(TcOption::Other(DefaultNla::new(9, 0u32.to_ne_bytes().to_vec())));
+        opts.push(TcOption::Other(DefaultNla::new(13, 1u32.to_ne_bytes().to_vec())));
     }
     if let Some(memory) = config.memory_limit_bytes {
         let bytes = (memory.min(u64::from(u32::MAX)) as u32).to_ne_bytes().to_vec();
-        opts.push(TcOption::Other(DefaultNla::new(8, bytes)));
+        opts.push(TcOption::Other(DefaultNla::new(10, bytes)));
     }
     opts
 }
@@ -583,6 +589,65 @@ impl QosBackend for InMemoryBackend {
 mod tests {
     use super::*;
     use balansir_common::qos::{QosDirection, QosConfig};
+    use netlink_packet_utils::nla::Nla;
+
+    /// Regression test for the CAKE netlink ABI: attribute numbers and native
+    /// byte order were verified against `tc` messages on the running kernel
+    /// (BASE_RATE=2 u64, OVERHEAD=6 s32, TARGET=8 u32, WASH=13 u32, MEMORY=10
+    /// u32). Encoding drift here silently degrades CAKE to "bandwidth
+    /// unlimited" or garbles overhead/target.
+    #[test]
+    fn cake_options_abi_matches_tc() {
+        let config = QosConfig {
+            interface: "eth0".into(),
+            direction: QosDirection::Egress,
+            kind: QdiscKind::Cake,
+            bandwidth_bps: Some(20_000_000), // 20 Mbit/s
+            latency_target_ms: Some(50),     // 50 ms
+            overhead_bytes: Some(32),
+            ecn: true,
+            wash: true,
+            memory_limit_bytes: Some(256 * 1024),
+            classes: vec![],
+            comment: QosConfig::identity("eth0"),
+        };
+        let opts = cake_options(&config);
+        let mut attrs_out = Vec::new();
+        for o in &opts {
+            if let TcOption::Other(nla) = o {
+                let mut value = vec![0u8; nla.value_len()];
+                nla.emit_value(&mut value);
+                let mut v = Vec::new();
+                v.extend_from_slice(&((value.len() + 4) as u16).to_ne_bytes());
+                v.extend_from_slice(&nla.kind().to_ne_bytes());
+                v.extend_from_slice(&value);
+                attrs_out.push(v);
+            }
+        }
+        let blob: Vec<u8> = attrs_out.concat();
+
+        // Walk the TCA_OPTIONS sub-attributes.
+        let mut i = 0;
+        let mut attrs = Vec::new();
+        while i + 4 <= blob.len() {
+            let len = u16::from_le_bytes([blob[i], blob[i + 1]]) as usize;
+            let kind = u16::from_le_bytes([blob[i + 2], blob[i + 3]]);
+            attrs.push((kind, blob[i + 4..i + len].to_vec()));
+            i += (len + 3) & !3;
+        }
+
+        let get = |k: u16| attrs.iter().find(|(t, _)| *t == k).map(|(_, d)| d.clone());
+        let rate = get(2).expect("BASE_RATE attr");
+        assert_eq!(u64::from_le_bytes(rate[..8].try_into().unwrap()), 2_500_000);
+        let overhead = get(6).expect("OVERHEAD attr");
+        assert_eq!(i32::from_le_bytes(overhead[..4].try_into().unwrap()), 32);
+        let target = get(8).expect("TARGET attr");
+        assert_eq!(u32::from_le_bytes(target[..4].try_into().unwrap()), 50_000);
+        let memory = get(10).expect("MEMORY attr");
+        assert_eq!(u32::from_le_bytes(memory[..4].try_into().unwrap()), 256 * 1024);
+        let wash = get(13).expect("WASH attr");
+        assert_eq!(u32::from_le_bytes(wash[..4].try_into().unwrap()), 1);
+    }
 
     fn full_caps() -> QosCapabilities {
         QosCapabilities {
