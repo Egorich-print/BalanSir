@@ -16,6 +16,7 @@ pub mod reconciler_api;
 pub mod reconciliation;
 pub mod secrets;
 pub mod startup;
+pub mod tailscale;
 #[cfg(feature = "wireguard")]
 pub mod wireguard;
 #[cfg(feature = "xray")]

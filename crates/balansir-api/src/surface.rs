@@ -73,4 +73,11 @@ pub trait ApiSurface: Send + Sync {
     async fn dns_resync(&self) -> bool;
     fn metrics(&self) -> Arc<SharedMetrics>;
     fn events(&self) -> Arc<ApiEventBridge>;
+
+    /// Tailscale status (installed / backend state / IP / peers).
+    async fn tailscale_status(&self) -> serde_json::Value;
+    /// Bring Tailscale up (authentication flow).
+    async fn tailscale_up(&self) -> Result<(), String>;
+    /// Bring Tailscale down.
+    async fn tailscale_down(&self) -> Result<(), String>;
 }

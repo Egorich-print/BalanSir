@@ -330,3 +330,48 @@ pub async fn restart_driver() -> impl IntoResponse {
         Json(serde_json::json!({ "error": "driver restart not wired to live processes" })),
     )
 }
+
+/// Tailscale status (installed / backend / IP / peers).
+pub async fn tailscale_status(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let Some(api) = state.api.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Control plane not available" })),
+        );
+    };
+    (StatusCode::OK, Json(api.tailscale_status().await))
+}
+
+/// Bring Tailscale up (authentication flow).
+pub async fn tailscale_up(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let Some(api) = state.api.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Control plane not available" })),
+        );
+    };
+    match api.tailscale_up().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e, "login_required": true })),
+        ),
+    }
+}
+
+/// Bring Tailscale down.
+pub async fn tailscale_down(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let Some(api) = state.api.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Control plane not available" })),
+        );
+    };
+    match api.tailscale_down().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        ),
+    }
+}

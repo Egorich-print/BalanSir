@@ -87,6 +87,18 @@ impl ApiSurface for ReconcilerApi {
     fn events(&self) -> Arc<ApiEventBridge> {
         Arc::clone(&self.events)
     }
+
+    async fn tailscale_status(&self) -> serde_json::Value {
+        serde_json::to_value(crate::tailscale::status().await).unwrap_or_default()
+    }
+
+    async fn tailscale_up(&self) -> Result<(), String> {
+        crate::tailscale::up().await
+    }
+
+    async fn tailscale_down(&self) -> Result<(), String> {
+        crate::tailscale::down().await
+    }
 }
 
 #[cfg(test)]

@@ -296,6 +296,16 @@ impl crate::surface::ApiSurface for ControlPlane {
         // ReconcilerApi; the coordinator-backed plane keeps its own EventBridge.
         Arc::new(crate::surface::ApiEventBridge::new(32))
     }
+
+    async fn tailscale_status(&self) -> serde_json::Value {
+        serde_json::json!({ "installed": false, "error": "not wired (daemon surface)" })
+    }
+    async fn tailscale_up(&self) -> Result<(), String> {
+        Err("not wired (daemon surface)".into())
+    }
+    async fn tailscale_down(&self) -> Result<(), String> {
+        Err("not wired (daemon surface)".into())
+    }
 }
 
 /// A desired-state store that is both readable (`DesiredProvider`) and
