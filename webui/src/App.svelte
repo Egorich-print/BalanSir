@@ -1,224 +1,280 @@
 <script>
+  import { onMount, onDestroy } from 'svelte';
+  import { api, eventsStream } from './lib/api.js';
+
   let health = null;
-  let metrics = '';
   let desired = null;
+  let actual = null;
+  let drift = null;
+  let plan = null;
+  let explain = null;
+  let fingerprint = null;
+  let metricsText = '';
   let events = [];
   let connected = false;
-  let eventSource = null;
+  let error = null;
+  let tab = 'overview';
+  let reloading = false;
 
-  async function fetchHealth() {
+  let pollTimer = null;
+  let es = null;
+
+  function statusClass() {
+    if (!health) return 'unknown';
+    if (health.status === 'ok') return 'healthy';
+    if (health.status === 'error') return 'error';
+    return 'degraded';
+  }
+
+  function overallState() {
+    // Human-readable overall state: healthy / degraded / blocked.
+    const hasDrift = drift && drift.drift_count > 0;
+    const rulesOk = desired && actual && desired.rule_count > 0
+      && desired.rule_count >= actual.rule_count;
+    if (health?.status === 'error') return { label: 'Blocked', cls: 'error' };
+    if (hasDrift) return { label: 'Degraded', cls: 'degraded' };
+    if (rulesOk) return { label: 'Healthy', cls: 'healthy' };
+    return { label: 'Recovering', cls: 'degraded' };
+  }
+
+  async function refresh() {
     try {
-      const resp = await fetch('/health');
-      health = await resp.json();
+      const results = await Promise.allSettled([
+        api.health(), api.desired(), api.actual(), api.drift(),
+        api.plan(), api.explain(), api.fingerprint(),
+      ]);
+      [health, desired, actual, drift, plan, explain, fingerprint] = results.map(
+        (r) => (r.status === 'fulfilled' ? r.value : null)
+      );
+      error = null;
     } catch (e) {
-      health = { status: 'error', error: e.message };
+      error = e.message;
+    }
+    try {
+      const resp = await fetch('/api/metrics');
+      metricsText = await resp.text();
+    } catch (_) { /* metrics optional */ }
+  }
+
+  async function doReconcile() {
+    reloading = true;
+    try {
+      await api.reconcile();
+      await refresh();
+    } catch (e) {
+      error = e.message;
+    } finally {
+      reloading = false;
     }
   }
 
-  async function fetchMetrics() {
-    try {
-      const resp = await fetch('/metrics');
-      metrics = await resp.text();
-    } catch (e) {
-      metrics = 'Error loading metrics';
-    }
-  }
+  onMount(() => {
+    refresh();
+    pollTimer = setInterval(refresh, 5000);
+    es = eventsStream(
+      (ev) => { events = [ev, ...events].slice(0, 100); },
+      (ok) => { connected = ok; }
+    );
+  });
 
-  async function fetchDesired() {
-    try {
-      const resp = await fetch('/desired');
-      desired = await resp.json();
-    } catch (e) {
-      desired = { rules: [], rule_count: 0 };
-    }
-  }
-
-  function connectSSE() {
-    eventSource = new EventSource('/events/stream');
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      events = [data, ...events].slice(0, 50);
-    };
-    eventSource.onopen = () => { connected = true; };
-    eventSource.onerror = () => { connected = false; };
-  }
-
-  async function triggerReconcile() {
-    await fetch('/reconcile', { method: 'POST' });
-    await fetchDesired();
-  }
-
-  // Initial load
-  fetchHealth();
-  fetchMetrics();
-  fetchDesired();
-  connectSSE();
+  onDestroy(() => {
+    if (pollTimer) clearInterval(pollTimer);
+    if (es) es.close();
+  });
 </script>
 
 <main>
-  <h1>🛡️ BalanSir Dashboard</h1>
-  
-  <div class="grid">
-    <div class="card">
-      <h2>Health</h2>
-      {#if health}
-        <p class:healthy={health.status === 'ok'} class:error={health.status !== 'ok'}>
-          Status: {health.status}
-        </p>
-        <p>Version: {health.version}</p>
-        <p>Uptime: {health.uptime_seconds}s</p>
-      {:else}
-        <p>Loading...</p>
-      {/if}
-    </div>
+  <h1>🛡️ BalanSir — Network Control</h1>
 
-    <div class="card">
-      <h2>Events</h2>
-      <p class:connected>
-        SSE: {connected ? '🟢 Connected' : '🔴 Disconnected'}
-      </p>
-      <div class="event-list">
-        {#each events as event}
-          <div class="event">
-            <span class="event-type">{event.event_type}</span>
-            <span class="event-details">{event.details}</span>
-            <span class="event-time">{new Date(event.timestamp * 1000).toLocaleTimeString()}</span>
-          </div>
-        {/each}
-        {#if events.length === 0}
-          <p>No events yet</p>
-        {/if}
+  {#if error}
+    <div class="banner error">{error}</div>
+  {/if}
+
+  <div class="state-row">
+    <div class="state-card {overallState().cls}">
+      <div class="state-label">Network state</div>
+      <div class="state-value">{overallState().label}</div>
+    </div>
+    <div class="state-card">
+      <div class="state-label">Health</div>
+      <div class="state-value">{health ? health.status : '…'}</div>
+    </div>
+    <div class="state-card">
+      <div class="state-label">Drift</div>
+      <div class="state-value">{drift ? drift.drift_count : '…'}</div>
+    </div>
+    <div class="state-card">
+      <div class="state-label">Rules (desired/actual)</div>
+      <div class="state-value">
+        {desired ? desired.rule_count : '…'} / {actual ? actual.rule_count : '…'}
       </div>
     </div>
-
-    <div class="card">
-      <h2>Desired State</h2>
-      {#if desired}
-        <p>Rules: {desired.rule_count}</p>
-        <ul>
-          {#each desired.rules as rule}
-            <li>
-              <strong>#{rule.id}</strong> - {rule.action}
-              <span class="priority">P{rule.priority}</span>
-            </li>
-          {/each}
-        </ul>
-      {:else}
-        <p>Loading...</p>
-      {/if}
-      <button on:click={triggerReconcile}>🔄 Reconcile</button>
+    <div class="state-card">
+      <div class="state-label">Config fingerprint</div>
+      <div class="state-value mono">
+        {fingerprint ? Number(fingerprint.fingerprint ?? fingerprint).toString(16).slice(0, 10) : '…'}
+      </div>
     </div>
-
-    <div class="card metrics">
-      <h2>Metrics</h2>
-      <pre>{metrics}</pre>
+    <div class="state-card">
+      <div class="state-label">SSE</div>
+      <div class="state-value">{connected ? '🟢 live' : '🔴 offline'}</div>
     </div>
   </div>
 
-  <div class="footer">
-    <p>BalanSir v0.1.0 | Network Policy Engine</p>
-  </div>
+  <nav class="tabs">
+    <button class:active={tab === 'overview'} on:click={() => tab = 'overview'}>Overview</button>
+    <button class:active={tab === 'policy'} on:click={() => tab = 'policy'}>Policy</button>
+    <button class:active={tab === 'events'} on:click={() => tab = 'events'}>Events</button>
+    <button class:active={tab === 'metrics'} on:click={() => tab = 'metrics'}>Metrics</button>
+  </nav>
+
+  {#if tab === 'overview'}
+    <section>
+      <div class="grid">
+        <div class="card">
+          <h2>Desired state</h2>
+          {#if desired}
+            <p><strong>Rules:</strong> {desired.rule_count}</p>
+            <p><strong>Drivers:</strong> {desired.drivers}</p>
+            <ul>
+              {#each desired.rules as rule}
+                <li>#{rule.id} — {rule.action} <span class="prio">P{rule.priority}</span></li>
+              {/each}
+            </ul>
+          {:else}<p>Loading…</p>{/if}
+          <button on:click={doReconcile} disabled={reloading}>
+            {reloading ? 'Reconciling…' : '🔄 Reconcile now'}
+          </button>
+        </div>
+
+        <div class="card">
+          <h2>Actual (kernel)</h2>
+          {#if actual}
+            <p><strong>Active rules:</strong> {actual.rule_count}</p>
+            <ul>
+              {#each actual.active_rules as rule}
+                <li>#{rule.id} — {rule.action}</li>
+              {/each}
+            </ul>
+          {:else}<p>Loading…</p>{/if}
+        </div>
+
+        <div class="card">
+          <h2>Drift</h2>
+          {#if drift}
+            {#if drift.items.length === 0}
+              <p class="healthy">No drift — desired matches actual.</p>
+            {:else}
+              {#each drift.items as item}
+                <div class="drift-item">
+                  <strong>#{item.rule_id}</strong> {item.kind}: {item.details}
+                </div>
+              {/each}
+            {/if}
+          {:else}<p>Loading…</p>{/if}
+        </div>
+
+        <div class="card">
+          <h2>Reconciliation plan</h2>
+          <pre>{plan ? plan.plan : 'Loading…'}</pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Explain</h2>
+        <pre>{explain ? explain.explain : 'Loading…'}</pre>
+      </div>
+    </section>
+  {/if}
+
+  {#if tab === 'policy'}
+    <section>
+      <div class="card">
+        <h2>Policy rules</h2>
+        {#if desired}
+          <table>
+            <thead><tr><th>ID</th><th>Action</th><th>Priority</th><th>Flow</th></tr></thead>
+            <tbody>
+              {#each desired.rules as rule}
+                <tr>
+                  <td>#{rule.id}</td>
+                  <td>{rule.action}</td>
+                  <td>{rule.priority}</td>
+                  <td class="mono">{JSON.stringify(rule.flow)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {:else}<p>Loading…</p>{/if}
+      </div>
+      <div class="card">
+        <h2>Explain</h2>
+        <pre>{explain ? explain.explain : 'Loading…'}</pre>
+      </div>
+    </section>
+  {/if}
+
+  {#if tab === 'events'}
+    <section>
+      <div class="card">
+        <h2>Event stream {connected ? '🟢' : '🔴'}</h2>
+        {#if events.length === 0}<p>No events yet.</p>{/if}
+        {#each events as event}
+          <div class="event">
+            <span class="e-type">{event.event_type}</span>
+            <span class="e-details">{event.details}</span>
+            <span class="e-time">{new Date(event.timestamp * 1000).toLocaleTimeString()}</span>
+          </div>
+        {/each}
+      </div>
+    </section>
+  {/if}
+
+  {#if tab === 'metrics'}
+    <section>
+      <div class="card">
+        <h2>Metrics (Prometheus)</h2>
+        <pre class="metrics">{metricsText || 'Loading…'}</pre>
+      </div>
+    </section>
+  {/if}
+
+  <div class="footer">BalanSir v0.1.0 · operational console</div>
 </main>
 
 <style>
-  main {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 20px;
-    background: #1a1a2e;
-    color: #eee;
-    min-height: 100vh;
-  }
-
-  h1 {
-    text-align: center;
-    color: #4ecdc4;
-    margin-bottom: 30px;
-  }
-
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 20px;
-  }
-
-  .card {
-    background: #16213e;
-    border-radius: 12px;
-    padding: 20px;
-    border: 1px solid #0f3460;
-  }
-
-  .card h2 {
-    color: #4ecdc4;
-    margin-top: 0;
-    font-size: 1.2em;
-  }
-
+  main { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    max-width: 1200px; margin: 0 auto; padding: 20px; background: #1a1a2e; color: #eee; min-height: 100vh; }
+  h1 { text-align: center; color: #4ecdc4; margin-bottom: 20px; }
+  .banner { padding: 10px; border-radius: 8px; margin-bottom: 10px; }
+  .banner.error { background: #5c2e2e; color: #ff6b6b; }
+  .state-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .state-card { background: #16213e; border-radius: 12px; padding: 16px; border: 1px solid #0f3460; text-align: center; }
+  .state-label { font-size: 0.8em; color: #888; text-transform: uppercase; }
+  .state-value { font-size: 1.3em; font-weight: bold; margin-top: 4px; }
+  .mono { font-family: ui-monospace, Menlo, monospace; }
   .healthy { color: #4ecdc4; }
+  .degraded { color: #f1c40f; }
   .error { color: #ff6b6b; }
-  .connected { color: #4ecdc4; }
-
-  .event-list {
-    max-height: 300px;
-    overflow-y: auto;
-  }
-
-  .event {
-    padding: 8px;
-    border-bottom: 1px solid #0f3460;
-    font-size: 0.9em;
-  }
-
-  .event-type {
-    font-weight: bold;
-    color: #4ecdc4;
-    margin-right: 8px;
-  }
-
-  .event-time {
-    float: right;
-    color: #888;
-    font-size: 0.8em;
-  }
-
-  .priority {
-    background: #0f3460;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.8em;
-    margin-left: 8px;
-  }
-
-  .metrics pre {
-    background: #0f3460;
-    padding: 10px;
-    border-radius: 8px;
-    overflow-x: auto;
-    font-size: 0.8em;
-    max-height: 300px;
-  }
-
-  button {
-    background: #4ecdc4;
-    color: #1a1a2e;
-    border: none;
-    padding: 10px 20px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-weight: bold;
-    margin-top: 10px;
-  }
-
-  button:hover {
-    background: #45b7d1;
-  }
-
-  .footer {
-    text-align: center;
-    margin-top: 40px;
-    color: #666;
-    font-size: 0.9em;
-  }
+  .unknown { color: #888; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .tabs button { background: #16213e; border: 1px solid #0f3460; color: #aaa; padding: 8px 16px; border-radius: 8px; cursor: pointer; }
+  .tabs button.active { background: #4ecdc4; color: #1a1a2e; font-weight: bold; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 16px; }
+  .card { background: #16213e; border-radius: 12px; padding: 16px; border: 1px solid #0f3460; margin-bottom: 16px; }
+  .card h2 { color: #4ecdc4; margin-top: 0; font-size: 1.1em; }
+  .prio { background: #0f3460; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; margin-left: 8px; }
+  .drift-item { padding: 6px; border-bottom: 1px solid #0f3460; font-size: 0.9em; }
+  pre { background: #0f3460; padding: 10px; border-radius: 8px; overflow-x: auto; font-size: 0.8em; max-height: 300px; overflow-y: auto; }
+  pre.metrics { max-height: 400px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #0f3460; font-size: 0.9em; }
+  th { color: #4ecdc4; }
+  button { background: #4ecdc4; color: #1a1a2e; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; margin-top: 8px; }
+  button:hover { background: #45b7d1; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  .event { padding: 8px; border-bottom: 1px solid #0f3460; font-size: 0.9em; }
+  .e-type { font-weight: bold; color: #4ecdc4; margin-right: 8px; }
+  .e-time { float: right; color: #888; font-size: 0.8em; }
+  .footer { text-align: center; margin-top: 30px; color: #666; font-size: 0.9em; }
 </style>
