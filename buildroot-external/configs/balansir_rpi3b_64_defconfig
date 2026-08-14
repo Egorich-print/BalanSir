@@ -26,6 +26,8 @@ BR2_LINUX_KERNEL_DEFCONFIG="bcm2711"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2710-rpi-3-b broadcom/bcm2710-rpi-3-b-plus broadcom/bcm2710-rpi-cm3"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+# BalanSir kernel fragment (TUN built-in for Tailscale).
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_BALANSIR_PATH)/board/raspberrypi3/linux.fragment"
 
 # Firmware + boot files. Paths are relative to the Buildroot root unless
 # BR2_EXTERNAL_* is used; our board files live in the external tree.

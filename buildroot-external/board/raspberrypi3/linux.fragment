@@ -1,0 +1,6 @@
+# BalanSir kernel config fragment (applied on top of bcm2711 defconfig).
+#
+# Tailscale needs a TUN device. bcm2711_defconfig ships CONFIG_TUN=m; build
+# it in so /dev/net/tun exists without loading a module, and keep the module
+# as fallback.
+CONFIG_TUN=y
