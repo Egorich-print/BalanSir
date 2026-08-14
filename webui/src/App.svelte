@@ -7,6 +7,7 @@
   import Dashboard from './views/Dashboard.svelte';
   import Network from './views/Network.svelte';
   import Qos from './views/Qos.svelte';
+  import B4 from './views/B4.svelte';
   import Tailscale from './views/Tailscale.svelte';
   import Policy from './views/Policy.svelte';
   import Events from './views/Events.svelte';
@@ -35,6 +36,7 @@
     { id: 'network', label: 'Network', component: Network },
     { id: 'policy', label: 'Policy', component: Policy },
     { id: 'qos', label: 'QoS', component: Qos },
+    { id: 'b4', label: 'B4', component: B4 },
     { id: 'tailscale', label: 'Tailscale', component: Tailscale },
     { id: 'events', label: 'Events', component: Events },
     { id: 'diagnostics', label: 'Diagnostics', component: Diagnostics },

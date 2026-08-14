@@ -134,9 +134,11 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         // Events
         .route("/events", get(handlers::get_events))
         .route("/events/stream", get(handlers::events_stream))
-        // Subsystems: QoS, interfaces, Tailscale (unified snapshot + SSE)
+        // Subsystems: QoS, interfaces, Tailscale, B4 (unified snapshot + SSE)
         .route("/subsystems", get(subsystems::get_snapshot))
         .route("/subsystems/events", get(subsystems::events_stream))
+        .route("/b4", get(subsystems::get_b4))
+        .route("/b4/pause", post(subsystems::set_b4_paused))
         .route("/qos", get(subsystems::get_qos))
         .route("/qos", post(subsystems::set_qos))
         .route("/qos/:interface", delete(subsystems::remove_qos))

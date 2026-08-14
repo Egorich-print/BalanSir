@@ -72,6 +72,35 @@ pub async fn get_snapshot(State(state): State<Arc<ApiState>>) -> Response {
     }
 }
 
+/// `GET /b4` — B4 component state (enabled, per-flow adaptation, MTU
+/// ownership drift, pause state, diagnostics).
+pub async fn get_b4(State(state): State<Arc<ApiState>>) -> Response {
+    let snapshot = match snapshot_or_unavailable(&state).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    Json(snapshot.b4).into_response()
+}
+
+/// `POST /b4/pause` — pause/resume the B4 adaptation engine.
+pub async fn set_b4_paused(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let paused = match body.get("paused").and_then(|v| v.as_bool()) {
+        Some(p) => p,
+        None => return error_response("body requires \"paused\": true|false"),
+    };
+    match control.b4_set_paused(paused).await {
+        Ok(()) => Json(serde_json::json!({ "paused": paused })).into_response(),
+        Err(detail) => error_response(&detail),
+    }
+}
+
 /// `GET /qos` — shaping intent, applied qdiscs, capabilities and drift.
 pub async fn get_qos(State(state): State<Arc<ApiState>>) -> Response {
     let snapshot = match snapshot_or_unavailable(&state).await {

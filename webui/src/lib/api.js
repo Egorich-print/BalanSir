@@ -39,6 +39,9 @@ export const api = {
   events: () => req('/events'),
 
   subsystems: () => req('/subsystems'),
+  b4: () => req('/b4'),
+  setB4Paused: (paused) =>
+    req('/b4/pause', { method: 'POST', body: JSON.stringify({ paused }) }),
   qos: () => req('/qos'),
   setQos: (interfaces) =>
     req('/qos', { method: 'POST', body: JSON.stringify({ interfaces }) }),

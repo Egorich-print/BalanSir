@@ -45,6 +45,46 @@ pub struct TailscaleSnapshot {
     pub pending_op: bool,
 }
 
+/// Per-flow B4 adaptation view (one entry per tracked flow / policy domain).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct B4FlowView {
+    /// Flow key (policy domain).
+    pub flow: String,
+    /// Engine lifecycle state: Idle / Observing / Adapting / Monitoring /
+    /// Recovered / Fallback / StrictFail.
+    pub state: String,
+    /// Profile the policy assigns to this flow.
+    pub profile: String,
+    /// Last decision, when one was made.
+    pub last_decision: Option<String>,
+    /// Effective path MTU the engine last decided for this flow.
+    pub mtu: Option<u16>,
+}
+
+/// B4 component view: policy intent, per-flow adaptation state, ownership
+/// (intended vs reported MTU), and diagnostics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct B4Snapshot {
+    /// B4 adaptation enabled (from engine config).
+    pub enabled: bool,
+    /// Whether MTU adaptation is currently gated by policy.
+    pub mtu_enabled: bool,
+    /// Config file the engine was loaded from.
+    pub config_path: Option<String>,
+    /// Per-flow adaptation state.
+    pub flows: Vec<B4FlowView>,
+    /// Daemon-intended per-path MTU (ownership desired state).
+    pub intended_mtu: Vec<crate::PathMtu>,
+    /// Executor-reported per-path MTU (ownership actual state).
+    pub reported_mtu: Vec<crate::PathMtu>,
+    /// True when intended and reported disagree.
+    pub drift: bool,
+    /// Last engine/manager error (actionable).
+    pub last_error: Option<String>,
+    /// Engine enabled/disabled toggle reachable by the operator.
+    pub paused: bool,
+}
+
 /// Subsystem state-change events, emitted by the daemon managers and bridged
 /// to SSE for the WebUI (one event vocabulary, not one per subsystem).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +120,23 @@ pub enum SubsystemEvent {
     TailscaleError {
         detail: String,
     },
+    B4StateChanged {
+        flow: String,
+        state: String,
+    },
+    B4Adapted {
+        flow: String,
+        capability: String,
+    },
+    B4Recovered {
+        flow: String,
+    },
+    B4Drift {
+        detail: String,
+    },
+    B4Error {
+        detail: String,
+    },
 }
 
 impl SubsystemEvent {
@@ -96,6 +153,11 @@ impl SubsystemEvent {
             Self::TailscaleStatusChanged { .. } => "tailscale_status_changed",
             Self::TailscaleReconnected => "tailscale_reconnected",
             Self::TailscaleError { .. } => "tailscale_error",
+            Self::B4StateChanged { .. } => "b4_state_changed",
+            Self::B4Adapted { .. } => "b4_adapted",
+            Self::B4Recovered { .. } => "b4_recovered",
+            Self::B4Drift { .. } => "b4_drift",
+            Self::B4Error { .. } => "b4_error",
         }
     }
 }
@@ -106,6 +168,7 @@ pub struct SubsystemSnapshot {
     pub qos: QosSnapshot,
     pub interfaces: Vec<InterfaceInfo>,
     pub tailscale: TailscaleSnapshot,
+    pub b4: B4Snapshot,
     /// Unix epoch millis of the last successful refresh.
     pub updated_at_ms: i64,
     /// True when the executor could not be reached for the last refresh.
@@ -171,4 +234,8 @@ pub trait SubsystemControl: Send + Sync {
         routes: Vec<String>,
         exit_node: bool,
     ) -> Result<TailscaleResult, String>;
+    /// Pause/resume the B4 adaptation engine (no config change, just the loop).
+    async fn b4_set_paused(&self, paused: bool) -> Result<(), String>;
+    /// Whether the B4 engine is currently paused.
+    async fn b4_is_paused(&self) -> bool;
 }

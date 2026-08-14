@@ -3,6 +3,7 @@ pub mod amneziawg;
 #[cfg(feature = "b4")]
 pub mod b4;
 pub mod b4_engine;
+pub mod b4_manager;
 #[cfg(feature = "dns")]
 pub mod dns;
 pub mod driver;

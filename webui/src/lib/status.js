@@ -105,6 +105,40 @@ export function networkStatus(snap) {
   };
 }
 
+export function b4Status(snap) {
+  if (!snap) return { status: UNAVAILABLE, title: 'Unavailable', reasons: ['No snapshot yet'] };
+  const { b4 } = snap;
+  if (!b4 || !b4.config_path) {
+    return {
+      status: DISABLED,
+      title: 'Disabled',
+      reasons: ['B4 not configured (set BALANSIR_B4_CONFIG)'],
+    };
+  }
+  const reasons = [];
+  if (b4.paused) reasons.push('Engine paused by operator');
+  if (b4.last_error) reasons.push(`B4 error: ${b4.last_error}`);
+  if (b4.drift) reasons.push('Per-path MTU ownership drift');
+  const active = (b4.flows || []).filter(
+    (f) => f.state === 'Adapting' || f.state === 'Monitoring' || f.state === 'Fallback' || f.state === 'StrictFail',
+  );
+  if (b4.paused) return { status: DISABLED, title: 'Paused', reasons };
+  if (active.some((f) => f.state === 'StrictFail')) {
+    reasons.push('A flow is in strict-fail (no secure path, not bypassing)');
+    return { status: BLOCKED, title: 'Blocked', reasons };
+  }
+  if (active.some((f) => f.state === 'Fallback')) {
+    reasons.push('A flow is using its restricted fallback');
+    return { status: FALLBACK, title: 'Fallback', reasons };
+  }
+  if (active.length) {
+    reasons.push(`${active.length} flow(s) adapting / monitoring`);
+    return { status: DEGRADED, title: 'Degraded', reasons };
+  }
+  if (b4.drift) return { status: DEGRADED, title: 'Drift', reasons };
+  return { status: HEALTHY, title: 'Healthy', reasons: ['B4 converged, direct paths healthy'] };
+}
+
 export function systemStatus(snap, health) {
   const parts = [
     health && health.status !== 'ok'
@@ -116,6 +150,7 @@ export function systemStatus(snap, health) {
     qosStatus(snap),
     networkStatus(snap),
     tailscaleStatus(snap),
+    b4Status(snap),
   ].filter(Boolean);
   const overall = worst(...parts);
   return {

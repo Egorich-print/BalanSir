@@ -9,7 +9,6 @@
 use std::sync::Arc;
 use tracing::info;
 
-use crate::reconciliation::ExecutorClient;
 use crate::subsystems::{ControlImpl, SubsystemManager};
 
 /// Bind address resolution order: `[api] bind` from BALANSIR_CONFIG, then
@@ -37,10 +36,13 @@ pub fn api_bind() -> String {
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
 }
 
-/// Start the subsystem managers loop and the HTTP/SSE server on `bind`
-/// (empty string disables the API). Runs until the server exits.
+/// Start the HTTP/SSE server on `bind` (empty string disables the API) over
+/// the daemon-managed `SubsystemManager` and optional B4 controller handle.
+/// The manager ownership loop and the B4 runtime loop are spawned by the
+/// caller (main); this function only wires the API and runs until it exits.
 pub async fn start_api_server(
-    executor: Arc<ExecutorClient>,
+    manager: Arc<SubsystemManager>,
+    b4_control: Option<crate::b4_manager::B4ManagerHandle>,
     bind: String,
 ) -> Result<(), String> {
     if bind.trim().is_empty() {
@@ -48,16 +50,9 @@ pub async fn start_api_server(
         return Ok(());
     }
 
-    let manager = Arc::new(SubsystemManager::new(executor));
-    manager
-        .set_interface_filter(std::env::var("BALANSIR_INTERFACES").unwrap_or_default())
-        .await;
-
-    // Ownership loop: observe + converge every few seconds.
-    let loop_manager = Arc::clone(&manager);
-    tokio::spawn(async move {
-        loop_manager.run_loop().await;
-    });
+    if let Some(handle) = b4_control {
+        manager.set_b4_handle(handle);
+    }
 
     let control: Arc<dyn balansir_common::subsystems::SubsystemControl> =
         Arc::new(ControlImpl::new(Arc::clone(&manager)));

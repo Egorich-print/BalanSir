@@ -99,6 +99,7 @@ pub struct SubsystemManager {
     qos_intent: RwLock<Vec<QosConfig>>,
     events: broadcast::Sender<SubsystemEvent>,
     interface_filter: RwLock<String>,
+    b4: RwLock<Option<crate::b4_manager::B4ManagerHandle>>,
 }
 
 /// Map an executor QoS result to an error when the executor reported failure
@@ -119,7 +120,13 @@ impl SubsystemManager {
             qos_intent: RwLock::new(Vec::new()),
             events,
             interface_filter: RwLock::new(String::new()),
+            b4: RwLock::new(None),
         }
+    }
+
+    /// Attach the B4 controller handle (pause/resume for the API seam).
+    pub fn set_b4_handle(&self, handle: crate::b4_manager::B4ManagerHandle) {
+        *self.b4.blocking_write() = Some(handle);
     }
 
     pub fn snapshot(&self) -> SharedSubsystemSnapshot {
@@ -480,6 +487,28 @@ impl balansir_common::subsystems::SubsystemControl for ControlImpl {
             .await?;
         self.manager.refresh().await;
         Ok(result)
+    }
+
+    async fn b4_set_paused(&self, paused: bool) -> Result<(), String> {
+        let handle = self.manager.b4.read().await;
+        match handle.as_ref() {
+            Some(handle) => {
+                handle.set_paused(paused).await;
+                self.manager.emit(SubsystemEvent::B4StateChanged {
+                    flow: "*".to_string(),
+                    state: if paused { "Paused" } else { "Running" }.to_string(),
+                });
+                Ok(())
+            }
+            None => Err("B4 engine not configured (set BALANSIR_B4_CONFIG)".to_string()),
+        }
+    }
+
+    async fn b4_is_paused(&self) -> bool {
+        match self.manager.b4.read().await.as_ref() {
+            Some(handle) => handle.is_paused(),
+            None => false,
+        }
     }
 }
 

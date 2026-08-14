@@ -54,10 +54,12 @@ impl B4Controller {
     }
 
     /// Run one cycle for a flow: engine evaluates, controller executes the
-    /// decision within the daemon's authority.
-    pub async fn run_for(&mut self, flow: &str) {
-        let (decision, _events) = self.engine.evaluate(flow).await;
+    /// decision within the daemon's authority. Returns the observability
+    /// events produced by the cycle so callers can publish them.
+    pub async fn run_for(&mut self, flow: &str) -> Vec<crate::b4_engine::state::B4Event> {
+        let (decision, events) = self.engine.evaluate(flow).await;
         self.execute(flow, decision).await;
+        events
     }
 
     /// Execute a single B4 decision. Only `AdaptMtu`/`UseFallback`/`FailStrict`
@@ -110,6 +112,21 @@ impl B4Controller {
                 mtu: *mtu,
             })
             .collect()
+    }
+
+    /// Per-path MTU the executor currently reports (ownership actual-state).
+    pub async fn reported_path_mtu(&self) -> Vec<PathMtu> {
+        self.executor.path_mtu_state().await
+    }
+
+    /// The engine's lifecycle state for a flow (introspection / WebUI).
+    pub fn flow_state(&self, flow: &str) -> crate::b4_engine::state::B4State {
+        self.engine.state_of(flow)
+    }
+
+    /// The engine's last decision for a flow (introspection / WebUI).
+    pub fn flow_decision(&self, flow: &str) -> Option<B4Decision> {
+        self.engine.last_decision(flow).cloned()
     }
 
     /// The flow keys the engine has observed (for driving the loop).

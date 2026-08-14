@@ -129,76 +129,67 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         dns_loop_reconciler.dns_loop().await;
     });
-    // P7.2 (ADR-026) B4 runtime loop: policy-controlled connectivity
-    // adaptation with real host-stack observation and controlled execution
-    // through the existing executor boundary.
-    //
-    // Loads the optional B4 config (BALANSIR_B4_CONFIG). The controller runs
-    // the engine per configured flow, executes MTU/DNS-path decisions via the
-    // ExecutorAdapter, and records intent; the PathMtuReconciler converges the
-    // executor's reported state to that intent (P4.1 ownership — B4 never
-    // changes something the daemon does not know about).
-    if let Ok(b4_path) = std::env::var("BALANSIR_B4_CONFIG") {
-        match balansir_daemon::b4_engine::config::B4Toml::from_file(&b4_path) {
-            Ok(b4_cfg) => match b4_cfg.policy() {
-                Ok(policy) => {
-                    let engine_cfg = b4_cfg.engine_config();
-                    // P7.2.2 (ADR-028): reuse the SAME shared registry that
-                    // feeds the P6 flow compiler — one DNS observation truth.
-                    let observer: std::sync::Arc<dyn balansir_daemon::b4_engine::B4Observer> =
-                        std::sync::Arc::new(
-                            balansir_daemon::b4_engine::host::CompositeObserver::new(Some(
-                                Arc::clone(&dns_registry),
-                            )),
-                        );
-                    let mut controller = balansir_daemon::b4_engine::controller::B4Controller::new(
-                        policy,
-                        observer,
-                        engine_cfg,
-                        reconciler.executor_adapter(),
-                    );
-                    tokio::spawn(async move {
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                            // Probe configured domains first, then any observed
-                            // flows, so policy domains are always evaluated.
-                            let mut flows = controller.policy_domains();
-                            for f in controller.flow_keys() {
-                                if !flows.contains(&f) {
-                                    flows.push(f);
-                                }
-                            }
-                            for flow in flows {
-                                controller.run_for(&flow).await;
-                            }
-                            // Ownership: converge the executor's reported MTU
-                            // state to the controller's intent.
-                            let intended = controller.intended_path_mtu();
-                            let executor = controller.executor_adapter();
-                            balansir_daemon::b4_engine::controller::PathMtuReconciler::reconcile(
-                                executor.as_ref(),
-                                &intended,
-                            )
-                            .await;
-                        }
-                    });
-                    info!("B4 engine started from {b4_path}");
-                }
-                Err(e) => warn!("B4 config {b4_path} policy rejected: {e} (engine disabled)"),
-            },
-            Err(e) => warn!("B4 config {b4_path} rejected: {e} (engine disabled)"),
-        }
-    }
     // HTTP/SSE management plane: subsystem managers + REST/SSE endpoints,
     // served by the daemon itself. Enabled via BALANSIR_API_BIND or the
     // `[api]` section of BALANSIR_CONFIG; the WebUI talks to this.
     let api_bind = balansir_daemon::server::api_bind();
+    let mut b4_control: Option<balansir_daemon::b4_manager::B4ManagerHandle> = None;
     if !api_bind.trim().is_empty() {
-        let executor = Arc::clone(&executor_client);
+        // One shared snapshot + event bus for QoS / interfaces / Tailscale / B4.
+        let manager = std::sync::Arc::new(balansir_daemon::subsystems::SubsystemManager::new(
+            executor_client.clone(),
+        ));
+        manager
+            .set_interface_filter(std::env::var("BALANSIR_INTERFACES").unwrap_or_default())
+            .await;
+
+        // P7.2 (ADR-026) B4 component: policy-controlled connectivity
+        // adaptation. Loads the optional B4 config (BALANSIR_B4_CONFIG). The
+        // B4Manager runs the engine per configured flow, executes MTU/DNS-path
+        // decisions via the ExecutorAdapter, converges executor-reported MTU to
+        // the daemon's intent (P4.1 ownership), and publishes B4 state into the
+        // SAME subsystem snapshot + event bus the WebUI reads — one component,
+        // one vocabulary.
+        if let Ok(b4_path) = std::env::var("BALANSIR_B4_CONFIG") {
+            match balansir_daemon::b4_engine::config::B4Toml::from_file(&b4_path) {
+                Ok(b4_cfg) => {
+                    // P7.2.2 (ADR-028): reuse the SAME shared registry that
+                    // feeds the P6 flow compiler — one DNS observation truth.
+                    match balansir_daemon::b4_manager::B4Manager::from_toml(
+                        &b4_path,
+                        &b4_cfg,
+                        Arc::clone(&dns_registry),
+                        reconciler.executor_adapter(),
+                        manager.snapshot(),
+                        manager.event_sender(),
+                    ) {
+                        Ok(b4_manager) => {
+                            b4_control = Some(b4_manager.handle());
+                            tokio::spawn(async move {
+                                b4_manager.run_loop(10).await;
+                            });
+                            info!("B4 engine started from {b4_path}");
+                        }
+                        Err(e) => warn!("B4 config {b4_path} policy rejected: {e} (engine disabled)"),
+                    }
+                }
+                Err(e) => warn!("B4 config {b4_path} rejected: {e} (engine disabled)"),
+            }
+        }
+
+        let loop_manager = std::sync::Arc::clone(&manager);
+        tokio::spawn(async move {
+            loop_manager.run_loop().await;
+        });
+
         let api_bind_clone = api_bind.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                balansir_daemon::server::start_api_server(executor, api_bind_clone).await
+            if let Err(e) = balansir_daemon::server::start_api_server(
+                manager,
+                b4_control,
+                api_bind_clone,
+            )
+            .await
             {
                 error!("API server error: {e}");
             }
