@@ -17,6 +17,8 @@ Environment=BALANSIR_CONFIG=/etc/balansir/balansir.toml
 # and the operator CLI (root); the unprivileged daemon UID is allowed so the
 # executor can accept the daemon's control connection (fixed, ADR-030).
 Environment=BALANSIR_ALLOWED_UIDS=0,1500
+# WebUI: serve the Svelte SPA built into the image (package install hook).
+Environment=BALANSIR_WEBUI_DIR=/usr/share/balansir/webui
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5

@@ -54,6 +54,11 @@ define BALANSIR_INSTALL_TARGET_CMDS
 	# Daemon unit (ADR-030) uses ProtectSystem=strict with
 	# ReadWritePaths=/var/lib/balansir /var/log/balansir — create them.
 	mkdir -p $(TARGET_DIR)/var/lib/balansir $(TARGET_DIR)/var/log/balansir
+	# WebUI static assets: the SPA is built at repo time (npm run build) and
+	# shipped in-tree as webui/dist. The daemon serves it from
+	# /usr/share/balansir/webui when BALANSIR_WEBUI_DIR is set (systemd unit).
+	mkdir -p $(TARGET_DIR)/usr/share/balansir/webui
+	cp -a $(BALANSIR_SRCDIR)/webui/dist/. $(TARGET_DIR)/usr/share/balansir/webui/
 endef
 
 # Runtime dependencies on the target: nft (executor mechanism) and iproute2.
