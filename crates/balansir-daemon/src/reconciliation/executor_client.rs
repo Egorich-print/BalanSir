@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 use balansir_common::ipc::{IpcClientConnection, IpcMessage, MsgType};
-use balansir_common::{ActionRequest, ActionResult, PathMtu, Result};
+use balansir_common::{ActionRequest, ActionResult, PathMtu, QosPlan, QosState, Result};
 
 use crate::reconciliation::reconciler::ExecutorAdapter;
 
@@ -185,6 +185,46 @@ impl ExecutorAdapter for ExecutorClient {
         match self.request(MsgType::GetPathMtuState, Vec::new()).await {
             Ok(resp) => postcard::from_bytes::<Vec<PathMtu>>(&resp.payload).unwrap_or_default(),
             Err(_) => Vec::new(),
+        }
+    }
+
+    async fn apply_qos(&self, plan: &QosPlan) -> Result<()> {
+        let payload = postcard::to_allocvec(plan)
+            .map_err(|e| balansir_common::error::Error::Fatal(format!("encode: {e}")))?;
+        let resp = self.request(MsgType::ApplyQos, payload).await?;
+        match resp.msg_type {
+            MsgType::ResponseOk => Ok(()),
+            MsgType::ResponseError => Err(balansir_common::error::Error::Fatal(format!(
+                "executor rejected ApplyQos: {}",
+                String::from_utf8_lossy(&resp.payload)
+            ))),
+            _ => Err(balansir_common::error::Error::Fatal(
+                "unexpected ApplyQos response".into(),
+            )),
+        }
+    }
+
+    async fn clear_qos(&self, interface: &str) -> Result<()> {
+        let payload = postcard::to_allocvec(interface)
+            .map_err(|e| balansir_common::error::Error::Fatal(format!("encode: {e}")))?;
+        let resp = self.request(MsgType::ClearQos, payload).await?;
+        match resp.msg_type {
+            MsgType::ResponseOk => Ok(()),
+            MsgType::ResponseError => Err(balansir_common::error::Error::Fatal(format!(
+                "executor rejected ClearQos: {}",
+                String::from_utf8_lossy(&resp.payload)
+            ))),
+            _ => Err(balansir_common::error::Error::Fatal(
+                "unexpected ClearQos response".into(),
+            )),
+        }
+    }
+
+    async fn qos_state(&self, interfaces: &[String]) -> QosState {
+        let payload = postcard::to_allocvec(interfaces).unwrap_or_default();
+        match self.request(MsgType::GetQosState, payload).await {
+            Ok(resp) => postcard::from_bytes::<QosState>(&resp.payload).unwrap_or_default(),
+            Err(_) => QosState::default(),
         }
     }
 }

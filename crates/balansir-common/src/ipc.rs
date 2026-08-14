@@ -50,6 +50,10 @@ pub enum MsgType {
     SetPathMtu,
     RestorePathMtu,
     GetPathMtuState,
+    // QoS/traffic shaping (LibreQoS-inspired): HTB classes per interface.
+    ApplyQos,
+    ClearQos,
+    GetQosState,
     ResponseOk,
     ResponseError,
     ResponseData,

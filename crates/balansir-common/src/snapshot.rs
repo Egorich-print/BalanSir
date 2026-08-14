@@ -41,6 +41,7 @@ mod tests {
                     flow: None,
                 }],
                 drivers: vec![],
+                qos: vec![],
             },
             actual: ActualState {
                 active_rules: vec![crate::ActualRule {

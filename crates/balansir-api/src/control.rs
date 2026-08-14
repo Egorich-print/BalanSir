@@ -399,6 +399,7 @@ mod tests {
                 id: DriverId::Xray,
                 action: DriverAction::Restart,
             }],
+            qos: Vec::new(),
         };
         ControlPlane::assemble(
             Arc::new(MemoryDesiredProvider::new(desired)),
@@ -450,6 +451,7 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         }));
         let plane = ControlPlane::assemble_with_updater(
             store.clone(),
@@ -470,6 +472,7 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
         assert!(plane.reload_api(candidate.clone()).await.is_ok());
         let d = plane.desired().await.unwrap();
@@ -488,6 +491,7 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
         let err = plane.reload_api(candidate).await.unwrap_err();
         assert!(matches!(err, ControlError::DesiredProvider(_)));

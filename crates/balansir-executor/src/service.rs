@@ -41,6 +41,9 @@ pub struct NftablesExecutor {
     /// reports it so the daemon can reconcile; the daemon decides what *should*
     /// be applied.
     path_mtu: crate::path_mtu::PathMtuStore,
+    /// QoS/traffic-shaping backend (LibreQoS-inspired HTB). Non-authority: the
+    /// daemon decides the desired plan; the executor owns applied state.
+    qos: crate::tc::TcBackend,
 }
 
 impl NftablesExecutor {
@@ -51,6 +54,7 @@ impl NftablesExecutor {
             path_mtu: crate::path_mtu::PathMtuStore::new(Box::new(
                 crate::path_mtu::RecordOnlyApplier,
             )),
+            qos: crate::tc::TcBackend,
         }
     }
 
@@ -271,6 +275,20 @@ impl Executor for NftablesExecutor {
     async fn path_mtu_state(&self) -> Vec<PathMtu> {
         self.path_mtu.state()
     }
+
+    async fn apply_qos(&self, plan: &balansir_common::QosPlan) -> Result<()> {
+        self.qos.apply_plan(plan)
+    }
+
+    async fn clear_qos(&self, interface: &str) -> Result<()> {
+        self.qos.clear_plan(interface)
+    }
+
+    async fn qos_state(&self, interfaces: &[String]) -> balansir_common::QosState {
+        self.qos
+            .state(interfaces)
+            .unwrap_or_else(|_| balansir_common::QosState::default())
+    }
 }
 
 /// Allowed executor operations. Anything not in this set is rejected before
@@ -286,6 +304,9 @@ fn is_allowlisted(msg_type: MsgType) -> bool {
             | MsgType::SetPathMtu
             | MsgType::RestorePathMtu
             | MsgType::GetPathMtuState
+            | MsgType::ApplyQos
+            | MsgType::ClearQos
+            | MsgType::GetQosState
     )
 }
 
@@ -395,6 +416,36 @@ pub async fn dispatch(msg: &IpcMessage, executor: &dyn Executor) -> IpcMessage {
                     msg.correlation_id,
                     "failed to encode path mtu state",
                 ),
+            }
+        }
+        // QoS / traffic shaping: payload is a postcard `QosPlan` for apply,
+        // interface name for clear; state query takes the candidate interfaces.
+        MsgType::ApplyQos => {
+            let Ok(plan) = postcard::from_bytes::<balansir_common::QosPlan>(&msg.payload) else {
+                return IpcMessage::response_error(msg.correlation_id, "invalid ApplyQos payload");
+            };
+            match executor.apply_qos(&plan).await {
+                Ok(()) => IpcMessage::response_ok(msg.correlation_id),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+            }
+        }
+        MsgType::ClearQos => {
+            let Ok(interface) = postcard::from_bytes::<String>(&msg.payload) else {
+                return IpcMessage::response_error(msg.correlation_id, "invalid ClearQos payload");
+            };
+            match executor.clear_qos(&interface).await {
+                Ok(()) => IpcMessage::response_ok(msg.correlation_id),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+            }
+        }
+        MsgType::GetQosState => {
+            let interfaces: Vec<String> = postcard::from_bytes(&msg.payload).unwrap_or_default();
+            let state = executor.qos_state(&interfaces).await;
+            match postcard::to_allocvec(&state) {
+                Ok(payload) => IpcMessage::response_data(msg.correlation_id, payload),
+                Err(_) => {
+                    IpcMessage::response_error(msg.correlation_id, "failed to encode qos state")
+                }
             }
         }
         _ => IpcMessage::response_error(msg.correlation_id, "operation not allowed"),

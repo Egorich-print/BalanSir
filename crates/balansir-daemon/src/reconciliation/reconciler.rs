@@ -8,6 +8,7 @@ use crate::reconciliation::{ReconciliationError, ReconciliationResult};
 use balansir_common::plan::ReconciliationPlan;
 use balansir_common::{
     ActionRequest, ActionResult, ActualRule, ActualState, DesiredRule, DesiredState, PathMtu,
+    QosPlan, QosState,
 };
 use balansir_control::planner::BasicPlanner;
 use balansir_control::snapshot_store::MemorySnapshotStore;
@@ -123,6 +124,25 @@ pub trait ExecutorAdapter: Send + Sync {
     /// The executor's currently applied per-path MTU set (non-authority).
     async fn path_mtu_state(&self) -> Vec<PathMtu> {
         Vec::new()
+    }
+    /// Apply a QoS shaping plan (HTB classes per interface).
+    async fn apply_qos(&self, plan: &QosPlan) -> balansir_common::Result<()> {
+        let _ = plan;
+        Err(balansir_common::error::Error::Unsupported(
+            "apply_qos not implemented by this adapter".into(),
+        ))
+    }
+    /// Clear shaping on an interface (rollback).
+    async fn clear_qos(&self, interface: &str) -> balansir_common::Result<()> {
+        let _ = interface;
+        Err(balansir_common::error::Error::Unsupported(
+            "clear_qos not implemented by this adapter".into(),
+        ))
+    }
+    /// The executor's currently applied QoS interfaces (non-authority).
+    async fn qos_state(&self, interfaces: &[String]) -> QosState {
+        let _ = interfaces;
+        QosState::default()
     }
 }
 
@@ -440,9 +460,57 @@ impl Reconciler {
             .map_err(|e| ReconciliationError::Reconcile(e.to_string()))
     }
 
-    /// Trigger an atomic reconciliation (rollback handled by the coordinator).
+    /// Trigger an atomic reconciliation (rollback handled by the coordinator),
+    /// then converge QoS shaping to the desired plan.
     pub async fn reconcile_atomic(&self) -> ReconciliationResult<()> {
-        self.reconcile().await
+        let rules_result = self.reconcile().await;
+        // QoS is a distinct mechanism (qdiscs, not nft rules); reconcile it
+        // independently so a shaping failure never blocks rule convergence.
+        if let Err(e) = self.reconcile_qos().await {
+            warn!("QoS reconcile failed: {e}");
+        }
+        rules_result
+    }
+
+    /// Converge desired QoS plans (HTB shaping per interface) against the
+    /// executor's applied state. Non-authoritative: the executor reports what
+    /// is applied; the daemon applies/clears to match desired.
+    async fn reconcile_qos(&self) -> ReconciliationResult<()> {
+        let desired = self.desired_state.lock().await.qos.clone();
+        let interfaces: Vec<String> = desired.iter().map(|p| p.interface.clone()).collect();
+        let applied = self.executor.qos_state(&interfaces).await;
+
+        for plan in &desired {
+            if !applied.interfaces.contains(&plan.interface) {
+                match self.executor.apply_qos(plan).await {
+                    Ok(()) => {
+                        info!(
+                            interface = plan.interface,
+                            classes = plan.classes.len(),
+                            "QoS shaping applied"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(interface = plan.interface, "QoS apply failed: {e}");
+                    }
+                }
+            }
+        }
+
+        // Clear shaping on interfaces no longer desired.
+        for iface in &applied.interfaces {
+            if !desired.iter().any(|p| &p.interface == iface) {
+                match self.executor.clear_qos(iface).await {
+                    Ok(()) => {
+                        info!(interface = iface, "QoS shaping cleared");
+                    }
+                    Err(e) => {
+                        warn!(interface = iface, "QoS clear failed: {e}");
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Run reconciliation loop forever.
@@ -571,6 +639,7 @@ mod tests {
                 },
             ],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
 
         let executor = Arc::new(DummyExecutorAdapter::new());
@@ -599,6 +668,7 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
 
         let executor = Arc::new(DummyExecutorAdapter::new());
@@ -684,6 +754,7 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
 
         reconciler
@@ -718,6 +789,7 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
         let fp_expected = balansir_common::config_fingerprint(&candidate);
         reconciler
@@ -735,6 +807,7 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
         let fp_changed = balansir_common::config_fingerprint(&changed);
         reconciler
@@ -755,6 +828,7 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
         let failing_reconciler = Reconciler::new(
             DesiredState::default(),
@@ -787,6 +861,7 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
 
         assert!(reconciler
@@ -846,6 +921,7 @@ mod tests {
                 },
             ],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
         let executor = Arc::new(DummyExecutorAdapter::new());
         let reconciler = Reconciler::new(desired.clone(), executor, ReconcilerConfig::default());
@@ -900,6 +976,7 @@ mod tests {
                 },
             ],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
         let executor = Arc::new(DummyExecutorAdapter::new());
         let reconciler = Reconciler::new(desired.clone(), executor, ReconcilerConfig::default());
@@ -946,6 +1023,7 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
         let executor = Arc::new(DummyExecutorAdapter::new());
         let reconciler = Reconciler::new(desired, executor, ReconcilerConfig::default());
@@ -1064,6 +1142,7 @@ mod tests {
                     flow: None,
                 }],
                 drivers: Vec::new(),
+                qos: Vec::new(),
             },
             executor,
             config,
@@ -1151,6 +1230,7 @@ mod tests {
                 }),
             }],
             drivers: Vec::new(),
+            qos: Vec::new(),
         };
         reconciler.set_desired(raw).await;
         reconciler.reconcile_atomic().await.unwrap();

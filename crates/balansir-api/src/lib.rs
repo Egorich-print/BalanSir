@@ -266,6 +266,7 @@ mod tests {
                 id: balansir_common::DriverId::Hysteria,
                 action: DriverAction::Start,
             }],
+            qos: Vec::new(),
         };
 
         let plane = ControlPlane::assemble(

@@ -396,6 +396,32 @@ pub struct ExecutorCapabilities {
 
 // --- Desired State ---
 
+/// One HTB class: a bandwidth bucket with a guaranteed `rate` and a burst
+/// `ceil`. Identified by its `class_id` (minor number under the interface's
+/// root class).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QosClass {
+    pub class_id: u16,
+    pub rate_bits: u64,
+    pub ceil_bits: u64,
+}
+
+/// Desired QoS state for one interface: a root HTB qdisc with an aggregate
+/// ceiling and per-class buckets, each class draining into fq_codel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QosPlan {
+    pub interface: String,
+    pub default_rate_bits: u64,
+    pub default_ceil_bits: u64,
+    pub classes: Vec<QosClass>,
+}
+
+/// Executor-reported applied QoS state (non-authority, like rule inventory).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QosState {
+    pub interfaces: Vec<String>,
+}
+
 /// Rule id reserved for the terminal fail-closed rule installed when a
 /// fail-closed config compiles with an empty rule set (P1, ADR-019).
 pub const FAIL_CLOSED_RULE_ID: u32 = u32::MAX;
@@ -404,6 +430,10 @@ pub const FAIL_CLOSED_RULE_ID: u32 = u32::MAX;
 pub struct DesiredState {
     pub rules: Vec<DesiredRule>,
     pub drivers: Vec<DesiredDriver>,
+    /// Desired QoS shaping plans (LibreQoS-inspired HTB per interface).
+    /// Empty means no shaping is desired.
+    #[serde(default)]
+    pub qos: Vec<QosPlan>,
 }
 
 /// Stable FNV-1a fingerprint of a desired-state config (P4.8, ADR-021).
@@ -541,6 +571,7 @@ mod config_fingerprint_tests {
                 })
                 .collect(),
             drivers: vec![],
+            qos: vec![],
         }
     }
 
