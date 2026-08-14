@@ -143,3 +143,16 @@ rm -f output/build/balansir-0.4.0/.stamp_{built,target_installed,rsynced}
 - B4 real-path MTU/DNS adaptation against a real remote host
 - Xray against a real proxy endpoint
 - Physical long-run stability / reboot from SD
+
+### Reproducibility
+
+- Buildroot: 2026.05.1
+- Kernel: raspberrypi/linux `21b410140c47ffab5668399f6f143c7d7b935c8b` (bcm2711 defconfig)
+- Toolchain: ARM aarch64 external (download), glibc
+- `BR2_REPRODUCIBLE=y`
+- Final production image (2026-08-15):
+  `sdcard-rpi-baseline.img`, 335544832 bytes (320 MiB),
+  SHA256 `598caf8329e96c85d2047dd30c2e30ea9909a981cc664bde88628e37c76a3401`
+- Boot partition: `Image`, `bcm2710-rpi-3-b{-plus,cm3}.dtb`, `bootcode.bin`,
+  `fixup.dat`, `start.elf`, `overlays/`, `cmdline.txt`
+  (`... net.ifnames=0 biosdevname=0`), `config.txt` (UART debug, arm_64bit)
