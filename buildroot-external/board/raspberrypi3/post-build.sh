@@ -67,11 +67,11 @@ fi
 
 # --- Tailscale: fix broken self-referential tailscaled symlinks ------------
 # Buildroot's tailscale.mk creates /usr/sbin/tailscaled -> ../bin/tailscaled
-# and /bin/tailscaled -> ../bin/tailscaled (a loop). tailscale is a single
-# multi-call binary: argv[0]=tailscaled runs the daemon. Point both symlinks at
-# the real binary so the unit's ExecStart works (status 203/EXEC otherwise).
-if [ -e "${TARGET_DIR}/bin/tailscale" ]; then
-    ln -sf /bin/tailscale "${TARGET_DIR}/bin/tailscaled"
-    ln -sf /bin/tailscale "${TARGET_DIR}/usr/sbin/tailscaled"
-    ln -sf /bin/tailscale "${TARGET_DIR}/usr/bin/tailscaled"
+# where /bin/tailscaled is itself -> ../bin/tailscaled (a loop), so the unit's
+# ExecStart (/usr/sbin/tailscaled) failed 203/EXEC and restart-looped. The
+# real daemon ELF lives at /usr/bin/tailscaled (golang install); point the
+# sbin + bin names at it. Never touch /usr/bin/tailscaled itself.
+if [ -e "${TARGET_DIR}/usr/bin/tailscaled" ]; then
+    ln -sf /usr/bin/tailscaled "${TARGET_DIR}/usr/sbin/tailscaled"
+    ln -sf /usr/bin/tailscaled "${TARGET_DIR}/bin/tailscaled"
 fi
