@@ -95,7 +95,12 @@ impl TcNetlinkBackend {
         let mut stream = handle.qdisc().get().index(index).execute();
         let mut out = Vec::new();
         while let Some(msg) = stream.try_next().await.map_err(|e| e.to_string())? {
-            out.push(msg);
+            // Some kernels return every qdisc in the netns for a GETQDISC even
+            // when an ifindex filter is set; verify client-side so
+            // reconciliation never mistakes another interface's qdisc for ours.
+            if msg.header.index == index {
+                out.push(msg);
+            }
         }
         Ok(out)
     }
@@ -221,31 +226,58 @@ impl QosBackend for TcNetlinkBackend {
 
     async fn state(&self, interface: &str) -> Result<Vec<AppliedQdisc>, String> {
         let mut out = Vec::new();
-        if interface.is_empty() {
-            return Ok(out);
-        }
-        let messages = self.qdiscs_for(interface).await?;
-        let index = self.ifindex(interface).await?;
-        for msg in messages {
-            let kind = msg
-                .attributes
-                .iter()
-                .find_map(|a| match a {
-                    TcAttribute::Kind(k) => Some(k.clone()),
-                    _ => None,
+        // Empty name means "all interfaces" (IPC contract). Enumerate every
+        // link so reconciliation sees qdiscs the daemon did not target.
+        let interfaces: Vec<String> = if interface.is_empty() {
+            let handle = self.handle.lock().await;
+            let mut links = handle.link().get().execute();
+            let mut names = Vec::new();
+            while let Some(link) = links.try_next().await.map_err(|e| e.to_string())? {
+                let Some(name) = link
+                    .attributes
+                    .iter()
+                    .find_map(|a| match a {
+                        netlink_packet_route::link::LinkAttribute::IfName(n) => Some(n.clone()),
+                        _ => None,
+                    })
+                else {
+                    continue;
+                };
+                names.push(name);
+            }
+            names
+        } else {
+            vec![interface.to_string()]
+        };
+        for interface in interfaces {
+            let Ok(messages) = self.qdiscs_for(&interface).await else {
+                // Interface vanished mid-enumeration; skip it.
+                continue;
+            };
+            let Ok(index) = self.ifindex(&interface).await else {
+                continue;
+            };
+            for msg in messages {
+                let kind = msg
+                    .attributes
+                    .iter()
+                    .find_map(|a| match a {
+                        TcAttribute::Kind(k) => Some(k.clone()),
+                        _ => None,
+                    });
+                let our_identity = msg.header.handle.major == BALANSIR_QDISC_HANDLE_MAJOR
+                    || msg.header.parent == TcHandle::INGRESS;
+                let stats = qdisc_stats_of(&msg.attributes);
+                out.push(AppliedQdisc {
+                    interface: interface.clone(),
+                    index,
+                    handle: format!("{:x}:{:x}", msg.header.handle.major, msg.header.handle.minor),
+                    parent: format!("{:x}:{:x}", msg.header.parent.major, msg.header.parent.minor),
+                    kind,
+                    our_identity,
+                    stats,
                 });
-            let our_identity = msg.header.handle.major == BALANSIR_QDISC_HANDLE_MAJOR
-                || msg.header.parent == TcHandle::INGRESS;
-            let stats = qdisc_stats_of(&msg.attributes);
-            out.push(AppliedQdisc {
-                interface: interface.to_string(),
-                index,
-                handle: format!("{:x}:{:x}", msg.header.handle.major, msg.header.handle.minor),
-                parent: format!("{:x}:{:x}", msg.header.parent.major, msg.header.parent.minor),
-                kind,
-                our_identity,
-                stats,
-            });
+            }
         }
         Ok(out)
     }

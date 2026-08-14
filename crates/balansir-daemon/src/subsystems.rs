@@ -101,6 +101,15 @@ pub struct SubsystemManager {
     interface_filter: RwLock<String>,
 }
 
+/// Map an executor QoS result to an error when the executor reported failure
+/// over a successful IPC envelope (ok=false is still an application failure).
+fn qos_result_to_result(result: balansir_common::qos::QosResult) -> Result<(), String> {
+    if result.ok {
+        Ok(())
+    } else {
+        Err(format!("{}: {}", result.op, result.detail))
+    }
+}
 impl SubsystemManager {
     pub fn new(exec: Arc<dyn SubsystemExec>) -> Self {
         let (events, _) = broadcast::channel(128);
@@ -283,6 +292,8 @@ impl SubsystemManager {
             }
         }
 
+        let mut last_error: Option<String> = None;
+
         // Orphan cleanup: remove our qdiscs on interfaces no longer desired.
         let desired_interfaces: Vec<&str> = desired.iter().map(|c| c.interface.as_str()).collect();
         for q in &applied {
@@ -293,13 +304,17 @@ impl SubsystemManager {
                     q.handle,
                     q.kind.as_deref().unwrap_or("?")
                 );
-                match exec
+                let remove_result = match exec
                     .qos_op(&QosOp::Remove {
                         interface: q.interface.clone(),
                     })
                     .await
                 {
-                    Ok(_) => {
+                    Ok(r) => qos_result_to_result(r),
+                    Err(e) => Err(e.to_string()),
+                };
+                match remove_result {
+                    Ok(()) => {
                         self.emit(SubsystemEvent::QosRemoved {
                             interface: q.interface.clone(),
                         });
@@ -309,7 +324,8 @@ impl SubsystemManager {
                         self.emit(SubsystemEvent::QosError {
                             detail: detail.clone(),
                         });
-                        self.snapshot.update(|s| s.qos.last_error = Some(detail)).await;
+                        self.snapshot.update(|s| s.qos.last_error = Some(detail.clone())).await;
+                        last_error = Some(detail);
                     }
                 }
             }
@@ -328,10 +344,12 @@ impl SubsystemManager {
                     config.kind.as_str(),
                     config.interface
                 );
-                match exec.qos_op(&QosOp::Apply(config.clone()))
-                    .await
-                {
-                    Ok(_) => {
+                let apply_result = match exec.qos_op(&QosOp::Apply(config.clone())).await {
+                    Ok(r) => qos_result_to_result(r),
+                    Err(e) => Err(e.to_string()),
+                };
+                match apply_result {
+                    Ok(()) => {
                         self.emit(SubsystemEvent::QosApplied {
                             interface: config.interface.clone(),
                             kind: config.kind.as_str().to_string(),
@@ -343,10 +361,12 @@ impl SubsystemManager {
                             config.kind.as_str(),
                             config.interface
                         );
+                        warn!("subsystems: {detail}");
                         self.emit(SubsystemEvent::QosError {
                             detail: detail.clone(),
                         });
-                        self.snapshot.update(|s| s.qos.last_error = Some(detail)).await;
+                        self.snapshot.update(|s| s.qos.last_error = Some(detail.clone())).await;
+                        last_error = Some(detail);
                     }
                 }
             }
@@ -375,7 +395,7 @@ impl SubsystemManager {
                 applied: applied_fresh,
                 capabilities: caps,
                 drift: drift_now,
-                last_error: None,
+                last_error: last_error.clone(),
             };
         }).await;
 
@@ -563,7 +583,7 @@ mod tests {
         }
         async fn qos_capabilities(&self) -> Result<QosCapabilities, String> {
             Ok(QosCapabilities {
-                cake: true,
+                cake: false,
                 fq_codel: true,
                 ingress: true,
                 ..Default::default()
@@ -636,6 +656,156 @@ mod tests {
         }
     }
 
+    /// Executor that fails every mutating op — used to verify errors surface.
+    struct FailingExec {
+        inner: Arc<FakeExec>,
+    }
+
+    impl FailingExec {
+        fn wrap(inner: Arc<FakeExec>) -> Arc<Self> {
+            Arc::new(Self { inner })
+        }
+    }
+
+    #[async_trait]
+    impl SubsystemExec for FailingExec {
+        async fn qos_op(&self, op: &QosOp) -> Result<QosResult, String> {
+            let name = match op {
+                QosOp::Apply(c) => format!("apply {}", c.interface),
+                QosOp::Remove { interface } => format!("remove {interface}"),
+            };
+            Err(format!("{name}: netlink EPERM"))
+        }
+        async fn qos_state(&self, _interface: &str) -> Result<Vec<AppliedQdisc>, String> {
+            self.inner.qos_state("").await
+        }
+        async fn qos_capabilities(&self) -> Result<QosCapabilities, String> {
+            self.inner.qos_capabilities().await
+        }
+        async fn interface_info(&self, _interface: &str) -> Result<Vec<InterfaceInfo>, String> {
+            self.inner.interface_info("").await
+        }
+        async fn interface_set_mac(
+            &self,
+            _interface: &str,
+            _mac: &str,
+        ) -> Result<InterfaceResult, String> {
+            self.inner.interface_set_mac("", "").await
+        }
+        async fn interface_restore_mac(
+            &self,
+            _interface: &str,
+        ) -> Result<InterfaceResult, String> {
+            self.inner.interface_restore_mac("").await
+        }
+        async fn tailscale_status(&self) -> Result<TailscaleStatus, String> {
+            self.inner.tailscale_status().await
+        }
+        async fn tailscale_up(&self, _auth_key: Option<String>) -> Result<TailscaleResult, String> {
+            self.inner.tailscale_up(None).await
+        }
+        async fn tailscale_down(&self) -> Result<TailscaleResult, String> {
+            self.inner.tailscale_down().await
+        }
+        async fn tailscale_reconnect(&self) -> Result<TailscaleResult, String> {
+            self.inner.tailscale_reconnect().await
+        }
+        async fn tailscale_set_routes(
+            &self,
+            _routes: &[String],
+            _exit_node: bool,
+        ) -> Result<TailscaleResult, String> {
+            self.inner.tailscale_set_routes(&[], false).await
+        }
+    }
+
+    /// Executor that reports ok=false over a successful IPC envelope —
+    /// the "soft failure" shape the daemon must not swallow.
+    struct SoftFailingExec {
+        inner: Arc<FakeExec>,
+    }
+
+    impl SoftFailingExec {
+        fn wrap(inner: Arc<FakeExec>) -> Arc<Self> {
+            Arc::new(Self { inner })
+        }
+    }
+
+    #[async_trait]
+    impl SubsystemExec for SoftFailingExec {
+        async fn qos_op(&self, op: &QosOp) -> Result<QosResult, String> {
+            let (name, interface) = match op {
+                QosOp::Apply(c) => ("apply", c.interface.clone()),
+                QosOp::Remove { interface } => ("remove", interface.clone()),
+            };
+            Ok(QosResult {
+                op: name.into(),
+                interface,
+                ok: false,
+                detail: "netlink EPERM".into(),
+            })
+        }
+        async fn qos_state(&self, _interface: &str) -> Result<Vec<AppliedQdisc>, String> {
+            self.inner.qos_state("").await
+        }
+        async fn qos_capabilities(&self) -> Result<QosCapabilities, String> {
+            self.inner.qos_capabilities().await
+        }
+        async fn interface_info(&self, _interface: &str) -> Result<Vec<InterfaceInfo>, String> {
+            self.inner.interface_info("").await
+        }
+        async fn interface_set_mac(
+            &self,
+            _interface: &str,
+            _mac: &str,
+        ) -> Result<InterfaceResult, String> {
+            self.inner.interface_set_mac("", "").await
+        }
+        async fn interface_restore_mac(
+            &self,
+            _interface: &str,
+        ) -> Result<InterfaceResult, String> {
+            self.inner.interface_restore_mac("").await
+        }
+        async fn tailscale_status(&self) -> Result<TailscaleStatus, String> {
+            self.inner.tailscale_status().await
+        }
+        async fn tailscale_up(&self, _auth_key: Option<String>) -> Result<TailscaleResult, String> {
+            self.inner.tailscale_up(None).await
+        }
+        async fn tailscale_down(&self) -> Result<TailscaleResult, String> {
+            self.inner.tailscale_down().await
+        }
+        async fn tailscale_reconnect(&self) -> Result<TailscaleResult, String> {
+            self.inner.tailscale_reconnect().await
+        }
+        async fn tailscale_set_routes(
+            &self,
+            _routes: &[String],
+            _exit_node: bool,
+        ) -> Result<TailscaleResult, String> {
+            self.inner.tailscale_set_routes(&[], false).await
+        }
+    }
+
+    #[tokio::test]
+    async fn soft_apply_failure_ok_false_is_not_swallowed() {
+        let exec = Arc::new(FakeExec::new());
+        let manager = Arc::new(SubsystemManager::new(SoftFailingExec::wrap(exec)));
+        manager
+            .set_qos_intent(vec![fq_codel_config("eth0")])
+            .await
+            .unwrap();
+
+        let snap = manager.snapshot.read().await;
+        assert!(snap.qos.drift, "drift must be true when apply reports ok=false");
+        let err = snap.qos.last_error.clone().expect("last_error must be set");
+        assert!(
+            err.contains("EPERM"),
+            "actionable error expected: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn qos_intent_is_applied_and_drift_converges() {
         let exec = Arc::new(FakeExec::new());
@@ -665,6 +835,48 @@ mod tests {
             classes: vec![],
             comment: QosConfig::identity(interface),
         }
+    }
+
+    #[tokio::test]
+    async fn apply_failure_surfaces_last_error_and_drift() {
+        let exec = Arc::new(FakeExec::new());
+        // Force apply failures: make qos_state report nothing ever applied
+        // while qos_op returns an error.
+        let failing = FailingExec::wrap(exec.clone());
+        let manager = Arc::new(SubsystemManager::new(failing));
+        manager
+            .set_qos_intent(vec![fq_codel_config("eth0")])
+            .await
+            .unwrap();
+
+        let snap = manager.snapshot.read().await;
+        assert!(snap.qos.drift, "drift must be true when apply fails");
+        let err = snap.qos.last_error.clone().expect("last_error must be set");
+        assert!(err.contains("apply"), "error should name the op: {err}");
+    }
+
+    #[tokio::test]
+    async fn unsupported_qdisc_kind_is_rejected() {
+        let exec = Arc::new(FakeExec::new());
+        let manager = Arc::new(SubsystemManager::new(exec.clone()));
+        let config = QosConfig {
+            interface: "eth0".into(),
+            direction: QosDirection::Egress,
+            kind: QdiscKind::Cake,
+            bandwidth_bps: None,
+            latency_target_ms: None,
+            overhead_bytes: None,
+            ecn: true,
+            wash: false,
+            memory_limit_bytes: None,
+            classes: vec![],
+            comment: QosConfig::identity("eth0"),
+        };
+        manager.set_qos_intent(vec![config]).await.unwrap_err();
+
+        let snap = manager.snapshot.read().await;
+        let err = snap.qos.last_error.clone().expect("last_error must be set");
+        assert!(err.contains("not supported"), "unexpected: {err}");
     }
 
     #[tokio::test]
