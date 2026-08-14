@@ -1,21 +1,29 @@
 use axum::{
     extract::{Request, State},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::Response,
     routing::{delete, get, post},
-    Json, Router,
+    Router,
 };
 use balansir_common::subsystems::{
     SharedSubsystemSnapshot, SubsystemControl, SubsystemEvent,
 };
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio::net::TcpListener;
+
+/// Process uptime in seconds, cached from the first call.
+pub fn uptime_seconds() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs()
+}
 
 pub mod auth;
 pub mod control;
 pub mod handlers;
 pub mod subsystems;
+pub mod webui;
 
 /// API state
 pub struct ApiState {
@@ -101,7 +109,7 @@ pub struct DriftItemInfo {
 /// Create API router
 pub fn create_router(state: Arc<ApiState>) -> Router {
     Router::new()
-        .route("/", get(index))
+        .route("/", get(webui::root))
         // Health & Status
         .route("/health", get(handlers::health))
         .route("/ready", get(handlers::ready))
@@ -156,26 +164,8 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         // Token auth is opt-in: only enforced when BALANSIR_API_TOKEN is set,
         // so it does not break health probes or local unauthenticated installs.
         .layer(middleware::from_fn_with_state(state, auth_middleware))
-}
-
-/// Index page
-async fn index() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "name": "BalanSir API",
-        "version": "0.1.0",
-        "endpoints": [
-            "/health",
-            "/metrics",
-            "/desired",
-            "/drift",
-            "/reconcile",
-            "/events",
-            "/subsystems",
-            "/qos",
-            "/interfaces",
-            "/tailscale"
-        ]
-    }))
+        // Serve the built WebUI (Svelte SPA) when available; otherwise 404.
+        .fallback(webui::fallback)
 }
 
 /// Start API server. `bind` is a `host:port` string (default loopback).

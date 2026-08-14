@@ -1,0 +1,93 @@
+// Thin client for the BalanSir REST API. All system logic lives in the Rust
+// daemon; this file only maps HTTP/SSE to JS-friendly shapes.
+
+const BASE = '';
+
+let token = (typeof localStorage !== 'undefined' && localStorage.getItem('balansir_token')) || '';
+
+export function setToken(value) {
+  token = value || '';
+  if (typeof localStorage !== 'undefined') {
+    if (token) localStorage.setItem('balansir_token', token);
+    else localStorage.removeItem('balansir_token');
+  }
+}
+
+export function getToken() {
+  return token;
+}
+
+async function req(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(BASE + path, { headers, ...options });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`${resp.status} ${resp.statusText}: ${text.slice(0, 300)}`);
+  }
+  const ct = resp.headers.get('content-type') || '';
+  return ct.includes('application/json') ? resp.json() : resp.text();
+}
+
+export const api = {
+  health: () => req('/health'),
+  desired: () => req('/desired'),
+  actual: () => req('/actual'),
+  state: () => req('/state'),
+  reconcile: () => req('/reconcile', { method: 'POST' }),
+  metrics: () => req('/metrics'),
+  events: () => req('/events'),
+
+  subsystems: () => req('/subsystems'),
+  qos: () => req('/qos'),
+  setQos: (interfaces) =>
+    req('/qos', { method: 'POST', body: JSON.stringify({ interfaces }) }),
+  removeQos: (interfaceName) =>
+    req(`/qos/${encodeURIComponent(interfaceName)}`, { method: 'DELETE' }),
+
+  interfaces: () => req('/interfaces'),
+  restoreMac: (mac) =>
+    req(`/interfaces/${encodeURIComponent(mac)}/mac/restore`, {
+      method: 'POST',
+    }),
+  setMac: (mac, newMac) =>
+    req(`/interfaces/${encodeURIComponent(mac)}/mac`, {
+      method: 'POST',
+      body: JSON.stringify({ mac: newMac }),
+    }),
+
+  tailscale: () => req('/tailscale'),
+  tailscaleUp: (authKey) =>
+    req('/tailscale/up', {
+      method: 'POST',
+      body: JSON.stringify({ auth_key: authKey || null }),
+    }),
+  tailscaleDown: () => req('/tailscale/down', { method: 'POST' }),
+  tailscaleReconnect: () => req('/tailscale/reconnect', { method: 'POST' }),
+  tailscaleRoutes: (routes, exitNode) =>
+    req('/tailscale/routes', {
+      method: 'POST',
+      body: JSON.stringify({ routes, exit_node: exitNode }),
+    }),
+};
+
+export function subsystemEventUrl() {
+  return BASE + '/subsystems/events';
+}
+
+export function fmtBytes(n) {
+  if (n == null) return '—';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let i = 0;
+  let v = Number(n);
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+export function fmtRate(bytesPerSec) {
+  if (bytesPerSec == null) return '—';
+  return `${fmtBytes(bytesPerSec)}/s`;
+}
