@@ -11,8 +11,27 @@ use balansir_executor::service::{serve_connection, ExecutorServices, NftablesExe
 
 /// The executor is the privileged server (ADR-013): it binds a socket owned
 /// by root and serves the daemon's command connection.
+///
+/// Mode 0660 + group `balansir` (UID 1500, the unprivileged daemon) so the
+/// daemon can connect over the Unix socket; the daemon's peer-UID is then
+/// verified by `IpcServerConnection::accept` (ADR-013).
 const SOCKET_PATH: &str = "/run/balansir/executor.sock";
-const SOCKET_PERMS: u32 = 0o600;
+const SOCKET_PERMS: u32 = 0o660;
+/// Group id of the unprivileged `balansir` daemon user (ADR-030).
+const BALANSIR_GID: u32 = 1500;
+
+/// Convert a `Path` to a `*const c_char` for libc calls (path must not contain
+/// interior NULs).
+fn c_char_path(path: &Path) -> *const libc::c_char {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    let mut buf = Vec::with_capacity(bytes.len() + 1);
+    buf.extend_from_slice(bytes);
+    buf.push(0);
+    // Leak a tiny buffer (bounded, once per boot) so the pointer is valid for
+    // the libc call; the call is synchronous so this is safe.
+    Box::leak(buf.into_boxed_slice()).as_ptr() as *const libc::c_char
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -44,6 +63,10 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::UnixListener::bind(socket_path)?;
     tokio::fs::set_permissions(socket_path, Permissions::from_mode(SOCKET_PERMS)).await?;
+    // Group-own the socket for the unprivileged daemon (ADR-030). On failure
+    // (e.g. GID 1500 absent in a dev rootfs) log and continue — mode 0660 is
+    // still set, so a matching group or root can connect.
+    let _ = unsafe { libc::chown(c_char_path(socket_path), 0, BALANSIR_GID) };
     info!("Listening on {} (mode {:#o})", SOCKET_PATH, SOCKET_PERMS);
 
     // Privileged mechanism. The nft binary may be absent in some environments;
