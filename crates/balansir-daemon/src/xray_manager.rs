@@ -173,6 +173,10 @@ fn next_enabled(current: &Option<String>, enabled: &[String]) -> Option<String> 
     Some(enabled[next_idx].clone())
 }
 
+/// Builds the component driver for one endpoint. Injected so tests can use a
+/// deterministic fake driver instead of spawning real xray processes.
+type EndpointStarter = Arc<dyn Fn(XrayConfig) -> Box<dyn ComponentDriver + Send> + Send + Sync>;
+
 /// Xray component manager.
 pub struct XrayManager {
     snapshot: SharedSubsystemSnapshot,
@@ -195,10 +199,15 @@ pub struct XrayManager {
     last_error: RwLock<Option<String>>,
     switch_reason: RwLock<Option<String>>,
     last_switch_ms: RwLock<i64>,
-    driver: RwLock<Option<XrayDriver>>,
+    driver: RwLock<Option<Box<dyn ComponentDriver + Send>>>,
+    starter: EndpointStarter,
 }
 
 impl XrayManager {
+    fn default_starter() -> EndpointStarter {
+        Arc::new(|config| Box::new(XrayDriver::new(balansir_common::DriverId::Xray, config)))
+    }
+
     /// Build the manager from a validated Xray TOML file. All endpoints are
     /// validated eagerly; a rejected file disables the component (never a
     /// half-started runtime).
@@ -206,6 +215,17 @@ impl XrayManager {
         xray_cfg: &XrayToml,
         snapshot: SharedSubsystemSnapshot,
         events: broadcast::Sender<SubsystemEvent>,
+    ) -> Result<Self, String> {
+        Self::from_toml_with_starter(xray_cfg, snapshot, events, Self::default_starter())
+    }
+
+    /// Same as [`Self::from_toml`] but with an injectable endpoint starter
+    /// (deterministic test harness — see `tests::fake_starter`).
+    fn from_toml_with_starter(
+        xray_cfg: &XrayToml,
+        snapshot: SharedSubsystemSnapshot,
+        events: broadcast::Sender<SubsystemEvent>,
+        starter: EndpointStarter,
     ) -> Result<Self, String> {
         xray_cfg.validate()?;
         let n = xray_cfg.profiles.len();
@@ -232,6 +252,7 @@ impl XrayManager {
             switch_reason: RwLock::new(None),
             last_switch_ms: RwLock::new(0),
             driver: RwLock::new(None),
+            starter,
         })
     }
 
@@ -258,14 +279,27 @@ impl XrayManager {
     /// Best-effort TCP connect latency to each enabled endpoint's server.
     /// Observability only: failover is driven by the local inbound liveness
     /// probe, so an endpoint outage shows as `latency_ms = None` without
-    /// influencing selection. Timeouts are short to keep the loop cheap.
+    /// influencing selection. Probes run concurrently with a short timeout so
+    /// N endpoints never serialize 3 s each inside the health loop (important
+    /// on slow SBCs like the RPi 3B+).
     async fn probe_latencies(&self) {
-        let mut lat = self.latency.write().await;
+        let mut probes = Vec::new();
         for (i, e) in self.endpoints.iter().enumerate() {
             if !e.enabled {
                 continue;
             }
-            lat[i] = measure_latency_ms(&e.server, e.port, std::time::Duration::from_secs(3)).await;
+            let server = e.server.clone();
+            let port = e.port;
+            probes.push(tokio::spawn(async move {
+                let v = measure_latency_ms(&server, port, std::time::Duration::from_secs(3)).await;
+                (i, v)
+            }));
+        }
+        let mut lat = self.latency.write().await;
+        for probe in probes {
+            if let Ok((i, v)) = probe.await {
+                lat[i] = v;
+            }
         }
     }
 
@@ -275,7 +309,7 @@ impl XrayManager {
 
     async fn start_endpoint(&self, idx: usize) -> Result<(), String> {
         let config = self.endpoint_config(idx);
-        let mut driver = XrayDriver::new(balansir_common::DriverId::Xray, config);
+        let mut driver = (self.starter)(config);
         driver.start().await.map_err(|e| e.to_string())?;
         *self.driver.write().await = Some(driver);
         *self.active.write().await = Some(idx);
@@ -330,26 +364,18 @@ impl XrayManager {
         }
     }
 
+    /// Switch to an endpoint by name (manual override / rotation path).
     async fn switch_to(&self, name: &str, reason: String) -> Result<(), String> {
         let idx = self
             .index_of(name)
             .ok_or_else(|| format!("unknown xray profile '{name}'"))?;
-        let prev_name = self.active_name().await;
-        self.stop_driver().await;
-        self.start_endpoint(idx).await?;
-        self.paths.write().await[idx].reset();
-        *self.switch_reason.write().await = Some(reason.clone());
-        *self.last_switch_ms.write().await = now_ms();
-        let to = self.endpoints[idx].name.clone();
-        info!("Xray: switched {prev_name:?} -> {to} ({reason})");
-        let _ = self.events.send(SubsystemEvent::XraySwitched {
-            from: prev_name,
-            to: to.clone(),
-            reason,
-        });
-        Ok(())
+        self.switch_to_index(idx, reason).await
     }
 
+    /// Switch to an endpoint by index. Single implementation of the switch
+    /// semantics (stop → start → reset tracker → record reason/event); both
+    /// the manual and the failover paths go through here so they can never
+    /// diverge.
     async fn switch_to_index(&self, idx: usize, reason: String) -> Result<(), String> {
         let prev_name = self.active_name().await;
         self.stop_driver().await;
@@ -431,6 +457,19 @@ impl XrayManager {
                     format!("endpoint '{name}' failing: {reasons}")
                 };
                 let to = self.endpoints[next].name.clone();
+
+                // Failover consumes an operator pin that pointed at the
+                // failing endpoint: otherwise the next `ensure_running` pass
+                // would pull straight back to the dead endpoint and the two
+                // would alternate forever (the switch loop). A pin on a
+                // *different* healthy endpoint is preserved.
+                let pinned_now = self.pinned.read().await.clone();
+                let consumed = pinned_now.as_deref() == Some(name.as_str());
+                if consumed {
+                    *self.pinned.write().await = None;
+                    info!("Xray: consumed operator pin '{name}' after failover");
+                }
+
                 if self.switch_to_index(next, reason).await.is_err() {
                     return Some(name);
                 }
@@ -569,6 +608,7 @@ async fn measure_latency_ms(server: &str, port: u16, timeout: std::time::Duratio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 
     fn sample_toml() -> XrayToml {
         toml::from_str(
@@ -695,6 +735,153 @@ priority = 20
         let snap = manager.observe_snapshot().await;
         assert_eq!(snap.profiles[0].latency_ms, Some(42));
         assert_eq!(snap.profiles[1].latency_ms, None);
+    }
+
+    /// Deterministic fake driver health signal, shared with the test so a
+    /// pass can flip the endpoint's health without recreating the driver.
+    #[derive(Clone)]
+    struct FakeDriverHealth(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+    const FAKE_HEALTHY: u8 = 1;
+    const FAKE_UNHEALTHY: u8 = 0;
+
+    /// Fake endpoint driver: `start` is a no-op (no xray process), health is
+    /// read from the shared signal. Exactly what the failover tests need.
+    struct FakeXrayDriver {
+        health: FakeDriverHealth,
+        started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ComponentDriver for FakeXrayDriver {
+        fn id(&self) -> DriverId {
+            DriverId::Xray
+        }
+        fn name(&self) -> &str {
+            "fake-xray"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::PROXY
+        }
+        async fn start(&mut self) -> Result<(), DriverError> {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+        async fn restart(&mut self) -> Result<(), DriverError> {
+            self.stop().await?;
+            self.start().await
+        }
+        async fn health_check(&self) -> HealthStatus {
+            if self.health.0.load(std::sync::atomic::Ordering::Relaxed) == FAKE_HEALTHY {
+                HealthStatus::Healthy
+            } else {
+                HealthStatus::Unhealthy { reason: 1 }
+            }
+        }
+    }
+
+    fn fake_starter(
+        health: &FakeDriverHealth,
+        started: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> EndpointStarter {
+        let health = health.clone();
+        let started = std::sync::Arc::clone(started);
+        std::sync::Arc::new(move |_config| {
+            Box::new(FakeXrayDriver {
+                health: health.clone(),
+                started: std::sync::Arc::clone(&started),
+            })
+        })
+    }
+
+    fn manager_with_fakes(
+        cfg: &XrayToml,
+        health: FakeDriverHealth,
+        started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> XrayManager {
+        XrayManager::from_toml_with_starter(
+            cfg,
+            SharedSubsystemSnapshot::new(),
+            broadcast::channel(16).0,
+            fake_starter(&health, &started),
+        )
+        .expect("valid")
+    }
+
+    /// Regression: an operator pin on an endpoint that fails must be consumed
+    /// by failover. Otherwise the next `ensure_running` pass pulls straight
+    /// back to the dead endpoint and the two alternate forever (switch loop).
+    #[tokio::test]
+    async fn failover_consumes_pin_of_failed_endpoint_and_does_not_loop() {
+        let cfg = sample_toml(); // failover_threshold = 2; jp-1 priority 10
+        let health = FakeDriverHealth(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            FAKE_HEALTHY,
+        )));
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = manager_with_fakes(&cfg, health.clone(), started);
+
+        // Operator pins jp-1; the loop converges to it.
+        *manager.pinned.write().await = Some("jp-1".into());
+        manager.ensure_running().await.expect("start pinned");
+        assert_eq!(manager.active_name().await.as_deref(), Some("jp-1"));
+
+        // jp-1 dies. Two health passes push its tracker to Failing (threshold
+        // 2). The first pass degrades only; the second fails over to us-2.
+        health
+            .0
+            .store(FAKE_UNHEALTHY, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            manager.health_and_failover().await.as_deref(),
+            Some("jp-1"),
+            "first bad probe must not switch yet (hysteresis)"
+        );
+        assert_eq!(
+            manager.health_and_failover().await.as_deref(),
+            Some("us-2"),
+            "sustained failure must fail over"
+        );
+
+        // The consumed pin must not pull the loop back to the dead endpoint.
+        assert_eq!(manager.pinned.read().await.clone(), None);
+        assert_eq!(manager.active_name().await.as_deref(), Some("us-2"));
+        manager.ensure_running().await.expect("stay on us-2");
+        assert_eq!(
+            manager.active_name().await.as_deref(),
+            Some("us-2"),
+            "no switch loop back to the failed pinned endpoint"
+        );
+
+        // A third pass must also stay on us-2 (no flapping).
+        assert_eq!(manager.health_and_failover().await.as_deref(), Some("us-2"));
+    }
+
+    /// Failover of an *unpinned* endpoint leaves an operator pin on a healthy
+    /// endpoint untouched (the pin is only consumed when it names the failing
+    /// endpoint).
+    #[tokio::test]
+    async fn failover_preserves_pin_of_healthy_endpoint() {
+        let cfg = sample_toml();
+        let health = FakeDriverHealth(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            FAKE_HEALTHY,
+        )));
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = manager_with_fakes(&cfg, health.clone(), started);
+
+        // Active = jp-1 (preferred). Operator pin = us-2 (a different,
+        // healthy endpoint). jp-1 then fails → failover to us-2 must keep the
+        // pin (it names the healthy target, not the failed source).
+        manager.ensure_running().await.expect("start");
+        *manager.pinned.write().await = Some("us-2".into());
+        health
+            .0
+            .store(FAKE_UNHEALTHY, std::sync::atomic::Ordering::Relaxed);
+        let _ = manager.health_and_failover().await; // degraded
+        assert_eq!(manager.health_and_failover().await.as_deref(), Some("us-2"));
+        assert_eq!(manager.pinned.read().await.clone().as_deref(), Some("us-2"));
     }
 
     #[tokio::test]
