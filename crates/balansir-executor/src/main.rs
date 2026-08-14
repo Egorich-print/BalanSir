@@ -7,7 +7,7 @@ use std::path::Path;
 use tracing::{error, info, warn};
 
 use balansir_executor::nftables::NftablesBackend;
-use balansir_executor::service::{serve_connection, NftablesExecutor};
+use balansir_executor::service::{serve_connection, ExecutorServices, NftablesExecutor};
 
 /// The executor is the privileged server (ADR-013): it binds a socket owned
 /// by root and serves the daemon's command connection.
@@ -51,7 +51,46 @@ async fn main() -> Result<()> {
     // failure rather than a silent no-op.
     let backend = NftablesBackend::new("balansir", "forward")
         .map_err(|e| Error::Misconfiguration(format!("nftables backend: {e}")))?;
-    let executor = std::sync::Arc::new(NftablesExecutor::new(backend));
+    let executor = Box::new(NftablesExecutor::new(backend));
+
+    // Additional privileged mechanisms. Each is wired independently so a
+    // missing optional mechanism degrades gracefully instead of killing the
+    // whole executor:
+    // - QoS: netlink tc (requires CAP_NET_ADMIN; falls back to record-only).
+    // - Interface: netlink link ops (falls back to read-only sysfs).
+    // - Tailscale: the upstream `tailscale` binary (absent => Status reports
+    //   "not installed"; the executor still serves the rest).
+    let qos: Box<dyn balansir_executor::qdisc::QosBackend> =
+        match balansir_executor::qdisc::TcNetlinkBackend::new().await {
+            Ok(b) => Box::new(b),
+            Err(e) => {
+                warn!("QoS netlink backend unavailable ({e}); record-only fallback");
+                Box::new(balansir_executor::qdisc::RecordOnlyBackend::default())
+            }
+        };
+    let interface: Box<dyn balansir_executor::interface::InterfaceBackend> =
+        match balansir_executor::interface::NetlinkInterfaceBackend::new().await {
+            Ok(b) => Box::new(b),
+            Err(e) => {
+                warn!("Interface netlink backend unavailable ({e}); sysfs fallback");
+                Box::new(balansir_executor::interface::SysfsInterfaceBackend)
+            }
+        };
+    let tailscale: Box<dyn balansir_executor::tailscale::TailscaleDriver> =
+        match balansir_executor::tailscale::CliTailscaleDriver::new() {
+            Ok(d) => Box::new(d),
+            Err(e) => {
+                warn!("Tailscale binary unavailable ({e}); status will report absent");
+                Box::new(balansir_executor::tailscale::AbsentTailscaleDriver)
+            }
+        };
+
+    let services = std::sync::Arc::new(ExecutorServices::new(
+        executor,
+        qos,
+        interface,
+        tailscale,
+    ));
 
     loop {
         match listener.accept().await {
@@ -60,9 +99,9 @@ async fn main() -> Result<()> {
                 match IpcServerConnection::accept(stream).await {
                     Ok(mut conn) => {
                         info!("Daemon connected (peer UID {})", conn.peer_uid());
-                        let executor = std::sync::Arc::clone(&executor);
+                        let services = std::sync::Arc::clone(&services);
                         tokio::spawn(async move {
-                            if let Err(e) = serve_connection(&mut conn, executor.as_ref()).await {
+                            if let Err(e) = serve_connection(&mut conn, services.as_ref()).await {
                                 warn!("Executor connection ended: {}", e);
                             }
                         });

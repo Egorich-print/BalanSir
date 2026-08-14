@@ -50,6 +50,17 @@ pub enum MsgType {
     SetPathMtu,
     RestorePathMtu,
     GetPathMtuState,
+    // QoS / traffic shaping. Payloads are postcard-encoded `QosOp` (apply or
+    // remove) and `Vec<AppliedQdisc>`/`QosCapabilities` responses.
+    QosOp,
+    GetQosState,
+    GetQosCapabilities,
+    // Interface driver: info + WAN MAC cloning (hardware MAC preserved and
+    // restorable). Payloads are `InterfaceOp` / `InterfaceResult`.
+    InterfaceOp,
+    // Tailscale driver: status + controlled operations. Payloads are
+    // `TailscaleOp` / `TailscaleResult`.
+    TailscaleOp,
     ResponseOk,
     ResponseError,
     ResponseData,
