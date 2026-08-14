@@ -64,14 +64,3 @@ if [ -d "${TARGET_DIR}/etc/systemd" ]; then
         printf '[Journal]\nStorage=persistent\n' > \
             "${TARGET_DIR}/etc/systemd/journald.conf.d/00-boot-debug.conf"
 fi
-
-# --- Tailscale: fix broken self-referential tailscaled symlinks ------------
-# Buildroot's tailscale.mk creates /usr/sbin/tailscaled -> ../bin/tailscaled
-# (a loop on usrmerge: /bin -> usr/bin), so ExecStart (/usr/sbin/tailscaled)
-# failed 203/EXEC and restart-looped. The real daemon ELF is installed at
-# /usr/bin/tailscaled by the external.mk hook; repoint sbin only. Do NOT
-# touch /bin/tailscaled — /bin is a symlink to /usr/bin (usrmerge), so
-# creating it there would overwrite the real ELF with a self-link.
-if [ -e "${TARGET_DIR}/usr/bin/tailscaled" ]; then
-    ln -sf /usr/bin/tailscaled "${TARGET_DIR}/usr/sbin/tailscaled"
-fi
