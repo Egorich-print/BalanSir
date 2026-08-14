@@ -12,6 +12,7 @@ pub mod resources;
 pub mod runtime;
 pub mod snapshot;
 pub mod state;
+pub mod subsystems;
 pub mod types;
 pub mod validation;
 pub mod version;

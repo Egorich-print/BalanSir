@@ -14,6 +14,8 @@
 
 use async_trait::async_trait;
 use balansir_common::ipc::{IpcClientConnection, IpcMessage, MsgType};
+use balansir_common::network::{InterfaceInfo, InterfaceOp, InterfaceResult, TailscaleOp, TailscaleResult, TailscaleStatus};
+use balansir_common::qos::{AppliedQdisc, QosCapabilities, QosOp, QosResult};
 use balansir_common::{ActionRequest, ActionResult, PathMtu, Result};
 
 use crate::reconciliation::reconciler::ExecutorAdapter;
@@ -65,6 +67,143 @@ impl ExecutorClient {
                 Err(e)
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // QoS / interface / tailscale subsystem ops (same typed IPC boundary)
+    // ------------------------------------------------------------------
+
+    /// Encode `value` as a postcard payload, or return a clean error.
+    fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
+        postcard::to_allocvec(value)
+            .map_err(|e| balansir_common::error::Error::Fatal(format!("encode: {e}")))
+    }
+
+    /// Decode the response payload as `T`, mapping errors to a clean failure.
+    fn decode<T: serde::de::DeserializeOwned>(resp: &IpcMessage) -> Result<T> {
+        postcard::from_bytes(&resp.payload)
+            .map_err(|e| balansir_common::error::Error::Fatal(format!("decode: {e}")))
+    }
+
+    /// A typed request whose success is `ResponseOk`/`ResponseData`.
+    async fn typed_request(
+        &self,
+        msg_type: MsgType,
+        payload: Vec<u8>,
+        op: &str,
+    ) -> Result<IpcMessage> {
+        let resp = self.request(msg_type, payload).await?;
+        match resp.msg_type {
+            MsgType::ResponseOk | MsgType::ResponseData => Ok(resp),
+            MsgType::ResponseError => Err(balansir_common::error::Error::Fatal(format!(
+                "executor rejected {op}: {}",
+                String::from_utf8_lossy(&resp.payload)
+            ))),
+            _ => Err(balansir_common::error::Error::Fatal(format!(
+                "unexpected {op} response"
+            ))),
+        }
+    }
+
+    /// Apply (or remove) a shaping configuration.
+    pub async fn qos_op(&self, op: &QosOp) -> Result<QosResult> {
+        let payload = Self::encode(op)?;
+        let resp = self.typed_request(MsgType::QosOp, payload, "QosOp").await?;
+        Self::decode(&resp)
+    }
+
+    /// Report applied qdiscs (empty interface = all).
+    pub async fn qos_state(&self, interface: &str) -> Result<Vec<AppliedQdisc>> {
+        let resp = self
+            .typed_request(MsgType::GetQosState, interface.as_bytes().to_vec(), "GetQosState")
+            .await?;
+        Self::decode(&resp)
+    }
+
+    /// Kernel shaping capabilities.
+    pub async fn qos_capabilities(&self) -> Result<QosCapabilities> {
+        let resp = self
+            .typed_request(MsgType::GetQosCapabilities, Vec::new(), "GetQosCapabilities")
+            .await?;
+        Self::decode(&resp)
+    }
+
+    /// Interface link info.
+    pub async fn interface_info(&self, interface: &str) -> Result<Vec<InterfaceInfo>> {
+        let op = InterfaceOp::Get {
+            interface: interface.to_string(),
+        };
+        let payload = Self::encode(&op)?;
+        let resp = self.typed_request(MsgType::InterfaceOp, payload, "InterfaceOp").await?;
+        Self::decode(&resp)
+    }
+
+    /// WAN MAC cloning. The executor preserves the factory MAC for restore.
+    pub async fn interface_set_mac(&self, interface: &str, mac: &str) -> Result<InterfaceResult> {
+        let op = InterfaceOp::SetMac {
+            interface: interface.to_string(),
+            mac: mac.to_string(),
+        };
+        let payload = Self::encode(&op)?;
+        let resp = self.typed_request(MsgType::InterfaceOp, payload, "InterfaceOp").await?;
+        Self::decode(&resp)
+    }
+
+    /// Restore the factory (hardware) MAC.
+    pub async fn interface_restore_mac(&self, interface: &str) -> Result<InterfaceResult> {
+        let op = InterfaceOp::RestoreMac {
+            interface: interface.to_string(),
+        };
+        let payload = Self::encode(&op)?;
+        let resp = self.typed_request(MsgType::InterfaceOp, payload, "InterfaceOp").await?;
+        Self::decode(&resp)
+    }
+
+    /// Tailscale status.
+    pub async fn tailscale_status(&self) -> Result<TailscaleStatus> {
+        let op = TailscaleOp::Status;
+        let payload = Self::encode(&op)?;
+        let resp = self.typed_request(MsgType::TailscaleOp, payload, "TailscaleOp").await?;
+        Self::decode(&resp)
+    }
+
+    /// Tailscale bring-up (optional auth key).
+    pub async fn tailscale_up(&self, auth_key: Option<String>) -> Result<TailscaleResult> {
+        let op = TailscaleOp::Up { auth_key };
+        let payload = Self::encode(&op)?;
+        let resp = self.typed_request(MsgType::TailscaleOp, payload, "TailscaleOp").await?;
+        Self::decode(&resp)
+    }
+
+    /// Tailscale tear-down.
+    pub async fn tailscale_down(&self) -> Result<TailscaleResult> {
+        let op = TailscaleOp::Down;
+        let payload = Self::encode(&op)?;
+        let resp = self.typed_request(MsgType::TailscaleOp, payload, "TailscaleOp").await?;
+        Self::decode(&resp)
+    }
+
+    /// Tailscale reconnect.
+    pub async fn tailscale_reconnect(&self) -> Result<TailscaleResult> {
+        let op = TailscaleOp::Reconnect;
+        let payload = Self::encode(&op)?;
+        let resp = self.typed_request(MsgType::TailscaleOp, payload, "TailscaleOp").await?;
+        Self::decode(&resp)
+    }
+
+    /// Advertise subnet routes / exit node.
+    pub async fn tailscale_set_routes(
+        &self,
+        routes: &[String],
+        exit_node: bool,
+    ) -> Result<TailscaleResult> {
+        let op = TailscaleOp::SetRoutes {
+            routes: routes.to_vec(),
+            exit_node,
+        };
+        let payload = Self::encode(&op)?;
+        let resp = self.typed_request(MsgType::TailscaleOp, payload, "TailscaleOp").await?;
+        Self::decode(&resp)
     }
 
     /// Send a rule-application request and decode the typed result.

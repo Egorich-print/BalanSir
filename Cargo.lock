@@ -246,6 +246,7 @@ name = "balansir-daemon"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "balansir-api",
  "balansir-common",
  "balansir-control",
  "futures",

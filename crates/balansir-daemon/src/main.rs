@@ -82,9 +82,10 @@ async fn main() -> Result<()> {
             }
         };
 
+    let executor_client = Arc::new(ExecutorClient::default());
     let reconciler = Arc::new(Reconciler::new(
         startup_desired.clone(),
-        Arc::new(ExecutorClient::default()),
+        executor_client.clone(),
         ReconcilerConfig::default(),
     ));
     // P7.2.1 (ADR-027) + P4.8 (ADR-021): record the raw desired state and its
@@ -188,6 +189,23 @@ async fn main() -> Result<()> {
             Err(e) => warn!("B4 config {b4_path} rejected: {e} (engine disabled)"),
         }
     }
+    // HTTP/SSE management plane: subsystem managers + REST/SSE endpoints,
+    // served by the daemon itself. Enabled via BALANSIR_API_BIND or the
+    // `[api]` section of BALANSIR_CONFIG; the WebUI talks to this.
+    let api_bind = balansir_daemon::server::api_bind();
+    if !api_bind.trim().is_empty() {
+        let executor = Arc::clone(&executor_client);
+        let api_bind_clone = api_bind.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                balansir_daemon::server::start_api_server(executor, api_bind_clone).await
+            {
+                error!("API server error: {e}");
+            }
+        });
+        info!("API enabled on {api_bind}");
+    }
+
     // Setup signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;

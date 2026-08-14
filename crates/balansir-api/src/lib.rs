@@ -2,8 +2,11 @@ use axum::{
     extract::{Request, State},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
+};
+use balansir_common::subsystems::{
+    SharedSubsystemSnapshot, SubsystemControl, SubsystemEvent,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -12,12 +15,19 @@ use tokio::net::TcpListener;
 pub mod auth;
 pub mod control;
 pub mod handlers;
+pub mod subsystems;
 
 /// API state
 pub struct ApiState {
     pub metrics: Arc<balansir_common::metrics::SharedMetrics>,
     pub control: Option<Arc<crate::control::ControlPlane>>,
     pub api_token: Option<Arc<str>>,
+    /// Subsystem (QoS / interfaces / Tailscale) control seam.
+    pub subsystems: Option<Arc<dyn SubsystemControl>>,
+    /// Live unified snapshot shared with the daemon managers.
+    pub subsystem_snapshot: Option<SharedSubsystemSnapshot>,
+    /// Subsystem event stream for SSE.
+    pub subsystem_events: Option<tokio::sync::broadcast::Sender<SubsystemEvent>>,
 }
 
 impl ApiState {
@@ -26,7 +36,23 @@ impl ApiState {
             metrics,
             control: None,
             api_token: auth::token_from_env(),
+            subsystems: None,
+            subsystem_snapshot: None,
+            subsystem_events: None,
         }
+    }
+
+    /// Attach the subsystem manager wiring (daemon-side).
+    pub fn with_subsystems(
+        mut self,
+        control: Arc<dyn SubsystemControl>,
+        snapshot: SharedSubsystemSnapshot,
+        events: tokio::sync::broadcast::Sender<SubsystemEvent>,
+    ) -> Self {
+        self.subsystems = Some(control);
+        self.subsystem_snapshot = Some(snapshot);
+        self.subsystem_events = Some(events);
+        self
     }
 }
 
@@ -100,6 +126,32 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         // Events
         .route("/events", get(handlers::get_events))
         .route("/events/stream", get(handlers::events_stream))
+        // Subsystems: QoS, interfaces, Tailscale (unified snapshot + SSE)
+        .route("/subsystems", get(subsystems::get_snapshot))
+        .route("/subsystems/events", get(subsystems::events_stream))
+        .route("/qos", get(subsystems::get_qos))
+        .route("/qos", post(subsystems::set_qos))
+        .route("/qos/:interface", delete(subsystems::remove_qos))
+        .route("/interfaces", get(subsystems::get_interfaces))
+        .route(
+            "/interfaces/:interface/mac",
+            post(subsystems::set_mac),
+        )
+        .route(
+            "/interfaces/:interface/mac/restore",
+            post(subsystems::restore_mac),
+        )
+        .route("/tailscale", get(subsystems::get_tailscale))
+        .route("/tailscale/up", post(subsystems::tailscale_up))
+        .route("/tailscale/down", post(subsystems::tailscale_down))
+        .route(
+            "/tailscale/reconnect",
+            post(subsystems::tailscale_reconnect),
+        )
+        .route(
+            "/tailscale/routes",
+            post(subsystems::tailscale_set_routes),
+        )
         .with_state(state.clone())
         // Token auth is opt-in: only enforced when BALANSIR_API_TOKEN is set,
         // so it does not break health probes or local unauthenticated installs.
@@ -117,22 +169,26 @@ async fn index() -> impl IntoResponse {
             "/desired",
             "/drift",
             "/reconcile",
-            "/events"
+            "/events",
+            "/subsystems",
+            "/qos",
+            "/interfaces",
+            "/tailscale"
         ]
     }))
 }
 
-/// Start API server
-pub async fn start_server(state: Arc<ApiState>, port: u16) -> Result<(), String> {
+/// Start API server. `bind` is a `host:port` string (default loopback).
+/// The management API is never exposed on all interfaces out of the box —
+/// callers must explicitly opt into a non-loopback bind.
+pub async fn start_server(state: Arc<ApiState>, bind: &str) -> Result<(), String> {
     let app = create_router(state);
 
-    // Bind loopback by default; never expose the unauthenticated management
-    // API on all interfaces out of the box.
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+    let listener = TcpListener::bind(bind)
         .await
-        .map_err(|e| format!("Failed to bind: {}", e))?;
+        .map_err(|e| format!("Failed to bind {bind}: {e}"))?;
 
-    tracing::info!("API server listening on 127.0.0.1:{}", port);
+    tracing::info!("API server listening on {bind}");
 
     axum::serve(listener, app)
         .await
