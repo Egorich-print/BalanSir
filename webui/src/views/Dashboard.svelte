@@ -19,6 +19,26 @@
   $: upCount = snapshot ? snapshot.interfaces.filter((i) => i.link_up).length : 0;
   $: rates = snapshot ? (snapshot.interface_rates || []) : [];
   $: sys = snapshot ? snapshot.system : null;
+  $: flows = snapshot ? (snapshot.b4 ? snapshot.b4.flows || [] : []) : [];
+
+  function healthClass(h) {
+    if (h === 'Direct') return 'ok';
+    if (h === 'Degraded') return 'warn';
+    if (h === 'Interfered' || h === 'Blocked') return 'bad';
+    return 'none';
+  }
+
+  function healthReasons(f) {
+    const r = [];
+    if (f.rtt_ms) r.push(`RTT ${f.rtt_ms} ms`);
+    if (f.rtt_var_ms) r.push(`variance ${f.rtt_var_ms} ms`);
+    if (f.connect_latency_ms) r.push(`connect ${f.connect_latency_ms} ms`);
+    if (f.retransmissions) r.push(`retransmits ${f.retransmissions}`);
+    if (f.dns_ok === false) r.push('DNS resolution failed');
+    if (f.reset_or_timeout) r.push('reset/timeout observed');
+    if (r.length === 0) r.push('No host-stack signals yet');
+    return r;
+  }
 
   function uptime(secs) {
     if (!secs) return '—';
@@ -149,6 +169,27 @@
     </div>
 
     <div class="card">
+      <h3>Direct path health</h3>
+      {#if flows.length === 0}
+        <p class="meta">No flows observed yet.</p>
+      {/if}
+      {#each flows as f}
+        <div class="flow-health">
+          <div class="path-row">
+            <span><code>{f.flow}</code></span>
+            <span class="fh-badge {healthClass(f.health)}">{f.health}</span>
+          </div>
+          <ul class="reasons">
+            {#each healthReasons(f) as r}
+              <li>{r}</li>
+            {/each}
+            <li class="muted">State: {f.state}</li>
+          </ul>
+        </div>
+      {/each}
+    </div>
+
+    <div class="card">
       <h3>System</h3>
       {#if sys}
         <p class="meta">CPU {sys.cpu_percent}% · RAM {sys.mem_used_mb}/{sys.mem_total_mb} MB</p>
@@ -200,6 +241,19 @@
   .rates td { padding: 3px 0; color: #a8b6cc; }
   .rates td:first-child { color: #4ecdc4; }
   .path-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 0.85rem; color: #a8b6cc; }
+  .flow-health { border-top: 1px solid #0f3460; padding-top: 6px; }
+  .fh-badge {
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 0.1rem 0.45rem;
+    border-radius: 8px;
+    text-transform: uppercase;
+  }
+  .fh-badge.ok { background: #1f3d2b; color: #5fdba7; }
+  .fh-badge.warn { background: #3d331f; color: #f5c26b; }
+  .fh-badge.bad { background: #3d1f1f; color: #ff6b6b; }
+  .fh-badge.none { background: #2a2f3a; color: #7a8aa5; }
+  .muted { color: #7a8aa5; }
   .minibadge {
     display: inline-block;
     padding: 0.1rem 0.45rem;

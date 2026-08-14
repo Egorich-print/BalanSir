@@ -48,6 +48,18 @@
     if (d.includes('Recovered')) return 'Recovered';
     return d;
   }
+
+  function signals(f) {
+    const parts = [];
+    if (f.rtt_ms) parts.push(`rtt ${f.rtt_ms}ms`);
+    if (f.rtt_var_ms) parts.push(`±${f.rtt_var_ms}ms`);
+    if (f.connect_latency_ms) parts.push(`c ${f.connect_latency_ms}ms`);
+    if (f.retransmissions) parts.push(`retx ${f.retransmissions}`);
+    if (f.throughput_bps) parts.push(`${(f.throughput_bps / 1e6).toFixed(1)} MB/s`);
+    if (f.dns_ok === false) parts.push('dns✗');
+    if (f.reset_or_timeout) parts.push('rst');
+    return parts.length ? parts.join(' ') : '—';
+  }
 </script>
 
 <h2>B4 — Connectivity Adaptation</h2>
@@ -112,18 +124,20 @@
     <table>
       <thead>
         <tr>
-          <th>Flow</th><th>State</th><th>Profile</th><th>Last decision</th>
-          <th>Effective MTU</th><th>Hint</th>
+          <th>Flow</th><th>Health</th><th>State</th><th>Profile</th>
+          <th>Last decision</th><th>Effective MTU</th><th>Signals</th><th>Hint</th>
         </tr>
       </thead>
       <tbody>
         {#each b4.flows as f}
           <tr>
             <td><code>{f.flow}</code></td>
+            <td><span class="health health-{f.health.toLowerCase()}">{f.health}</span></td>
             <td><span class="state state-{f.state.toLowerCase()}">{f.state}</span></td>
             <td><code>{f.profile}</code></td>
             <td>{decisionKind(f.last_decision)}</td>
             <td>{f.mtu ?? '—'}</td>
+            <td class="signals">{signals(f)}</td>
             <td class="muted">{STATE_HINT[f.state] || '—'}</td>
           </tr>
         {/each}
@@ -154,6 +168,11 @@
   th { text-align: left; color: #7a8aa5; padding: 6px 8px; border-bottom: 1px solid #1f2a44; }
   td { padding: 6px 8px; border-bottom: 1px solid #16203a; }
   .state { padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; }
+  .health { padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 700; }
+  .health-direct, .health-unknown { background: #123b2a; color: #4cd07d; }
+  .health-degraded { background: #3b3a12; color: #e8d44c; }
+  .health-interfered, .health-blocked { background: #3a1513; color: #ff9c9c; }
+  .signals { font-size: 0.76rem; color: #9fb0cc; white-space: nowrap; }
   .state-recovered, .state-idle { background: #123b2a; color: #4cd07d; }
   .state-observing, .state-monitoring { background: #26344f; color: #9fb0cc; }
   .state-adapting { background: #3b3a12; color: #e8d44c; }

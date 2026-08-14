@@ -59,6 +59,23 @@ pub struct B4FlowView {
     pub last_decision: Option<String>,
     /// Effective path MTU the engine last decided for this flow.
     pub mtu: Option<u16>,
+    /// Last connectivity classification: Direct / Degraded / Interfered /
+    /// Blocked / Unknown (from the engine's host-stack observation).
+    pub health: String,
+    /// Last observed RTT in ms, when available.
+    pub rtt_ms: Option<u64>,
+    /// Last observed RTT variance in ms, when available.
+    pub rtt_var_ms: Option<u64>,
+    /// Last observed TCP connect latency in ms, when available.
+    pub connect_latency_ms: Option<u64>,
+    /// Last observed retransmission count, when available.
+    pub retransmissions: Option<u32>,
+    /// Last observed throughput in bytes/sec, when available.
+    pub throughput_bps: Option<u64>,
+    /// DNS resolution status for this flow (true/false when known).
+    pub dns_ok: Option<bool>,
+    /// Whether a reset/timeout was observed for this flow.
+    pub reset_or_timeout: Option<bool>,
 }
 
 /// B4 component view: policy intent, per-flow adaptation state, ownership
@@ -332,13 +349,6 @@ impl SharedSubsystemSnapshot {
 
     pub async fn read(&self) -> SubsystemSnapshot {
         self.inner.read().await.clone()
-    }
-
-    /// Synchronous single-field update for startup paths (never call from an
-    /// async context that already holds the read lock on the same snapshot).
-    pub fn update_blocking(&self, f: impl FnOnce(&mut SubsystemSnapshot)) {
-        let mut guard = self.inner.blocking_write();
-        f(&mut guard);
     }
 
     /// Update a single field group under the write lock.

@@ -128,12 +128,27 @@ impl B4Manager {
                 .find(|p| p.path == flow)
                 .map(|p| p.mtu);
             let decision = self.controller.flow_decision(&flow);
+            let observation = self.controller.flow_observation(&flow);
+            let health = match observation {
+                Some(obs) => format!("{:?}", crate::b4_engine::classify::classify(&obs)),
+                None => "Unknown".to_string(),
+            };
             flows.push(B4FlowView {
                 flow: flow.clone(),
                 state: format!("{:?}", self.controller.flow_state(&flow)),
                 profile: self.profile_label(&flow),
                 last_decision: decision.map(|d| format!("{d:?}")),
                 mtu,
+                health,
+                rtt_ms: observation.and_then(|o| o.rtt).map(|d| d.as_millis() as u64),
+                rtt_var_ms: observation.and_then(|o| o.rtt_var).map(|d| d.as_millis() as u64),
+                connect_latency_ms: observation
+                    .and_then(|o| o.connect_latency)
+                    .map(|d| d.as_millis() as u64),
+                retransmissions: observation.and_then(|o| o.retransmissions),
+                throughput_bps: observation.and_then(|o| o.throughput_bps),
+                dns_ok: observation.and_then(|o| o.dns_ok),
+                reset_or_timeout: observation.and_then(|o| o.reset_or_timeout),
             });
         }
         flows.sort_by(|a, b| a.flow.cmp(&b.flow));
