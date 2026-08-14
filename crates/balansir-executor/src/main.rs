@@ -66,7 +66,15 @@ async fn main() -> Result<()> {
     // Group-own the socket for the unprivileged daemon (ADR-030). On failure
     // (e.g. GID 1500 absent in a dev rootfs) log and continue — mode 0660 is
     // still set, so a matching group or root can connect.
-    let _ = unsafe { libc::chown(c_char_path(socket_path), 0, BALANSIR_GID) };
+    let rc = unsafe { libc::chown(c_char_path(socket_path), 0, BALANSIR_GID) };
+    if rc != 0 {
+        warn!(
+            "chown {} -> :{} failed (errno {}): daemon connect may be denied",
+            SOCKET_PATH,
+            BALANSIR_GID,
+            std::io::Error::last_os_error()
+        );
+    }
     info!("Listening on {} (mode {:#o})", SOCKET_PATH, SOCKET_PERMS);
 
     // Privileged mechanism. The nft binary may be absent in some environments;
