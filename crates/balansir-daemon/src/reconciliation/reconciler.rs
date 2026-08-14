@@ -11,7 +11,9 @@ use balansir_common::{
 };
 use balansir_control::planner::BasicPlanner;
 use balansir_control::snapshot_store::MemorySnapshotStore;
-use balansir_control::traits::{DesiredProvider, DynamicEventSink, EventSink, Executor, Planner, StateProvider};
+use balansir_control::traits::{
+    DesiredProvider, DynamicEventSink, EventSink, Executor, Planner, StateProvider,
+};
 use balansir_control::{Coordinator, CoordinatorConfig, ReconcileReason};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -165,10 +167,9 @@ impl Reconciler {
         let events = Arc::new(DynamicEventSink::new());
         events.attach(Arc::new(TracingEventSink));
 
-        let desired_provider: Arc<dyn DesiredProvider> =
-            Arc::new(DaemonDesiredProvider {
-                desired: desired.clone(),
-            });
+        let desired_provider: Arc<dyn DesiredProvider> = Arc::new(DaemonDesiredProvider {
+            desired: desired.clone(),
+        });
         let actual_provider: Arc<dyn StateProvider> = Arc::new(DaemonActualStore {
             actual: actual.clone(),
         });

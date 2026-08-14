@@ -243,11 +243,7 @@ impl TryFrom<DesiredConfig> for DesiredState {
             });
         }
 
-        Ok(Self {
-            rules,
-            drivers,
-            qos: Vec::new(),
-        })
+        Ok(Self { rules, drivers })
     }
 }
 

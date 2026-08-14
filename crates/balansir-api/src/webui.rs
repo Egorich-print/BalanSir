@@ -6,6 +6,7 @@
 //!   1. `BALANSIR_WEBUI_DIR` (absolute or relative path)
 //!   2. `./webui/dist` (repo layout, when the daemon runs from the repo root)
 //!   3. `./dist` (Tauri/bundled layout)
+//!
 //! When no directory with an `index.html` is found the WebUI is simply not
 //! served and the API keeps working as before.
 
@@ -107,11 +108,7 @@ pub async fn fallback(req: Request<Body>) -> Response {
 
 async fn serve_file(path: &Path) -> Response {
     match tokio::fs::read(path).await {
-        Ok(bytes) => (
-            [(header::CONTENT_TYPE, content_type(path))],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => ([(header::CONTENT_TYPE, content_type(path))], bytes).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }

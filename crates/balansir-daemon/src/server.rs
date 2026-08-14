@@ -36,8 +36,7 @@ pub fn api_bind() -> String {
             }
         }
     }
-    std::env::var("BALANSIR_API_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
+    std::env::var("BALANSIR_API_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string())
 }
 
 /// Start the HTTP/SSE server on `bind` (empty string disables the API) over

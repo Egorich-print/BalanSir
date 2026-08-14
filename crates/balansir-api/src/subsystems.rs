@@ -7,10 +7,13 @@
 use crate::ApiState;
 use axum::{
     extract::{Path, State},
-    response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
-use balansir_common::qos::{QosConfig, QosDirection, QdiscKind};
+use balansir_common::qos::{QdiscKind, QosConfig, QosDirection};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -48,20 +51,20 @@ async fn snapshot_or_unavailable(
     }
 }
 
-fn control_or_unavailable(state: &ApiState) -> Result<Arc<dyn balansir_common::subsystems::SubsystemControl>, Response> {
-    state
-        .subsystems
-        .clone()
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "subsystem control not attached (daemon not wired?)",
-                    "actionable": false,
-                })),
-            )
-                .into_response()
-        })
+#[allow(clippy::result_large_err)]
+fn control_or_unavailable(
+    state: &ApiState,
+) -> Result<Arc<dyn balansir_common::subsystems::SubsystemControl>, Response> {
+    state.subsystems.clone().ok_or_else(|| {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "subsystem control not attached (daemon not wired?)",
+                "actionable": false,
+            })),
+        )
+            .into_response()
+    })
 }
 
 /// `GET /subsystems` — full unified snapshot.
@@ -237,7 +240,7 @@ pub async fn set_qos(
             wash: false,
             memory_limit_bytes: None,
             classes: vec![],
-            comment: QosConfig::identity(&entry.interface.trim().to_string()),
+            comment: QosConfig::identity(entry.interface.trim()),
         });
     }
 
@@ -289,7 +292,10 @@ pub async fn set_mac(
     };
     let mac = body.mac.trim().to_string();
     // Client-side sanity only; the executor validates strictly.
-    if !mac.split(':').all(|octet| !octet.is_empty() && octet.len() <= 2) {
+    if !mac
+        .split(':')
+        .all(|octet| !octet.is_empty() && octet.len() <= 2)
+    {
         return error_response("malformed MAC address");
     }
     match control.set_mac(&interface, &mac).await {
@@ -400,14 +406,25 @@ pub async fn tailscale_set_routes(
             // Subnet routes like "192.168.1.0/24" are validated by the
             // executor's allowlist; only obviously malformed strings are
             // rejected here.
-            let prefix_ok = route.split('/').nth(1).map(|p| p.parse::<u8>().is_ok()).unwrap_or(false);
-            let addr_ok = route.split('/').next().map(|a| a.parse::<std::net::IpAddr>().is_ok()).unwrap_or(false);
+            let prefix_ok = route
+                .split('/')
+                .nth(1)
+                .map(|p| p.parse::<u8>().is_ok())
+                .unwrap_or(false);
+            let addr_ok = route
+                .split('/')
+                .next()
+                .map(|a| a.parse::<std::net::IpAddr>().is_ok())
+                .unwrap_or(false);
             if !(prefix_ok && addr_ok) {
                 return error_response(&format!("malformed route: {route}"));
             }
         }
     }
-    match control.tailscale_set_routes(body.routes, body.exit_node).await {
+    match control
+        .tailscale_set_routes(body.routes, body.exit_node)
+        .await
+    {
         Ok(result) => Json(result).into_response(),
         Err(e) => error_response(&e),
     }
@@ -415,9 +432,7 @@ pub async fn tailscale_set_routes(
 
 /// `GET /subsystems/events` — SSE stream of subsystem state changes.
 /// Reconnects fast (default EventSource retry); no client polling needed.
-pub async fn events_stream(
-    State(state): State<Arc<ApiState>>,
-) -> impl IntoResponse {
+pub async fn events_stream(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let events = match state.subsystem_events.clone() {
         Some(sender) => sender,
         None => {

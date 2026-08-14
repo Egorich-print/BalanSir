@@ -157,10 +157,7 @@ impl B4Manager {
             }
         }
         for flow in keys {
-            let mtu = intended
-                .iter()
-                .find(|p| p.path == flow)
-                .map(|p| p.mtu);
+            let mtu = intended.iter().find(|p| p.path == flow).map(|p| p.mtu);
             let decision = self.controller.flow_decision(&flow);
             let observation = self.controller.flow_observation(&flow);
             let health = match observation {
@@ -180,8 +177,12 @@ impl B4Manager {
                 last_decision: decision.map(|d| format!("{d:?}")),
                 mtu,
                 health,
-                rtt_ms: observation.and_then(|o| o.rtt).map(|d| d.as_millis() as u64),
-                rtt_var_ms: observation.and_then(|o| o.rtt_var).map(|d| d.as_millis() as u64),
+                rtt_ms: observation
+                    .and_then(|o| o.rtt)
+                    .map(|d| d.as_millis() as u64),
+                rtt_var_ms: observation
+                    .and_then(|o| o.rtt_var)
+                    .map(|d| d.as_millis() as u64),
                 connect_latency_ms: observation
                     .and_then(|o| o.connect_latency)
                     .map(|d| d.as_millis() as u64),
@@ -306,16 +307,13 @@ impl B4Manager {
 }
 
 /// Compare intended vs reported per-path MTU (order-independent).
-fn drift_between(intended: &[balansir_common::PathMtu], reported: &[balansir_common::PathMtu]) -> bool {
+fn drift_between(
+    intended: &[balansir_common::PathMtu],
+    reported: &[balansir_common::PathMtu],
+) -> bool {
     use std::collections::HashMap;
-    let want: HashMap<&str, u16> = intended
-        .iter()
-        .map(|p| (p.path.as_str(), p.mtu))
-        .collect();
-    let have: HashMap<&str, u16> = reported
-        .iter()
-        .map(|p| (p.path.as_str(), p.mtu))
-        .collect();
+    let want: HashMap<&str, u16> = intended.iter().map(|p| (p.path.as_str(), p.mtu)).collect();
+    let have: HashMap<&str, u16> = reported.iter().map(|p| (p.path.as_str(), p.mtu)).collect();
     want != have
 }
 
@@ -388,7 +386,9 @@ mod tests {
         let view = t.view();
         assert_eq!(view.state, "degraded");
         assert!(
-            view.reasons.iter().any(|r| r.contains("RTT") && r.contains("threshold")),
+            view.reasons
+                .iter()
+                .any(|r| r.contains("RTT") && r.contains("threshold")),
             "reasons: {view:?}"
         );
     }

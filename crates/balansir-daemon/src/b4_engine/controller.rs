@@ -387,7 +387,9 @@ mod tests {
         );
         controller.run_for("bad.example").await;
 
-        let obs = controller.flow_observation("bad.example").expect("observation retained");
+        let obs = controller
+            .flow_observation("bad.example")
+            .expect("observation retained");
         assert_eq!(obs.retransmissions, Some(50));
         assert_eq!(obs.rtt, Some(Duration::from_millis(500)));
 

@@ -11,10 +11,10 @@
 //! *is* the unified view, and events *are* the unified event vocabulary.
 
 use async_trait::async_trait;
-use balansir_common::network::{
-    InterfaceInfo, InterfaceResult, TailscaleResult, TailscaleStatus,
+use balansir_common::network::{InterfaceInfo, InterfaceResult, TailscaleResult, TailscaleStatus};
+use balansir_common::qos::{
+    AppliedQdisc, QosCapabilities, QosConfig, QosDirection, QosOp, QosResult,
 };
-use balansir_common::qos::{AppliedQdisc, QosCapabilities, QosConfig, QosDirection, QosOp, QosResult};
 use balansir_common::subsystems::{
     QosSnapshot, SharedSubsystemSnapshot, SubsystemEvent, TailscaleSnapshot,
 };
@@ -32,7 +32,11 @@ pub trait SubsystemExec: Send + Sync {
     async fn qos_state(&self, interface: &str) -> Result<Vec<AppliedQdisc>, String>;
     async fn qos_capabilities(&self) -> Result<QosCapabilities, String>;
     async fn interface_info(&self, interface: &str) -> Result<Vec<InterfaceInfo>, String>;
-    async fn interface_set_mac(&self, interface: &str, mac: &str) -> Result<InterfaceResult, String>;
+    async fn interface_set_mac(
+        &self,
+        interface: &str,
+        mac: &str,
+    ) -> Result<InterfaceResult, String>;
     async fn interface_restore_mac(&self, interface: &str) -> Result<InterfaceResult, String>;
     async fn tailscale_status(&self) -> Result<TailscaleStatus, String>;
     async fn tailscale_up(&self, auth_key: Option<String>) -> Result<TailscaleResult, String>;
@@ -57,13 +61,23 @@ impl SubsystemExec for ExecutorClient {
         self.qos_capabilities().await.map_err(|e| e.to_string())
     }
     async fn interface_info(&self, interface: &str) -> Result<Vec<InterfaceInfo>, String> {
-        self.interface_info(interface).await.map_err(|e| e.to_string())
+        self.interface_info(interface)
+            .await
+            .map_err(|e| e.to_string())
     }
-    async fn interface_set_mac(&self, interface: &str, mac: &str) -> Result<InterfaceResult, String> {
-        self.interface_set_mac(interface, mac).await.map_err(|e| e.to_string())
+    async fn interface_set_mac(
+        &self,
+        interface: &str,
+        mac: &str,
+    ) -> Result<InterfaceResult, String> {
+        self.interface_set_mac(interface, mac)
+            .await
+            .map_err(|e| e.to_string())
     }
     async fn interface_restore_mac(&self, interface: &str) -> Result<InterfaceResult, String> {
-        self.interface_restore_mac(interface).await.map_err(|e| e.to_string())
+        self.interface_restore_mac(interface)
+            .await
+            .map_err(|e| e.to_string())
     }
     async fn tailscale_status(&self) -> Result<TailscaleStatus, String> {
         self.tailscale_status().await.map_err(|e| e.to_string())
@@ -266,13 +280,15 @@ impl SubsystemManager {
                             || p.self_online != status.self_online
                     })
                     .unwrap_or(true);
-                self.snapshot.update(|s| {
-                    s.tailscale = TailscaleSnapshot {
-                        status: Some(status.clone()),
-                        error: None,
-                        pending_op: false,
-                    }
-                }).await;
+                self.snapshot
+                    .update(|s| {
+                        s.tailscale = TailscaleSnapshot {
+                            status: Some(status.clone()),
+                            error: None,
+                            pending_op: false,
+                        }
+                    })
+                    .await;
                 if changed {
                     let state = if status.backend_state.is_empty() {
                         "Unknown".to_string()
@@ -285,19 +301,22 @@ impl SubsystemManager {
             }
             Err(e) => {
                 unreachable = true;
-                self.snapshot.update(|s| {
-                    s.tailscale = TailscaleSnapshot {
-                        status: tail_prev,
-                        error: Some(e.clone()),
-                        pending_op: false,
-                    }
-                }).await;
+                self.snapshot
+                    .update(|s| {
+                        s.tailscale = TailscaleSnapshot {
+                            status: tail_prev,
+                            error: Some(e.clone()),
+                            pending_op: false,
+                        }
+                    })
+                    .await;
                 self.emit(SubsystemEvent::TailscaleError { detail: e });
             }
         }
 
         self.snapshot
-            .update(|s| s.executor_unreachable = unreachable).await;
+            .update(|s| s.executor_unreachable = unreachable)
+            .await;
 
         if let Some(err) = qos_err {
             warn!("subsystems: QoS convergence failed: {err}");
@@ -310,7 +329,8 @@ impl SubsystemManager {
         let now_ms = crate::system_stats::now_ms();
         let prev_map = self.last_counters.read().await.clone();
 
-        let mut rates: Vec<balansir_common::subsystems::InterfaceRate> = Vec::with_capacity(interfaces.len());
+        let mut rates: Vec<balansir_common::subsystems::InterfaceRate> =
+            Vec::with_capacity(interfaces.len());
         for iface in interfaces {
             let (rx_bps, tx_bps) = match prev_map.get(&iface.name) {
                 Some((prev_rx, prev_tx, prev_ms)) if *prev_ms < now_ms => {
@@ -343,9 +363,8 @@ impl SubsystemManager {
 
     /// Run the periodic observation loop until the task is aborted.
     pub async fn run_loop(self: Arc<Self>) {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
-            SUBSYSTEM_INTERVAL_SECS,
-        ));
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(SUBSYSTEM_INTERVAL_SECS));
         loop {
             ticker.tick().await;
             self.refresh().await;
@@ -355,33 +374,35 @@ impl SubsystemManager {
     /// Converge QoS intent against the executor's reported qdiscs.
     async fn converge_qos(&self) -> Result<(), String> {
         let exec = &*self.exec;
-        let (desired, applied, caps) = match (exec.qos_state("").await, exec.qos_capabilities().await)
-        {
-            (Ok(applied), Ok(caps)) => {
-                let desired = self.qos_intent.read().await.clone();
-                (desired, applied, Some(caps))
-            }
-            (Err(e), _) | (_, Err(e)) => {
-                self.snapshot.update(|s| {
-                    s.qos.last_error = Some(e.clone());
-                    s.qos.drift = true;
-                }).await;
-                return Err(e);
-            }
-        };
+        let (desired, applied, caps) =
+            match (exec.qos_state("").await, exec.qos_capabilities().await) {
+                (Ok(applied), Ok(caps)) => {
+                    let desired = self.qos_intent.read().await.clone();
+                    (desired, applied, Some(caps))
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    self.snapshot
+                        .update(|s| {
+                            s.qos.last_error = Some(e.clone());
+                            s.qos.drift = true;
+                        })
+                        .await;
+                    return Err(e);
+                }
+            };
 
         // Fail loudly for unsupported kinds instead of silently degrading.
         for config in &desired {
             let supported = match config.kind {
-                balansir_common::qos::QdiscKind::Cake => caps.as_ref().map(|c| c.cake).unwrap_or(false),
-                balansir_common::qos::QdiscKind::FqCodel => caps
-                    .as_ref()
-                    .map(|c| c.fq_codel)
-                    .unwrap_or(false),
-                balansir_common::qos::QdiscKind::Ingress => caps
-                    .as_ref()
-                    .map(|c| c.ingress)
-                    .unwrap_or(false),
+                balansir_common::qos::QdiscKind::Cake => {
+                    caps.as_ref().map(|c| c.cake).unwrap_or(false)
+                }
+                balansir_common::qos::QdiscKind::FqCodel => {
+                    caps.as_ref().map(|c| c.fq_codel).unwrap_or(false)
+                }
+                balansir_common::qos::QdiscKind::Ingress => {
+                    caps.as_ref().map(|c| c.ingress).unwrap_or(false)
+                }
             };
             if !supported {
                 let detail = format!(
@@ -389,10 +410,12 @@ impl SubsystemManager {
                     config.kind.as_str(),
                     config.interface
                 );
-                self.snapshot.update(|s| {
-                    s.qos.last_error = Some(detail.clone());
-                    s.qos.drift = true;
-                }).await;
+                self.snapshot
+                    .update(|s| {
+                        s.qos.last_error = Some(detail.clone());
+                        s.qos.drift = true;
+                    })
+                    .await;
                 self.emit(SubsystemEvent::QosError {
                     detail: detail.clone(),
                 });
@@ -432,7 +455,9 @@ impl SubsystemManager {
                         self.emit(SubsystemEvent::QosError {
                             detail: detail.clone(),
                         });
-                        self.snapshot.update(|s| s.qos.last_error = Some(detail.clone())).await;
+                        self.snapshot
+                            .update(|s| s.qos.last_error = Some(detail.clone()))
+                            .await;
                         last_error = Some(detail);
                     }
                 }
@@ -469,7 +494,9 @@ impl SubsystemManager {
                         self.emit(SubsystemEvent::QosError {
                             detail: detail.clone(),
                         });
-                        self.snapshot.update(|s| s.qos.last_error = Some(detail.clone())).await;
+                        self.snapshot
+                            .update(|s| s.qos.last_error = Some(detail.clone()))
+                            .await;
                         last_error = Some(detail);
                     }
                 }
@@ -479,25 +506,26 @@ impl SubsystemManager {
         let applied_fresh = exec.qos_state("").await.unwrap_or(applied);
         let drift_now = desired
             .iter()
-            .any(|config| {
-                !applied_fresh.iter().any(|q| q_matches_config(q, config))
-            })
+            .any(|config| !applied_fresh.iter().any(|q| q_matches_config(q, config)))
             || applied_fresh.iter().any(|q| {
                 q.our_identity
                     && !desired.iter().any(|c| {
-                        c.interface == q.interface && c.kind.as_str() == q.kind.as_deref().unwrap_or("")
+                        c.interface == q.interface
+                            && c.kind.as_str() == q.kind.as_deref().unwrap_or("")
                     })
             });
 
-        self.snapshot.update(|s| {
-            s.qos = QosSnapshot {
-                desired: desired.clone(),
-                applied: applied_fresh,
-                capabilities: caps,
-                drift: drift_now,
-                last_error: last_error.clone(),
-            };
-        }).await;
+        self.snapshot
+            .update(|s| {
+                s.qos = QosSnapshot {
+                    desired: desired.clone(),
+                    applied: applied_fresh,
+                    capabilities: caps,
+                    drift: drift_now,
+                    last_error: last_error.clone(),
+                };
+            })
+            .await;
 
         Ok(())
     }
@@ -537,11 +565,7 @@ impl balansir_common::subsystems::SubsystemControl for ControlImpl {
     }
 
     async fn restore_mac(&self, interface: &str) -> Result<InterfaceResult, String> {
-        let result = self
-            .manager
-            .exec
-            .interface_restore_mac(interface)
-            .await?;
+        let result = self.manager.exec.interface_restore_mac(interface).await?;
         self.manager.emit(SubsystemEvent::InterfaceMacRestored {
             interface: interface.to_string(),
         });
@@ -752,7 +776,7 @@ mod tests {
                         kind: Some(config.kind.as_str().to_string()),
                         our_identity: true,
                         stats: None,
-                    bandwidth_bps: None,
+                        bandwidth_bps: None,
                     });
                     Ok(QosResult {
                         op: "apply".into(),
@@ -762,7 +786,10 @@ mod tests {
                     })
                 }
                 QosOp::Remove { interface } => {
-                    self.applied.lock().unwrap().retain(|q| q.interface != *interface);
+                    self.applied
+                        .lock()
+                        .unwrap()
+                        .retain(|q| q.interface != *interface);
                     Ok(QosResult {
                         op: "remove".into(),
                         interface: interface.clone(),
@@ -803,10 +830,7 @@ mod tests {
                 previous_mac: None,
             })
         }
-        async fn interface_restore_mac(
-            &self,
-            _interface: &str,
-        ) -> Result<InterfaceResult, String> {
+        async fn interface_restore_mac(&self, _interface: &str) -> Result<InterfaceResult, String> {
             Ok(InterfaceResult {
                 ok: true,
                 detail: "ok".into(),
@@ -888,10 +912,7 @@ mod tests {
         ) -> Result<InterfaceResult, String> {
             self.inner.interface_set_mac("", "").await
         }
-        async fn interface_restore_mac(
-            &self,
-            _interface: &str,
-        ) -> Result<InterfaceResult, String> {
+        async fn interface_restore_mac(&self, _interface: &str) -> Result<InterfaceResult, String> {
             self.inner.interface_restore_mac("").await
         }
         async fn tailscale_status(&self) -> Result<TailscaleStatus, String> {
@@ -957,10 +978,7 @@ mod tests {
         ) -> Result<InterfaceResult, String> {
             self.inner.interface_set_mac("", "").await
         }
-        async fn interface_restore_mac(
-            &self,
-            _interface: &str,
-        ) -> Result<InterfaceResult, String> {
+        async fn interface_restore_mac(&self, _interface: &str) -> Result<InterfaceResult, String> {
             self.inner.interface_restore_mac("").await
         }
         async fn tailscale_status(&self) -> Result<TailscaleStatus, String> {
@@ -994,12 +1012,12 @@ mod tests {
             .unwrap();
 
         let snap = manager.snapshot.read().await;
-        assert!(snap.qos.drift, "drift must be true when apply reports ok=false");
-        let err = snap.qos.last_error.clone().expect("last_error must be set");
         assert!(
-            err.contains("EPERM"),
-            "actionable error expected: {err}"
+            snap.qos.drift,
+            "drift must be true when apply reports ok=false"
         );
+        let err = snap.qos.last_error.clone().expect("last_error must be set");
+        assert!(err.contains("EPERM"), "actionable error expected: {err}");
     }
 
     #[tokio::test]
@@ -1086,7 +1104,7 @@ mod tests {
             kind: Some("fq_codel".into()),
             our_identity: true,
             stats: None,
-                    bandwidth_bps: None,
+            bandwidth_bps: None,
         });
         let manager = Arc::new(SubsystemManager::new(exec.clone()));
         manager.refresh().await;
@@ -1125,11 +1143,20 @@ mod tests {
             bandwidth_bps,
         };
         // Exact match: no drift.
-        assert!(q_matches_config(&make_applied(Some(20_000_000)), &make_cfg(Some(20_000_000))));
+        assert!(q_matches_config(
+            &make_applied(Some(20_000_000)),
+            &make_cfg(Some(20_000_000))
+        ));
         // Kernel enforces a different rate than desired.
-        assert!(!q_matches_config(&make_applied(Some(10_000_000)), &make_cfg(Some(20_000_000))));
+        assert!(!q_matches_config(
+            &make_applied(Some(10_000_000)),
+            &make_cfg(Some(20_000_000))
+        ));
         // Rate-cap requested but kernel reports none (stale executor): drift.
-        assert!(!q_matches_config(&make_applied(None), &make_cfg(Some(20_000_000))));
+        assert!(!q_matches_config(
+            &make_applied(None),
+            &make_cfg(Some(20_000_000))
+        ));
         // No rate requested: kind/identity match is enough.
         assert!(q_matches_config(&make_applied(None), &make_cfg(None)));
         // Wrong interface/identity never matches.
@@ -1170,7 +1197,10 @@ mod tests {
                 latency_target_ms: None,
             },
         ];
-        assert!(qos_intent_from_toml(&entries).is_err(), "empty interface must be rejected");
+        assert!(
+            qos_intent_from_toml(&entries).is_err(),
+            "empty interface must be rejected"
+        );
 
         let ok_entries = vec![QosIntentToml {
             interface: "eth0".into(),

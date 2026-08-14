@@ -430,10 +430,6 @@ pub const FAIL_CLOSED_RULE_ID: u32 = u32::MAX;
 pub struct DesiredState {
     pub rules: Vec<DesiredRule>,
     pub drivers: Vec<DesiredDriver>,
-    /// Desired QoS shaping plans (LibreQoS-inspired HTB per interface).
-    /// Empty means no shaping is desired.
-    #[serde(default)]
-    pub qos: Vec<QosPlan>,
 }
 
 /// Stable FNV-1a fingerprint of a desired-state config (P4.8, ADR-021).
@@ -571,7 +567,6 @@ mod config_fingerprint_tests {
                 })
                 .collect(),
             drivers: vec![],
-            qos: vec![],
         }
     }
 

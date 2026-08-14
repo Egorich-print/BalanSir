@@ -198,14 +198,12 @@ impl ComponentDriver for DnsForwarderDriver {
             self.config.upstreams.clone()
         };
 
-        let socket = UdpSocket::bind(self.config.listen)
-            .await
-            .map_err(|e| {
-                DriverError::StartFailed(format!(
-                    "Failed to bind DNS listener {}: {e}",
-                    self.config.listen
-                ))
-            })?;
+        let socket = UdpSocket::bind(self.config.listen).await.map_err(|e| {
+            DriverError::StartFailed(format!(
+                "Failed to bind DNS listener {}: {e}",
+                self.config.listen
+            ))
+        })?;
         let local = socket.local_addr().ok();
         tracing::info!(listen = ?local, upstreams = ?upstreams, "DNS forwarder started");
 
@@ -299,7 +297,10 @@ mod tests {
                         let response = [0xAB, 0xCD]; // opaque DNS response
                         let _ = listener.send_to(&response[..], peer);
                     }
-                    Err(_) if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock => {
+                    Err(_)
+                        if std::io::Error::last_os_error().kind()
+                            == std::io::ErrorKind::WouldBlock =>
+                    {
                         std::thread::sleep(Duration::from_millis(5));
                     }
                     Err(_) => return,
@@ -334,7 +335,11 @@ mod tests {
                 ..DnsForwarderConfig::default()
             },
         );
-        let resp = query_driver(&mut driver, b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00").await;
+        let resp = query_driver(
+            &mut driver,
+            b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00",
+        )
+        .await;
         assert_eq!(resp, Some(vec![0xAB, 0xCD]));
         assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 1);
         driver.stop().await.expect("stop");

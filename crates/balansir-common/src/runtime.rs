@@ -31,6 +31,7 @@ impl ResourceProfile {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "minimal" => Some(ResourceProfile::Minimal),
@@ -129,9 +130,18 @@ mod tests {
         assert_eq!(ResourceProfile::detect(256, 1), ResourceProfile::Minimal);
         assert_eq!(ResourceProfile::detect(512, 2), ResourceProfile::Minimal);
         assert_eq!(ResourceProfile::detect(1024, 2), ResourceProfile::Standard);
-        assert_eq!(ResourceProfile::detect(4096, 2), ResourceProfile::Performance);
-        assert_eq!(ResourceProfile::detect(2048, 4), ResourceProfile::Performance);
-        assert_eq!(ResourceProfile::detect(4096, 1), ResourceProfile::Performance);
+        assert_eq!(
+            ResourceProfile::detect(4096, 2),
+            ResourceProfile::Performance
+        );
+        assert_eq!(
+            ResourceProfile::detect(2048, 4),
+            ResourceProfile::Performance
+        );
+        assert_eq!(
+            ResourceProfile::detect(4096, 1),
+            ResourceProfile::Performance
+        );
     }
 
     #[test]

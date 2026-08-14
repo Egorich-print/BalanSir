@@ -254,7 +254,8 @@ mod tests {
         assert!(
             listed
                 .iter()
-                .any(|l| l.contains("meta mark set 0x00000010") && l.contains("comment \"balansir:42\"")),
+                .any(|l| l.contains("meta mark set 0x00000010")
+                    && l.contains("comment \"balansir:42\"")),
             "installed rule must be present with mark + comment: {listed:?}"
         );
 
@@ -288,10 +289,10 @@ mod tests {
             return;
         }
 
+        use balansir_common::{Action, ActionRequest, ActionResult, DecisionTrace};
         use balansir_executor::executor::Executor as _;
         use balansir_executor::nftables::NftablesBackend;
         use balansir_executor::service::NftablesExecutor;
-        use balansir_common::{Action, ActionRequest, ActionResult, DecisionTrace};
 
         let table = format!("balansir_conv_{}", std::process::id());
         let backend = NftablesBackend::new(&table, "forward").unwrap();

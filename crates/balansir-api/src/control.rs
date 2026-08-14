@@ -280,67 +280,6 @@ impl ControlPlane {
     }
 }
 
-/// Adapter: `ControlPlane` implements the HTTP-layer `ApiSurface` so the
-/// daemon's reconciler (via `ReconcilerApi`) and this coordinator-backed plane
-/// both satisfy the same handler contract.
-#[async_trait::async_trait]
-impl crate::surface::ApiSurface for ControlPlane {
-    async fn desired(&self) -> DesiredState {
-        self.desired().await.unwrap_or_default()
-    }
-    async fn actual(&self) -> ActualState {
-        self.actual().await.unwrap_or_default()
-    }
-    async fn plan(&self) -> String {
-        format!("plan generation {}", self.generation())
-    }
-    async fn explain(&self) -> String {
-        format!("explain generation {}", self.generation())
-    }
-    async fn fingerprint(&self) -> Option<u64> {
-        None
-    }
-    async fn generation(&self) -> u64 {
-        self.generation()
-    }
-    async fn reload(&self, state: DesiredState) -> Result<(), String> {
-        self.reload_api(state).await.map_err(|e| e.to_string())
-    }
-    async fn reconcile(&self) -> Result<(), String> {
-        self.reconcile_api().await.map_err(|e| e.to_string())
-    }
-    async fn dns_resync(&self) -> bool {
-        false
-    }
-    fn metrics(&self) -> Arc<balansir_common::metrics::SharedMetrics> {
-        Arc::new(balansir_common::metrics::SharedMetrics::new())
-    }
-    fn events(&self) -> Arc<crate::surface::ApiEventBridge> {
-        // Bridging coordinator events into the ApiEventBridge is handled by
-        // ReconcilerApi; the coordinator-backed plane keeps its own EventBridge.
-        Arc::new(crate::surface::ApiEventBridge::new(32))
-    }
-
-    async fn tailscale_status(&self) -> serde_json::Value {
-        serde_json::json!({ "installed": false, "error": "not wired (daemon surface)" })
-    }
-    async fn tailscale_up(&self) -> Result<(), String> {
-        Err("not wired (daemon surface)".into())
-    }
-    async fn tailscale_down(&self) -> Result<(), String> {
-        Err("not wired (daemon surface)".into())
-    }
-    async fn qos_status(&self) -> serde_json::Value {
-        serde_json::json!({ "desired": [], "applied": [] })
-    }
-    async fn path_health(&self) -> serde_json::Value {
-        serde_json::json!([])
-    }
-    async fn xray_status(&self) -> serde_json::Value {
-        serde_json::json!({ "installed": false, "running": false })
-    }
-}
-
 /// A desired-state store that is both readable (`DesiredProvider`) and
 /// writable (`DesiredUpdater`), backed by a single shared handle. Used for
 /// transactional `/reload`: the coordinator reads and the reload writes the
@@ -432,7 +371,6 @@ mod tests {
                 id: DriverId::Xray,
                 action: DriverAction::Restart,
             }],
-            qos: Vec::new(),
         };
         ControlPlane::assemble(
             Arc::new(MemoryDesiredProvider::new(desired)),
@@ -461,8 +399,8 @@ mod tests {
     async fn wrap_shares_existing_coordinator() {
         use balansir_control::traits::{DesiredProvider, EventSink, StateProvider};
 
-        let desired_store: Arc<dyn DesiredProvider> = Arc::new(MemoryDesiredProvider::new(
-            DesiredState {
+        let desired_store: Arc<dyn DesiredProvider> =
+            Arc::new(MemoryDesiredProvider::new(DesiredState {
                 rules: vec![DesiredRule {
                     id: 9,
                     action: Action::Block,
@@ -470,8 +408,7 @@ mod tests {
                     flow: None,
                 }],
                 drivers: vec![],
-            },
-        ));
+            }));
         let actual_store: Arc<dyn StateProvider> = Arc::new(MemoryStateProvider::default());
         let events = Arc::new(EventBridge::new(16));
         let bridge_sink: Arc<dyn EventSink> = events.clone();
@@ -535,7 +472,6 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         }));
         let plane = ControlPlane::assemble_with_updater(
             store.clone(),
@@ -556,7 +492,6 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         assert!(plane.reload_api(candidate.clone()).await.is_ok());
         let d = plane.desired().await.unwrap();
@@ -575,7 +510,6 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         let err = plane.reload_api(candidate).await.unwrap_err();
         assert!(matches!(err, ControlError::DesiredProvider(_)));

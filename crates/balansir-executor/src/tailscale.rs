@@ -61,9 +61,7 @@ impl CliTailscaleDriver {
     }
 
     fn run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
-        Command::new(&self.binary)
-            .args(args)
-            .output()
+        Command::new(&self.binary).args(args).output()
     }
 
     fn run_stdin(&self, args: &[&str], stdin: &str) -> std::io::Result<std::process::Output> {
@@ -113,7 +111,10 @@ impl TailscaleDriver for CliTailscaleDriver {
         let mut args = vec!["up"];
         let mut stdin = String::new();
         if let Some(key) = auth_key {
-            if key.is_empty() || key.len() > 512 || !key.chars().all(|c| c.is_ascii() && !c.is_control()) {
+            if key.is_empty()
+                || key.len() > 512
+                || !key.chars().all(|c| c.is_ascii() && !c.is_control())
+            {
                 return TailscaleResult {
                     ok: false,
                     detail: "invalid auth key".into(),
@@ -289,7 +290,7 @@ fn parse_status(raw: &[u8]) -> TailscaleStatus {
     }
 
     if let Some(peer_map) = &status.peers {
-        for (_, peer) in peer_map {
+        for peer in peer_map.values() {
             let last_seen_seconds_ago = peer.last_seen.as_ref().and_then(|ts| {
                 chrono::DateTime::parse_from_rfc3339(ts)
                     .ok()
@@ -320,7 +321,11 @@ fn parse_status(raw: &[u8]) -> TailscaleStatus {
         .unwrap_or(false)
         .then_some("exit node active".to_string());
 
-    let self_online = status.self_info.as_ref().and_then(|n| n.online).unwrap_or(false);
+    let self_online = status
+        .self_info
+        .as_ref()
+        .and_then(|n| n.online)
+        .unwrap_or(false);
     let tailscale_ip = status
         .self_info
         .as_ref()
@@ -336,9 +341,17 @@ fn parse_status(raw: &[u8]) -> TailscaleStatus {
     let summary = match backend_state.as_str() {
         "Running" => {
             if health.is_empty() {
-                format!("Running · {} · {} peer(s)", tailscale_ip.as_deref().unwrap_or("?"), peers.len())
+                format!(
+                    "Running · {} · {} peer(s)",
+                    tailscale_ip.as_deref().unwrap_or("?"),
+                    peers.len()
+                )
             } else {
-                format!("Running · {} warning(s): {}", health.len(), health.join("; "))
+                format!(
+                    "Running · {} warning(s): {}",
+                    health.len(),
+                    health.join("; ")
+                )
             }
         }
         "NeedsLogin" => "Needs login — open the login URL from `tailscale up`".into(),
@@ -419,16 +432,28 @@ impl TailscaleDriver for MockTailscaleDriver {
         self.status.clone()
     }
     async fn up(&self, _auth_key: Option<&str>) -> TailscaleResult {
-        TailscaleResult { ok: true, detail: "mock up".into() }
+        TailscaleResult {
+            ok: true,
+            detail: "mock up".into(),
+        }
     }
     async fn down(&self) -> TailscaleResult {
-        TailscaleResult { ok: true, detail: "mock down".into() }
+        TailscaleResult {
+            ok: true,
+            detail: "mock down".into(),
+        }
     }
     async fn reconnect(&self) -> TailscaleResult {
-        TailscaleResult { ok: true, detail: "mock reconnect".into() }
+        TailscaleResult {
+            ok: true,
+            detail: "mock reconnect".into(),
+        }
     }
     async fn set_routes(&self, _routes: &[String], _exit_node: bool) -> TailscaleResult {
-        TailscaleResult { ok: true, detail: "mock routes".into() }
+        TailscaleResult {
+            ok: true,
+            detail: "mock routes".into(),
+        }
     }
 }
 

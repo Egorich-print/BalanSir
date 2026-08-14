@@ -202,16 +202,14 @@ impl PathHealth {
 
         let degraded = !sample.reachable
             || sample.degraded_evidence
-            || self
-                .config
-                .latency_threshold_ms
-                .is_finite()
-                && sample.latency_ms.map_or(false, |l| l > self.config.latency_threshold_ms)
-            || self
-                .config
-                .loss_threshold_pct
-                .is_finite()
-                && sample.loss_pct.map_or(false, |l| l > self.config.loss_threshold_pct);
+            || self.config.latency_threshold_ms.is_finite()
+                && sample
+                    .latency_ms
+                    .is_some_and(|l| l > self.config.latency_threshold_ms)
+            || self.config.loss_threshold_pct.is_finite()
+                && sample
+                    .loss_pct
+                    .is_some_and(|l| l > self.config.loss_threshold_pct);
 
         if degraded {
             self.consecutive_bad = self.consecutive_bad.saturating_add(1);
@@ -331,10 +329,16 @@ impl PathHealth {
             }
             PathState::Degraded => {
                 if th.is_finite() && self.latency_ms > th {
-                    r.push(format!("RTT {:.0} ms exceeds {:.0} ms threshold", self.latency_ms, th));
+                    r.push(format!(
+                        "RTT {:.0} ms exceeds {:.0} ms threshold",
+                        self.latency_ms, th
+                    ));
                 }
                 if loss_th.is_finite() && self.loss_pct > loss_th {
-                    r.push(format!("Packet loss {:.1}% exceeds {:.1}% threshold", self.loss_pct, loss_th));
+                    r.push(format!(
+                        "Packet loss {:.1}% exceeds {:.1}% threshold",
+                        self.loss_pct, loss_th
+                    ));
                 }
                 if r.is_empty() {
                     r.push("Path degraded below thresholds".into());

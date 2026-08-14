@@ -121,7 +121,6 @@ impl FlowCompiler {
         DesiredState {
             rules,
             drivers: state.drivers.clone(),
-            qos: state.qos.clone(),
         }
     }
 }

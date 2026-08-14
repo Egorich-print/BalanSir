@@ -11,7 +11,9 @@
 
 use async_trait::async_trait;
 use balansir_common::network::{InterfaceInfo, InterfaceResult};
+#[cfg(target_os = "linux")]
 use futures::TryStreamExt;
+#[cfg(target_os = "linux")]
 use netlink_packet_route::link::{LinkAttribute, LinkHeader, State, Stats64};
 
 /// Format raw MAC bytes as `aa:bb:cc:dd:ee:ff`.
@@ -34,7 +36,10 @@ pub fn validate_mac(input: &str) -> Option<String> {
         .chars()
         .filter(|c| c.is_ascii_hexdigit() || *c == ':' || *c == '-')
         .collect();
-    let parts: Vec<&str> = cleaned.split([':', '-']).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = cleaned
+        .split([':', '-'])
+        .filter(|p| !p.is_empty())
+        .collect();
     if parts.len() != 6 || parts.iter().any(|p| p.len() > 2) {
         return None;
     }
@@ -66,15 +71,18 @@ pub trait InterfaceBackend: Send + Sync {
     async fn restore_mac(&self, interface: &str) -> Result<InterfaceResult, String>;
 }
 
+#[cfg(target_os = "linux")]
 /// Real netlink-backed interface driver.
+#[cfg(target_os = "linux")]
 pub struct NetlinkInterfaceBackend {
     handle: tokio::sync::Mutex<rtnetlink::Handle>,
 }
 
+#[cfg(target_os = "linux")]
 impl NetlinkInterfaceBackend {
     pub async fn new() -> Result<Self, String> {
-        let (connection, handle, _events) = rtnetlink::new_connection()
-            .map_err(|e| format!("netlink connection failed: {e}"))?;
+        let (connection, handle, _events) =
+            rtnetlink::new_connection().map_err(|e| format!("netlink connection failed: {e}"))?;
         tokio::spawn(connection);
         Ok(Self {
             handle: tokio::sync::Mutex::new(handle),
@@ -82,7 +90,10 @@ impl NetlinkInterfaceBackend {
     }
 
     /// Dump all links matching the filter.
-    async fn dump_links(&self, name: &str) -> Result<Vec<(LinkHeader, Vec<LinkAttribute>)>, String> {
+    async fn dump_links(
+        &self,
+        name: &str,
+    ) -> Result<Vec<(LinkHeader, Vec<LinkAttribute>)>, String> {
         let handle = self.handle.lock().await;
         let mut req = handle.link().get();
         if !name.is_empty() {
@@ -136,6 +147,7 @@ impl NetlinkInterfaceBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn link_to_info(name: String, header: LinkHeader, attrs: Vec<LinkAttribute>) -> InterfaceInfo {
     let mut info = InterfaceInfo {
         name,
@@ -209,6 +221,7 @@ fn link_to_info(name: String, header: LinkHeader, attrs: Vec<LinkAttribute>) -> 
     info
 }
 
+#[cfg(target_os = "linux")]
 fn apply_stats64(info: &mut InterfaceInfo, s: Stats64) {
     info.rx_bytes = s.rx_bytes;
     info.tx_bytes = s.tx_bytes;
@@ -222,6 +235,7 @@ fn apply_stats64(info: &mut InterfaceInfo, s: Stats64) {
 }
 
 #[async_trait]
+#[cfg(target_os = "linux")]
 impl InterfaceBackend for NetlinkInterfaceBackend {
     async fn info(&self, interface: &str) -> Result<Vec<InterfaceInfo>, String> {
         let links = self.dump_links(interface).await?;
@@ -318,32 +332,39 @@ impl InterfaceBackend for NetlinkInterfaceBackend {
 /// the last clone. Written atomically, mode 0600; this is the *fallback* for
 /// restore when a permanent hardware MAC does not exist — never the factory MAC
 /// itself.
+#[cfg(target_os = "linux")]
 const MAC_STATE_PATH: &str = "/run/balansir/mac-state.json";
 
+#[cfg(target_os = "linux")]
 fn remember_previous_mac(interface: &str, mac: &str) {
     remember_previous_mac_at(std::path::Path::new(MAC_STATE_PATH), interface, mac);
 }
 
+#[cfg(target_os = "linux")]
 fn remembered_previous_mac(interface: &str) -> Option<String> {
     remembered_previous_mac_at(std::path::Path::new(MAC_STATE_PATH), interface)
 }
 
+#[cfg(target_os = "linux")]
 fn forget_previous_mac(interface: &str) {
     forget_previous_mac_at(std::path::Path::new(MAC_STATE_PATH), interface);
 }
 
+#[cfg(target_os = "linux")]
 fn remember_previous_mac_at(path: &std::path::Path, interface: &str, mac: &str) {
     let mut map = read_mac_state_at(path).unwrap_or_default();
     map.insert(interface.to_string(), mac.to_string());
     write_mac_state_at(path, &map);
 }
 
+#[cfg(target_os = "linux")]
 fn remembered_previous_mac_at(path: &std::path::Path, interface: &str) -> Option<String> {
     read_mac_state_at(path)
         .ok()
         .and_then(|m| m.get(interface).cloned())
 }
 
+#[cfg(target_os = "linux")]
 fn forget_previous_mac_at(path: &std::path::Path, interface: &str) {
     let mut map = read_mac_state_at(path).unwrap_or_default();
     if map.remove(interface).is_some() {
@@ -351,12 +372,16 @@ fn forget_previous_mac_at(path: &std::path::Path, interface: &str) {
     }
 }
 
-fn read_mac_state_at(path: &std::path::Path) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+#[cfg(target_os = "linux")]
+fn read_mac_state_at(
+    path: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
+#[cfg(target_os = "linux")]
 fn write_mac_state_at(path: &std::path::Path, map: &std::collections::BTreeMap<String, String>) {
     use std::os::unix::fs::PermissionsExt;
     let tmp = path.with_extension("json.tmp");
@@ -396,7 +421,9 @@ impl InterfaceBackend for SysfsInterfaceBackend {
             };
             out.push(InterfaceInfo {
                 name,
-                index: read_str("ifindex").and_then(|s| s.parse().ok()).unwrap_or(0),
+                index: read_str("ifindex")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
                 kind: read_str("uevent").and_then(|u| {
                     u.lines()
                         .find(|l| l.starts_with("DEVTYPE="))
@@ -421,13 +448,16 @@ impl InterfaceBackend for SysfsInterfaceBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
     #[test]
     fn mac_formatting() {
-        assert_eq!(format_mac(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]), Some("aa:bb:cc:dd:ee:ff".into()));
+        assert_eq!(
+            format_mac(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            Some("aa:bb:cc:dd:ee:ff".into())
+        );
         assert_eq!(format_mac(&[0x01]), None);
     }
 
@@ -443,7 +473,11 @@ mod tests {
         );
         assert_eq!(validate_mac("zz:bb:cc:dd:ee:ff"), None);
         assert_eq!(validate_mac("aa:bb:cc:dd:ee"), None);
-        assert_eq!(validate_mac("01:bb:cc:dd:ee:ff"), None, "multicast rejected");
+        assert_eq!(
+            validate_mac("01:bb:cc:dd:ee:ff"),
+            None,
+            "multicast rejected"
+        );
         assert_eq!(validate_mac("aa:bb:cc:dd:ee:ff:00"), None);
     }
 

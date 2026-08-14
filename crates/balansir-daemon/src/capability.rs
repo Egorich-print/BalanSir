@@ -102,7 +102,9 @@ fn features_for(tier: &str) -> Vec<FeatureAvailability> {
                 "Advanced telemetry",
                 "Bounded retention on Standard profile",
             ));
-            out.push(FeatureAvailability::available("Multiple simultaneous paths"));
+            out.push(FeatureAvailability::available(
+                "Multiple simultaneous paths",
+            ));
             out.push(FeatureAvailability::unavailable(
                 "ML / BTP",
                 "Not available on Standard profile",
@@ -113,7 +115,9 @@ fn features_for(tier: &str) -> Vec<FeatureAvailability> {
             out.push(FeatureAvailability::available("Xray transport"));
             out.push(FeatureAvailability::available("Tailscale"));
             out.push(FeatureAvailability::available("Advanced telemetry"));
-            out.push(FeatureAvailability::available("Multiple simultaneous paths"));
+            out.push(FeatureAvailability::available(
+                "Multiple simultaneous paths",
+            ));
             out.push(FeatureAvailability::unavailable(
                 "ML / BTP",
                 "Not yet implemented",
@@ -158,14 +162,29 @@ mod tests {
         assert!(!ml.available);
         assert!(ml.reason.as_deref().unwrap().contains("Minimal"));
         // Core features never lie.
-        assert!(f.iter().find(|x| x.name == "Policy engine").unwrap().available);
+        assert!(
+            f.iter()
+                .find(|x| x.name == "Policy engine")
+                .unwrap()
+                .available
+        );
     }
 
     #[test]
     fn performance_is_full() {
         let f = features_for("Performance");
-        assert!(f.iter().find(|x| x.name == "Advanced telemetry").unwrap().available);
-        assert!(f.iter().find(|x| x.name == "Xray transport").unwrap().available);
+        assert!(
+            f.iter()
+                .find(|x| x.name == "Advanced telemetry")
+                .unwrap()
+                .available
+        );
+        assert!(
+            f.iter()
+                .find(|x| x.name == "Xray transport")
+                .unwrap()
+                .available
+        );
     }
 
     #[test]

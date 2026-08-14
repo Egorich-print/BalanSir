@@ -33,6 +33,7 @@ impl QdiscKind {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "fq_codel" => Some(QdiscKind::FqCodel),
@@ -199,10 +200,7 @@ mod tests {
 
     #[test]
     fn identity_comment_is_stable() {
-        assert_eq!(
-            QosConfig::identity("wan0"),
-            "balansir:qos:wan0"
-        );
+        assert_eq!(QosConfig::identity("wan0"), "balansir:qos:wan0");
     }
 
     #[test]
@@ -221,10 +219,7 @@ mod tests {
         };
         assert_eq!(caps.best_egress_kind(), Some(QdiscKind::FqCodel));
 
-        assert_eq!(
-            QosCapabilities::unavailable().best_egress_kind(),
-            None
-        );
+        assert_eq!(QosCapabilities::unavailable().best_egress_kind(), None);
     }
 
     #[test]

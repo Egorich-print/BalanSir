@@ -72,7 +72,10 @@ impl DynamicEventSink {
 
     /// Attach an additional sink (e.g. the API `EventBridge`).
     pub fn attach(&self, sink: Arc<dyn EventSink>) {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).push(sink);
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(sink);
     }
 }
 

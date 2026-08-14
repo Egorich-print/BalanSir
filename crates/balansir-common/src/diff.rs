@@ -61,7 +61,6 @@ mod tests {
                 flow: None,
             }],
             drivers: vec![],
-            qos: vec![],
         };
         let actual = ActualState {
             active_rules: vec![ActualRule {
@@ -88,7 +87,6 @@ mod tests {
                 flow: None,
             }],
             drivers: vec![],
-            qos: vec![],
         };
         let actual = ActualState {
             active_rules: vec![],
@@ -126,7 +124,6 @@ mod tests {
                 },
             ],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         // Actual already carries rule 2 (Allow); rule 3 is stale and must be
         // removed.
@@ -198,7 +195,6 @@ mod tests {
                 },
             ],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         let actual = ActualState {
             active_rules: vec![
@@ -257,7 +253,6 @@ mod tests {
         let desired = DesiredState {
             rules: vec![with_flow(6)],
             drivers: vec![],
-            qos: vec![],
         };
         let actual = ActualState {
             active_rules: vec![ActualRule {

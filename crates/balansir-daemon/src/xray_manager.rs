@@ -72,6 +72,7 @@ pub struct XrayEndpoint {
 }
 
 impl XrayEndpoint {
+    #[allow(clippy::wrong_self_convention)]
     fn into_config(&self, fallback_socks: u16, fallback_http: u16) -> XrayConfig {
         XrayConfig {
             server: self.server.clone(),
@@ -100,8 +101,7 @@ pub struct XrayToml {
 
 impl XrayToml {
     pub fn from_file(path: &str) -> Result<Self, String> {
-        let raw =
-            std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+        let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
         toml::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))
     }
 
@@ -180,6 +180,7 @@ pub struct XrayManager {
     endpoints: Vec<XrayEndpoint>,
     socks_port: u16,
     http_port: u16,
+    #[allow(dead_code)]
     failover_threshold: u32,
     paused: Arc<AtomicBool>,
     pinned: Arc<RwLock<Option<String>>>,
@@ -264,8 +265,7 @@ impl XrayManager {
             if !e.enabled {
                 continue;
             }
-            lat[i] =
-                measure_latency_ms(&e.server, e.port, std::time::Duration::from_secs(3)).await;
+            lat[i] = measure_latency_ms(&e.server, e.port, std::time::Duration::from_secs(3)).await;
         }
     }
 
@@ -624,8 +624,14 @@ priority = 20
     fn rotation_picks_next_enabled() {
         let enabled = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         assert_eq!(next_enabled(&None, &enabled).as_deref(), Some("a"));
-        assert_eq!(next_enabled(&Some("a".into()), &enabled).as_deref(), Some("b"));
-        assert_eq!(next_enabled(&Some("c".into()), &enabled).as_deref(), Some("a"));
+        assert_eq!(
+            next_enabled(&Some("a".into()), &enabled).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            next_enabled(&Some("c".into()), &enabled).as_deref(),
+            Some("a")
+        );
         assert_eq!(next_enabled(&Some("a".into()), &[]), None);
     }
 
@@ -666,11 +672,13 @@ priority = 20
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
 
-        let measured = measure_latency_ms("127.0.0.1", port, std::time::Duration::from_secs(2)).await;
+        let measured =
+            measure_latency_ms("127.0.0.1", port, std::time::Duration::from_secs(2)).await;
         assert!(measured.is_some(), "reachable endpoint must yield latency");
 
         // A port with no listener yields None (unreachable), not a panic.
-        let unreachable = measure_latency_ms("127.0.0.1", 1, std::time::Duration::from_millis(200)).await;
+        let unreachable =
+            measure_latency_ms("127.0.0.1", 1, std::time::Duration::from_millis(200)).await;
         assert!(unreachable.is_none());
     }
 
@@ -704,11 +712,17 @@ priority = 20
             let mut paths = manager.paths.write().await;
             assert!(paths[0].observe(PathSample::failure()).is_none());
             let t = paths[0].observe(PathSample::failure());
-            assert_eq!(t, Some(balansir_common::path_health::PathTransition::EnteredFailing));
+            assert_eq!(
+                t,
+                Some(balansir_common::path_health::PathTransition::EnteredFailing)
+            );
         }
 
         let snap = manager.observe_snapshot().await;
-        assert_eq!(snap.profiles[0].health, "Unhealthy", "model Failing maps to UI Unhealthy");
+        assert_eq!(
+            snap.profiles[0].health, "Unhealthy",
+            "model Failing maps to UI Unhealthy"
+        );
         assert_eq!(snap.profiles[0].failure_count, 2);
         assert_eq!(snap.profiles[0].path.state, "failing");
         assert!(
@@ -720,7 +734,10 @@ priority = 20
             "reasons must explain the failing state: {:?}",
             snap.profiles[0].path.reasons
         );
-        assert_eq!(snap.profiles[1].health, "Unknown", "untouched endpoint stays Unknown");
+        assert_eq!(
+            snap.profiles[1].health, "Unknown",
+            "untouched endpoint stays Unknown"
+        );
         assert_eq!(snap.profiles[1].failure_count, 0);
     }
 }

@@ -23,7 +23,6 @@ async fn production_reconcile_with_pending_mechanism_rolls_back() {
             flow: None,
         }],
         drivers: Vec::new(),
-        qos: Vec::new(),
     };
 
     let reconciler = Reconciler::new(

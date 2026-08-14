@@ -118,7 +118,10 @@ pub enum TailscaleOp {
     /// Reconnect / re-authenticate.
     Reconnect,
     /// Advertise (or remove) subnet routes.
-    SetRoutes { routes: Vec<String>, exit_node: bool },
+    SetRoutes {
+        routes: Vec<String>,
+        exit_node: bool,
+    },
 }
 
 /// Result of a Tailscale operation.

@@ -170,7 +170,9 @@ async fn main() -> Result<()> {
                             });
                             info!("B4 engine started from {b4_path}");
                         }
-                        Err(e) => warn!("B4 config {b4_path} policy rejected: {e} (engine disabled)"),
+                        Err(e) => {
+                            warn!("B4 config {b4_path} policy rejected: {e} (engine disabled)")
+                        }
                     }
                 }
                 Err(e) => warn!("B4 config {b4_path} rejected: {e} (engine disabled)"),

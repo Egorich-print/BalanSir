@@ -48,7 +48,7 @@ fn default_route_gateway(interface: &str) -> Option<String> {
         if fields.len() < 3 || fields[0] != interface || fields[1] != "00000000" {
             continue;
         }
-        return Some(hex_le_to_ipv4(fields[2])?);
+        return hex_le_to_ipv4(fields[2]);
     }
     None
 }
@@ -58,7 +58,10 @@ fn default_route_gateway(interface: &str) -> Option<String> {
 fn hex_le_to_ipv4(hex: &str) -> Option<String> {
     let value = u32::from_str_radix(hex, 16).ok()?;
     let octets = value.to_le_bytes();
-    Some(format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3]))
+    Some(format!(
+        "{}.{}.{}.{}",
+        octets[0], octets[1], octets[2], octets[3]
+    ))
 }
 
 /// Assemble the WAN identity for the current interface snapshot.
@@ -84,7 +87,11 @@ pub fn assemble(interfaces: &[InterfaceInfo], env_override: Option<&str>) -> Opt
         hostname: None,
     };
 
-    let configured_mac = if cloning_active { current_mac.clone() } else { None };
+    let configured_mac = if cloning_active {
+        current_mac.clone()
+    } else {
+        None
+    };
     Some(WanIdentity {
         interface,
         hardware_mac,

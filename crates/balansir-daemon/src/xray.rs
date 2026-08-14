@@ -39,9 +39,15 @@ const fn default_http_port() -> u16 {
 pub enum XrayTransport {
     #[default]
     Tcp,
-    WebSocket { path: String },
-    Grpc { service_name: String },
-    HttpUpgrade { path: String },
+    WebSocket {
+        path: String,
+    },
+    Grpc {
+        service_name: String,
+    },
+    HttpUpgrade {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,10 +168,7 @@ impl XrayDriver {
         }
         match &cfg.transport {
             XrayTransport::WebSocket { path } => {
-                stream.insert(
-                    "wsSettings".into(),
-                    serde_json::json!({ "path": path }),
-                );
+                stream.insert("wsSettings".into(), serde_json::json!({ "path": path }));
             }
             XrayTransport::Grpc { service_name } => {
                 stream.insert(
@@ -348,10 +351,7 @@ impl ComponentDriver for XrayDriver {
         // 2. The local SOCKS inbound must actually accept connections: a real
         //    liveness probe through the proxy stack, not just a pid check.
         let addr = self.config.socks_socket_addr();
-        match std::net::TcpStream::connect_timeout(
-            &addr,
-            std::time::Duration::from_millis(750),
-        ) {
+        match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(750)) {
             Ok(_) => HealthStatus::Healthy,
             Err(_) => HealthStatus::Degraded { reason: 2 },
         }
@@ -389,17 +389,16 @@ mod tests {
     fn validation_rejects_bad_input() {
         let mut cfg = sample_config();
         cfg.server = "  ".into();
-        assert!(matches!(
-            cfg.validate(),
-            Err(DriverError::ConfigInvalid(_))
-        ));
+        assert!(matches!(cfg.validate(), Err(DriverError::ConfigInvalid(_))));
 
         let mut cfg = sample_config();
         cfg.socks_port = cfg.http_port;
         assert!(cfg.validate().is_err());
 
         let mut cfg = sample_config();
-        cfg.transport = XrayTransport::WebSocket { path: "no-slash".into() };
+        cfg.transport = XrayTransport::WebSocket {
+            path: "no-slash".into(),
+        };
         assert!(cfg.validate().is_err());
 
         let mut cfg = sample_config();

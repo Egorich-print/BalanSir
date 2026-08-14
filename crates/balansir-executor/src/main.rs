@@ -67,22 +67,10 @@ async fn main() -> Result<()> {
     // - Interface: netlink link ops (falls back to read-only sysfs).
     // - Tailscale: the upstream `tailscale` binary (absent => Status reports
     //   "not installed"; the executor still serves the rest).
-    let qos: Box<dyn balansir_executor::qdisc::QosBackend> =
-        match balansir_executor::qdisc::TcNetlinkBackend::new().await {
-            Ok(b) => Box::new(b),
-            Err(e) => {
-                warn!("QoS netlink backend unavailable ({e}); record-only fallback");
-                Box::new(balansir_executor::qdisc::RecordOnlyBackend::default())
-            }
-        };
+    let qos: Box<dyn balansir_executor::qdisc::QosBackend> = build_qos_backend().await;
     let interface: Box<dyn balansir_executor::interface::InterfaceBackend> =
-        match balansir_executor::interface::NetlinkInterfaceBackend::new().await {
-            Ok(b) => Box::new(b),
-            Err(e) => {
-                warn!("Interface netlink backend unavailable ({e}); sysfs fallback");
-                Box::new(balansir_executor::interface::SysfsInterfaceBackend)
-            }
-        };
+        build_interface_backend().await;
+
     let tailscale: Box<dyn balansir_executor::tailscale::TailscaleDriver> =
         match balansir_executor::tailscale::CliTailscaleDriver::new() {
             Ok(d) => Box::new(d),
@@ -92,12 +80,7 @@ async fn main() -> Result<()> {
             }
         };
 
-    let services = std::sync::Arc::new(ExecutorServices::new(
-        executor,
-        qos,
-        interface,
-        tailscale,
-    ));
+    let services = std::sync::Arc::new(ExecutorServices::new(executor, qos, interface, tailscale));
 
     loop {
         match listener.accept().await {
@@ -153,4 +136,36 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
     std::fs::remove_file(path)?;
     warn!("Removed stale socket at {}", path.display());
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn build_qos_backend() -> Box<dyn balansir_executor::qdisc::QosBackend> {
+    match balansir_executor::qdisc::TcNetlinkBackend::new().await {
+        Ok(b) => Box::new(b),
+        Err(e) => {
+            warn!("QoS netlink backend unavailable ({e}); record-only fallback");
+            Box::new(balansir_executor::qdisc::RecordOnlyBackend::default())
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn build_qos_backend() -> Box<dyn balansir_executor::qdisc::QosBackend> {
+    Box::new(balansir_executor::qdisc::RecordOnlyBackend::default())
+}
+
+#[cfg(target_os = "linux")]
+async fn build_interface_backend() -> Box<dyn balansir_executor::interface::InterfaceBackend> {
+    match balansir_executor::interface::NetlinkInterfaceBackend::new().await {
+        Ok(b) => Box::new(b),
+        Err(e) => {
+            warn!("Interface netlink backend unavailable ({e}); sysfs fallback");
+            Box::new(balansir_executor::interface::SysfsInterfaceBackend)
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn build_interface_backend() -> Box<dyn balansir_executor::interface::InterfaceBackend> {
+    Box::new(balansir_executor::interface::SysfsInterfaceBackend)
 }

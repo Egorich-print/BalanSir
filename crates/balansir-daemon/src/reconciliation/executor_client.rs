@@ -14,7 +14,9 @@
 
 use async_trait::async_trait;
 use balansir_common::ipc::{IpcClientConnection, IpcMessage, MsgType};
-use balansir_common::network::{InterfaceInfo, InterfaceOp, InterfaceResult, TailscaleOp, TailscaleResult, TailscaleStatus};
+use balansir_common::network::{
+    InterfaceInfo, InterfaceOp, InterfaceResult, TailscaleOp, TailscaleResult, TailscaleStatus,
+};
 use balansir_common::qos::{AppliedQdisc, QosCapabilities, QosOp, QosResult};
 use balansir_common::{ActionRequest, ActionResult, PathMtu, Result};
 
@@ -115,7 +117,11 @@ impl ExecutorClient {
     /// Report applied qdiscs (empty interface = all).
     pub async fn qos_state(&self, interface: &str) -> Result<Vec<AppliedQdisc>> {
         let resp = self
-            .typed_request(MsgType::GetQosState, interface.as_bytes().to_vec(), "GetQosState")
+            .typed_request(
+                MsgType::GetQosState,
+                interface.as_bytes().to_vec(),
+                "GetQosState",
+            )
             .await?;
         Self::decode(&resp)
     }
@@ -123,7 +129,11 @@ impl ExecutorClient {
     /// Kernel shaping capabilities.
     pub async fn qos_capabilities(&self) -> Result<QosCapabilities> {
         let resp = self
-            .typed_request(MsgType::GetQosCapabilities, Vec::new(), "GetQosCapabilities")
+            .typed_request(
+                MsgType::GetQosCapabilities,
+                Vec::new(),
+                "GetQosCapabilities",
+            )
             .await?;
         Self::decode(&resp)
     }
@@ -134,7 +144,9 @@ impl ExecutorClient {
             interface: interface.to_string(),
         };
         let payload = Self::encode(&op)?;
-        let resp = self.typed_request(MsgType::InterfaceOp, payload, "InterfaceOp").await?;
+        let resp = self
+            .typed_request(MsgType::InterfaceOp, payload, "InterfaceOp")
+            .await?;
         Self::decode(&resp)
     }
 
@@ -145,7 +157,9 @@ impl ExecutorClient {
             mac: mac.to_string(),
         };
         let payload = Self::encode(&op)?;
-        let resp = self.typed_request(MsgType::InterfaceOp, payload, "InterfaceOp").await?;
+        let resp = self
+            .typed_request(MsgType::InterfaceOp, payload, "InterfaceOp")
+            .await?;
         Self::decode(&resp)
     }
 
@@ -155,7 +169,9 @@ impl ExecutorClient {
             interface: interface.to_string(),
         };
         let payload = Self::encode(&op)?;
-        let resp = self.typed_request(MsgType::InterfaceOp, payload, "InterfaceOp").await?;
+        let resp = self
+            .typed_request(MsgType::InterfaceOp, payload, "InterfaceOp")
+            .await?;
         Self::decode(&resp)
     }
 
@@ -163,7 +179,9 @@ impl ExecutorClient {
     pub async fn tailscale_status(&self) -> Result<TailscaleStatus> {
         let op = TailscaleOp::Status;
         let payload = Self::encode(&op)?;
-        let resp = self.typed_request(MsgType::TailscaleOp, payload, "TailscaleOp").await?;
+        let resp = self
+            .typed_request(MsgType::TailscaleOp, payload, "TailscaleOp")
+            .await?;
         Self::decode(&resp)
     }
 
@@ -171,7 +189,9 @@ impl ExecutorClient {
     pub async fn tailscale_up(&self, auth_key: Option<String>) -> Result<TailscaleResult> {
         let op = TailscaleOp::Up { auth_key };
         let payload = Self::encode(&op)?;
-        let resp = self.typed_request(MsgType::TailscaleOp, payload, "TailscaleOp").await?;
+        let resp = self
+            .typed_request(MsgType::TailscaleOp, payload, "TailscaleOp")
+            .await?;
         Self::decode(&resp)
     }
 
@@ -179,7 +199,9 @@ impl ExecutorClient {
     pub async fn tailscale_down(&self) -> Result<TailscaleResult> {
         let op = TailscaleOp::Down;
         let payload = Self::encode(&op)?;
-        let resp = self.typed_request(MsgType::TailscaleOp, payload, "TailscaleOp").await?;
+        let resp = self
+            .typed_request(MsgType::TailscaleOp, payload, "TailscaleOp")
+            .await?;
         Self::decode(&resp)
     }
 
@@ -187,7 +209,9 @@ impl ExecutorClient {
     pub async fn tailscale_reconnect(&self) -> Result<TailscaleResult> {
         let op = TailscaleOp::Reconnect;
         let payload = Self::encode(&op)?;
-        let resp = self.typed_request(MsgType::TailscaleOp, payload, "TailscaleOp").await?;
+        let resp = self
+            .typed_request(MsgType::TailscaleOp, payload, "TailscaleOp")
+            .await?;
         Self::decode(&resp)
     }
 
@@ -202,7 +226,9 @@ impl ExecutorClient {
             exit_node,
         };
         let payload = Self::encode(&op)?;
-        let resp = self.typed_request(MsgType::TailscaleOp, payload, "TailscaleOp").await?;
+        let resp = self
+            .typed_request(MsgType::TailscaleOp, payload, "TailscaleOp")
+            .await?;
         Self::decode(&resp)
     }
 

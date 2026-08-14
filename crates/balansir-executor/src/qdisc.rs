@@ -21,16 +21,19 @@
 //! our qdiscs without ever touching pre-existing ones.
 
 use async_trait::async_trait;
-use balansir_common::qos::{
-    AppliedQdisc, QdiscKind, QdiscStats, QosCapabilities, QosConfig,
-};
+use balansir_common::qos::{AppliedQdisc, QdiscKind, QdiscStats, QosCapabilities, QosConfig};
+#[cfg(target_os = "linux")]
 use futures::{StreamExt, TryStreamExt};
+#[cfg(target_os = "linux")]
 use netlink_packet_core::{
-    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST,
-    NLMSG_ERROR,
+    NetlinkMessage, NetlinkPayload, NLMSG_ERROR, NLM_F_ACK, NLM_F_CREATE, NLM_F_REPLACE,
+    NLM_F_REQUEST,
 };
+#[cfg(target_os = "linux")]
 use netlink_packet_route::tc::{TcAttribute, TcHandle, TcMessage, TcOption, TcStats2};
+#[cfg(target_os = "linux")]
 use netlink_packet_route::RouteNetlinkMessage;
+#[cfg(target_os = "linux")]
 use netlink_packet_utils::nla::{DefaultNla, Nla};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -54,18 +57,20 @@ pub trait QosBackend: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Real netlink backend
+// Real netlink backend (Linux only)
 // ---------------------------------------------------------------------------
-
+#[cfg(target_os = "linux")]
 /// A netlink connection handle plus the interface-index resolver.
+#[cfg(target_os = "linux")]
 pub struct TcNetlinkBackend {
     handle: tokio::sync::Mutex<rtnetlink::Handle>,
 }
 
+#[cfg(target_os = "linux")]
 impl TcNetlinkBackend {
     pub async fn new() -> Result<Self, String> {
-        let (connection, handle, _events) = rtnetlink::new_connection()
-            .map_err(|e| format!("netlink connection failed: {e}"))?;
+        let (connection, handle, _events) =
+            rtnetlink::new_connection().map_err(|e| format!("netlink connection failed: {e}"))?;
         tokio::spawn(connection);
         Ok(Self {
             handle: tokio::sync::Mutex::new(handle),
@@ -144,6 +149,7 @@ impl TcNetlinkBackend {
 }
 
 #[async_trait]
+#[cfg(target_os = "linux")]
 impl QosBackend for TcNetlinkBackend {
     async fn apply(&self, config: &QosConfig) -> Result<(), String> {
         let index = self.ifindex(&config.interface).await?;
@@ -171,9 +177,7 @@ impl QosBackend for TcNetlinkBackend {
                 if let Some(target_ms) = config.latency_target_ms {
                     let target_us = (target_ms * 1000).min(u64::from(u32::MAX));
                     opts.push(TcOption::FqCodel(
-                        netlink_packet_route::tc::TcQdiscFqCodelOption::Target(
-                            target_us as u32,
-                        ),
+                        netlink_packet_route::tc::TcQdiscFqCodelOption::Target(target_us as u32),
                     ));
                 }
                 if let Some(memory) = config.memory_limit_bytes {
@@ -198,7 +202,8 @@ impl QosBackend for TcNetlinkBackend {
             (balansir_common::qos::QosDirection::Egress, QdiscKind::Cake) => {
                 msg.header.parent = TcHandle::ROOT;
                 msg.attributes.push(TcAttribute::Kind("cake".into()));
-                msg.attributes.push(TcAttribute::Options(cake_options(config)));
+                msg.attributes
+                    .push(TcAttribute::Options(cake_options(config)));
                 self.send_tc(msg, NLM_F_CREATE | NLM_F_REPLACE).await?;
                 Ok(())
             }
@@ -233,14 +238,10 @@ impl QosBackend for TcNetlinkBackend {
             let mut links = handle.link().get().execute();
             let mut names = Vec::new();
             while let Some(link) = links.try_next().await.map_err(|e| e.to_string())? {
-                let Some(name) = link
-                    .attributes
-                    .iter()
-                    .find_map(|a| match a {
-                        netlink_packet_route::link::LinkAttribute::IfName(n) => Some(n.clone()),
-                        _ => None,
-                    })
-                else {
+                let Some(name) = link.attributes.iter().find_map(|a| match a {
+                    netlink_packet_route::link::LinkAttribute::IfName(n) => Some(n.clone()),
+                    _ => None,
+                }) else {
                     continue;
                 };
                 names.push(name);
@@ -258,21 +259,24 @@ impl QosBackend for TcNetlinkBackend {
                 continue;
             };
             for msg in messages {
-                let kind = msg
-                    .attributes
-                    .iter()
-                    .find_map(|a| match a {
-                        TcAttribute::Kind(k) => Some(k.clone()),
-                        _ => None,
-                    });
+                let kind = msg.attributes.iter().find_map(|a| match a {
+                    TcAttribute::Kind(k) => Some(k.clone()),
+                    _ => None,
+                });
                 let our_identity = msg.header.handle.major == BALANSIR_QDISC_HANDLE_MAJOR
                     || msg.header.parent == TcHandle::INGRESS;
                 let stats = qdisc_stats_of(&msg.attributes);
                 out.push(AppliedQdisc {
                     interface: interface.clone(),
                     index,
-                    handle: format!("{:x}:{:x}", msg.header.handle.major, msg.header.handle.minor),
-                    parent: format!("{:x}:{:x}", msg.header.parent.major, msg.header.parent.minor),
+                    handle: format!(
+                        "{:x}:{:x}",
+                        msg.header.handle.major, msg.header.handle.minor
+                    ),
+                    parent: format!(
+                        "{:x}:{:x}",
+                        msg.header.parent.major, msg.header.parent.minor
+                    ),
                     kind,
                     our_identity,
                     stats,
@@ -298,6 +302,7 @@ impl QosBackend for TcNetlinkBackend {
 /// order — identical to what `tc` sends. CAKE has no netlink knob to disable
 /// ECN in this ABI (it is always enabled), so `ecn: false` is intentionally
 /// not turned into a fake flag; fq_codel still honours the `ecn` config.
+#[cfg(target_os = "linux")]
 fn cake_options(config: &QosConfig) -> Vec<TcOption> {
     let mut opts = Vec::new();
     if let Some(bps) = config.bandwidth_bps {
@@ -323,10 +328,15 @@ fn cake_options(config: &QosConfig) -> Vec<TcOption> {
         )));
     }
     if config.wash {
-        opts.push(TcOption::Other(DefaultNla::new(13, 1u32.to_ne_bytes().to_vec())));
+        opts.push(TcOption::Other(DefaultNla::new(
+            13,
+            1u32.to_ne_bytes().to_vec(),
+        )));
     }
     if let Some(memory) = config.memory_limit_bytes {
-        let bytes = (memory.min(u64::from(u32::MAX)) as u32).to_ne_bytes().to_vec();
+        let bytes = (memory.min(u64::from(u32::MAX)) as u32)
+            .to_ne_bytes()
+            .to_vec();
         opts.push(TcOption::Other(DefaultNla::new(10, bytes)));
     }
     opts
@@ -345,6 +355,7 @@ fn cake_options(config: &QosConfig) -> Vec<TcOption> {
 /// Both shapes are handled by first trying a nested-attribute walk (which
 /// bails out immediately on the lone-value shape because its leading two
 /// bytes never form a valid length), then reading the leading 8 bytes.
+#[cfg(target_os = "linux")]
 fn cake_bandwidth_of(attributes: &[TcAttribute]) -> Option<u64> {
     for attr in attributes {
         if let TcAttribute::Options(options) = attr {
@@ -375,6 +386,7 @@ fn cake_bandwidth_of(attributes: &[TcAttribute]) -> Option<u64> {
 }
 
 /// Result of scanning a raw payload for a CAKE base rate.
+#[cfg(target_os = "linux")]
 enum BlobScan {
     /// TCA_CAKE_BASE_RATE found (bits/sec).
     Rate(u64),
@@ -386,6 +398,7 @@ enum BlobScan {
 
 /// Scan a raw nested-attribute chain for TCA_CAKE_BASE_RATE (kind 2,
 /// u64 bytes/sec) and convert it to bits/sec.
+#[cfg(target_os = "linux")]
 fn scan_cake_base_rate(raw: &[u8]) -> BlobScan {
     let mut off = 0usize;
     while off + 4 <= raw.len() {
@@ -418,6 +431,7 @@ fn scan_cake_base_rate(raw: &[u8]) -> BlobScan {
 /// Decode a little-endian u64 rate and normalize bytes/sec → bits/sec.
 /// Zero means "unlimited" in the kernel; report None so drift detection does
 /// not treat it as a 0 bps cap.
+#[cfg(target_os = "linux")]
 fn rate_from_le(bytes: &[u8]) -> Option<u64> {
     let mut wide = [0u8; 8];
     wide[..bytes.len().min(8)].copy_from_slice(&bytes[..bytes.len().min(8)]);
@@ -426,6 +440,7 @@ fn rate_from_le(bytes: &[u8]) -> Option<u64> {
 }
 
 /// Extract a unified [`QdiscStats`] from a parsed qdisc message.
+#[cfg(target_os = "linux")]
 fn qdisc_stats_of(attributes: &[TcAttribute]) -> Option<QdiscStats> {
     let mut stats = QdiscStats::default();
     let mut found = false;
@@ -460,6 +475,7 @@ fn qdisc_stats_of(attributes: &[TcAttribute]) -> Option<QdiscStats> {
 /// schedulers) is handled by treating "no module listed" as *unknown* and
 /// defaulting to the conservative false — the daemon then picks fq_codel,
 /// which is virtually always built in, and reports honestly.
+#[cfg(target_os = "linux")]
 pub fn probe_qos_capabilities() -> QosCapabilities {
     let modules = std::fs::read_to_string("/proc/modules").unwrap_or_default();
     let module_present = |name: &str| modules.lines().any(|l| l.starts_with(name));
@@ -478,9 +494,9 @@ pub fn probe_qos_capabilities() -> QosCapabilities {
     // IFB devices make real ingress shaping possible.
     let ifb_present = std::fs::read_dir("/sys/class/net")
         .map(|entries| {
-            entries.filter_map(|e| e.ok()).any(|e| {
-                e.file_name().to_string_lossy().starts_with("ifb")
-            })
+            entries
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().starts_with("ifb"))
         })
         .unwrap_or(false);
 
@@ -502,6 +518,7 @@ pub fn probe_qos_capabilities() -> QosCapabilities {
 /// /proc/modules shows no modules at all (e.g. a container without module
 /// info), assume the built-in scheduler exists rather than report no shaping
 /// at all. This is the one deliberate, documented optimism.
+#[cfg(target_os = "linux")]
 fn fq_codel_builtin_hint() -> bool {
     std::fs::read_to_string("/proc/modules")
         .map(|m| m.trim().is_empty())
@@ -549,7 +566,7 @@ impl QosBackend for RecordOnlyBackend {
                 kind: Some(kind.as_str().to_string()),
                 our_identity: true,
                 stats: None,
-                    bandwidth_bps: None,
+                bandwidth_bps: None,
             })
             .collect())
     }
@@ -615,11 +632,7 @@ impl QosBackend for InMemoryBackend {
                 config.kind.as_str()
             ));
         }
-        let key = format!(
-            "{}:{:x}:0",
-            config.interface,
-            BALANSIR_QDISC_HANDLE_MAJOR
-        );
+        let key = format!("{}:{:x}:0", config.interface, BALANSIR_QDISC_HANDLE_MAJOR);
         self.qdiscs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -683,10 +696,10 @@ impl QosBackend for InMemoryBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use balansir_common::qos::{QosDirection, QosConfig};
+    use balansir_common::qos::{QosConfig, QosDirection};
     use netlink_packet_utils::nla::Nla;
 
     #[test]
@@ -810,7 +823,10 @@ mod tests {
         let target = get(8).expect("TARGET attr");
         assert_eq!(u32::from_le_bytes(target[..4].try_into().unwrap()), 50_000);
         let memory = get(10).expect("MEMORY attr");
-        assert_eq!(u32::from_le_bytes(memory[..4].try_into().unwrap()), 256 * 1024);
+        assert_eq!(
+            u32::from_le_bytes(memory[..4].try_into().unwrap()),
+            256 * 1024
+        );
         let wash = get(13).expect("WASH attr");
         assert_eq!(u32::from_le_bytes(wash[..4].try_into().unwrap()), 1);
     }

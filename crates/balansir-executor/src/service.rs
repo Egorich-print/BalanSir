@@ -355,7 +355,10 @@ pub async fn serve_connection(
 }
 
 /// Encode a postcard payload into a `ResponseData`, or a clean error.
-fn data_response(correlation_id: balansir_common::types::CorrelationId, value: &impl serde::Serialize) -> IpcMessage {
+fn data_response(
+    correlation_id: balansir_common::types::CorrelationId,
+    value: &impl serde::Serialize,
+) -> IpcMessage {
     match postcard::to_allocvec(value) {
         Ok(payload) => IpcMessage::response_data(correlation_id, payload),
         Err(_) => IpcMessage::response_error(correlation_id, "failed to encode result"),
@@ -502,18 +505,20 @@ pub async fn dispatch(msg: &IpcMessage, services: &ExecutorServices) -> IpcMessa
                 Err(e) => IpcMessage::response_error(msg.correlation_id, &e),
             }
         }
-        MsgType::GetQosCapabilities => {
-            match services.qos.capabilities().await {
-                Ok(caps) => data_response(msg.correlation_id, &caps),
-                Err(e) => IpcMessage::response_error(msg.correlation_id, &e),
-            }
-        }
+        MsgType::GetQosCapabilities => match services.qos.capabilities().await {
+            Ok(caps) => data_response(msg.correlation_id, &caps),
+            Err(e) => IpcMessage::response_error(msg.correlation_id, &e),
+        },
         // Interface driver: link info + WAN MAC cloning (hardware MAC
         // preserved; validated before any netlink change).
         MsgType::InterfaceOp => {
-            let Ok(op) = postcard::from_bytes::<balansir_common::network::InterfaceOp>(&msg.payload)
+            let Ok(op) =
+                postcard::from_bytes::<balansir_common::network::InterfaceOp>(&msg.payload)
             else {
-                return IpcMessage::response_error(msg.correlation_id, "invalid InterfaceOp payload");
+                return IpcMessage::response_error(
+                    msg.correlation_id,
+                    "invalid InterfaceOp payload",
+                );
             };
             match op {
                 balansir_common::network::InterfaceOp::Get { interface } => {
@@ -539,17 +544,22 @@ pub async fn dispatch(msg: &IpcMessage, services: &ExecutorServices) -> IpcMessa
         // Tailscale driver: status + controlled ops. Every argument is
         // validated before any binary spawn (see tailscale.rs).
         MsgType::TailscaleOp => {
-            let Ok(op) = postcard::from_bytes::<balansir_common::network::TailscaleOp>(&msg.payload)
+            let Ok(op) =
+                postcard::from_bytes::<balansir_common::network::TailscaleOp>(&msg.payload)
             else {
-                return IpcMessage::response_error(msg.correlation_id, "invalid TailscaleOp payload");
+                return IpcMessage::response_error(
+                    msg.correlation_id,
+                    "invalid TailscaleOp payload",
+                );
             };
             match op {
                 balansir_common::network::TailscaleOp::Status => {
                     data_response(msg.correlation_id, &services.tailscale.status().await)
                 }
-                balansir_common::network::TailscaleOp::Up { auth_key } => {
-                    data_response(msg.correlation_id, &services.tailscale.up(auth_key.as_deref()).await)
-                }
+                balansir_common::network::TailscaleOp::Up { auth_key } => data_response(
+                    msg.correlation_id,
+                    &services.tailscale.up(auth_key.as_deref()).await,
+                ),
                 balansir_common::network::TailscaleOp::Down => {
                     data_response(msg.correlation_id, &services.tailscale.down().await)
                 }
@@ -572,7 +582,7 @@ pub async fn dispatch(msg: &IpcMessage, services: &ExecutorServices) -> IpcMessa
 mod tests {
     use super::*;
     use balansir_common::ipc::IpcMessage;
-    use balansir_common::qos::{QosCapabilities, QosConfig, QosDirection, QdiscKind};
+    use balansir_common::qos::{QdiscKind, QosCapabilities, QosConfig, QosDirection};
 
     /// A fully-wired service bundle for tests: DummyExecutor for rules,
     /// InMemoryBackend for QoS, SysfsInterfaceBackend for interfaces and
@@ -669,16 +679,11 @@ mod tests {
         let payload = postcard::to_allocvec(&balansir_common::qos::QosOp::Apply(cfg)).unwrap();
         let resp = dispatch(&message(MsgType::QosOp, payload), &services).await;
         assert_eq!(resp.msg_type, MsgType::ResponseData);
-        let result: balansir_common::qos::QosResult =
-            postcard::from_bytes(&resp.payload).unwrap();
+        let result: balansir_common::qos::QosResult = postcard::from_bytes(&resp.payload).unwrap();
         assert!(result.ok);
 
         // State reports the applied qdisc.
-        let state = dispatch(
-            &message(MsgType::GetQosState, b"eth0".to_vec()),
-            &services,
-        )
-        .await;
+        let state = dispatch(&message(MsgType::GetQosState, b"eth0".to_vec()), &services).await;
         let qdiscs: Vec<balansir_common::qos::AppliedQdisc> =
             postcard::from_bytes(&state.payload).unwrap();
         assert_eq!(qdiscs.len(), 1);
@@ -690,15 +695,18 @@ mod tests {
         })
         .unwrap();
         let resp = dispatch(&message(MsgType::QosOp, payload), &services).await;
-        let result: balansir_common::qos::QosResult =
-            postcard::from_bytes(&resp.payload).unwrap();
+        let result: balansir_common::qos::QosResult = postcard::from_bytes(&resp.payload).unwrap();
         assert!(result.ok);
     }
 
     /// QoS capabilities are reported through the boundary.
     #[tokio::test]
     async fn qos_capabilities_dispatch() {
-        let resp = dispatch(&message(MsgType::GetQosCapabilities, vec![]), &dummy_services()).await;
+        let resp = dispatch(
+            &message(MsgType::GetQosCapabilities, vec![]),
+            &dummy_services(),
+        )
+        .await;
         assert_eq!(resp.msg_type, MsgType::ResponseData);
         let caps: QosCapabilities = postcard::from_bytes(&resp.payload).unwrap();
         assert!(caps.cake);
@@ -708,8 +716,8 @@ mod tests {
     #[tokio::test]
     async fn tailscale_ops_dispatch() {
         let services = dummy_services();
-        let status_payload = postcard::to_allocvec(&balansir_common::network::TailscaleOp::Status)
-            .unwrap();
+        let status_payload =
+            postcard::to_allocvec(&balansir_common::network::TailscaleOp::Status).unwrap();
         let status = dispatch(&message(MsgType::TailscaleOp, status_payload), &services).await;
         assert_eq!(status.msg_type, MsgType::ResponseData);
         // Status payload must be a TailscaleStatus.

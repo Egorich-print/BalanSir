@@ -250,7 +250,6 @@ dependencies = [
  "balansir-api",
  "balansir-common",
  "balansir-control",
- "chrono",
  "futures",
  "libc",
  "netlink-packet-route",

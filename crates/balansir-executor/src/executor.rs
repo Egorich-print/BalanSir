@@ -85,21 +85,6 @@ pub trait Executor: Send + Sync {
     async fn path_mtu_state(&self) -> Vec<PathMtu> {
         Vec::new()
     }
-
-    /// Apply a QoS shaping plan (HTB classes per interface).
-    async fn apply_qos(&self, _plan: &balansir_common::QosPlan) -> Result<()> {
-        Ok(())
-    }
-
-    /// Clear shaping on an interface.
-    async fn clear_qos(&self, _interface: &str) -> Result<()> {
-        Ok(())
-    }
-
-    /// Report interfaces currently carrying shaping (non-authority).
-    async fn qos_state(&self, _interfaces: &[String]) -> balansir_common::QosState {
-        balansir_common::QosState::default()
-    }
 }
 
 /// Dummy executor for testing

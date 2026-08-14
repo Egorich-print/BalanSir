@@ -360,7 +360,6 @@ mod tests {
                 },
             ],
             drivers: vec![],
-            qos: vec![],
         }
     }
 

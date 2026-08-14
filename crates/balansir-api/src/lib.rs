@@ -5,9 +5,7 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use balansir_common::subsystems::{
-    SharedSubsystemSnapshot, SubsystemControl, SubsystemEvent,
-};
+use balansir_common::subsystems::{SharedSubsystemSnapshot, SubsystemControl, SubsystemEvent};
 use serde::Serialize;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -153,10 +151,7 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/qos", post(subsystems::set_qos))
         .route("/qos/:interface", delete(subsystems::remove_qos))
         .route("/interfaces", get(subsystems::get_interfaces))
-        .route(
-            "/interfaces/:interface/mac",
-            post(subsystems::set_mac),
-        )
+        .route("/interfaces/:interface/mac", post(subsystems::set_mac))
         .route(
             "/interfaces/:interface/mac/restore",
             post(subsystems::restore_mac),
@@ -168,10 +163,7 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
             "/tailscale/reconnect",
             post(subsystems::tailscale_reconnect),
         )
-        .route(
-            "/tailscale/routes",
-            post(subsystems::tailscale_set_routes),
-        )
+        .route("/tailscale/routes", post(subsystems::tailscale_set_routes))
         .with_state(state.clone())
         // Token auth is opt-in: only enforced when BALANSIR_API_TOKEN is set,
         // so it does not break health probes or local unauthenticated installs.
@@ -224,8 +216,7 @@ mod tests {
                 Ok(resp) => return resp,
                 Err(e) => {
                     last = Some(e);
-                    tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt + 1)))
-                        .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt + 1))).await;
                 }
             }
         }

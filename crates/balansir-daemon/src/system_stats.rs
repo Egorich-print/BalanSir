@@ -88,7 +88,9 @@ pub fn uptime_secs() -> Option<u64> {
 
 /// A full system stats sample; `None` when `/proc` is not available (non-Linux
 /// or restricted sandbox).
-pub fn system_stats(prev_cpu: Option<&CpuSample>) -> Option<(balansir_common::subsystems::SystemStats, CpuSample)> {
+pub fn system_stats(
+    prev_cpu: Option<&CpuSample>,
+) -> Option<(balansir_common::subsystems::SystemStats, CpuSample)> {
     let cur = read_cpu_sample()?;
     let (mem_used, mem_total) = mem_used_mb()?;
     let (l1, l5, l15) = load_averages()?;
@@ -125,7 +127,7 @@ pub fn rate_bps(prev: u64, cur: u64, elapsed: Duration) -> u64 {
     }
     let delta = cur.saturating_sub(prev);
     // bytes per second * 8 → bits/sec
-    ((delta as u128) * 8000 / elapsed_ms as u128) as u64
+    ((delta as u128) * 8000 / elapsed_ms) as u64
 }
 
 #[cfg(test)]
@@ -134,8 +136,14 @@ mod tests {
 
     #[test]
     fn cpu_percent_is_reasonable() {
-        let prev = CpuSample { idle: 1000, total: 2000 };
-        let cur = CpuSample { idle: 1100, total: 2200 };
+        let prev = CpuSample {
+            idle: 1000,
+            total: 2000,
+        };
+        let cur = CpuSample {
+            idle: 1100,
+            total: 2200,
+        };
         // used = 100, total delta = 200 → 50%
         let pct = cpu_percent(&prev, &cur);
         assert!((pct - 50.0).abs() < 0.01);
@@ -146,7 +154,10 @@ mod tests {
 
     #[test]
     fn cpu_percent_handles_wrap() {
-        let prev = CpuSample { idle: u64::MAX - 10, total: u64::MAX };
+        let prev = CpuSample {
+            idle: u64::MAX - 10,
+            total: u64::MAX,
+        };
         let cur = CpuSample { idle: 5, total: 20 };
         // saturating deltas keep the result finite.
         let pct = cpu_percent(&prev, &cur);
