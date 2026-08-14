@@ -1,0 +1,581 @@
+//! Xray component manager: owns the endpoint profiles, the active Xray
+//! process, failover/rotation/recovery, and publishes Xray state into the
+//! unified subsystem snapshot + event bus.
+//!
+//! The manager is the *transport orchestration* layer. It generates a real
+//! Xray config per endpoint (honoring transport/TLS/flow), starts/stops the
+//! xray binary, probes the local SOCKS inbound for liveness, and — when the
+//! active endpoint degrades past a threshold — fails over to the next enabled
+//! endpoint. Selection is explainable: every switch records a reason.
+//!
+//! Security model:
+//! - endpoints are validated (`XrayConfig::validate`) before any process start;
+//! - configs (containing the UUID secret) are written by the driver into
+//!   `/run/balansir/` with mode 0600 and wiped on stop;
+//! - `pinned` (manual override) never grants anything beyond endpoint
+//!   selection — failover stays enabled so an operator mistake cannot pin the
+//!   network to a dead endpoint forever.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use secrecy::SecretString;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, Notify, RwLock};
+use tracing::{info, warn};
+
+use balansir_common::subsystems::{
+    SharedSubsystemSnapshot, SubsystemEvent, XrayProfileView, XraySnapshot,
+};
+
+use crate::driver::ComponentDriver;
+use crate::xray::{XrayConfig, XrayDriver, XrayTls, XrayTransport};
+
+const fn default_priority() -> i32 {
+    100
+}
+const fn default_true() -> bool {
+    true
+}
+
+/// One Xray endpoint from the profile file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XrayEndpoint {
+    pub name: String,
+    pub server: String,
+    pub port: u16,
+    #[serde(skip_serializing)]
+    pub uuid: SecretString,
+    pub flow: Option<String>,
+    #[serde(default)]
+    pub transport: XrayTransport,
+    pub tls: Option<XrayTls>,
+    pub socks_port: Option<u16>,
+    pub http_port: Option<u16>,
+    #[serde(default = "default_priority")]
+    pub priority: i32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl XrayEndpoint {
+    fn into_config(&self, fallback_socks: u16, fallback_http: u16) -> XrayConfig {
+        XrayConfig {
+            server: self.server.clone(),
+            port: self.port,
+            uuid: self.uuid.clone(),
+            flow: self.flow.clone(),
+            transport: self.transport.clone(),
+            tls: self.tls.clone(),
+            name: Some(self.name.clone()),
+            socks_port: self.socks_port.unwrap_or(fallback_socks),
+            http_port: self.http_port.unwrap_or(fallback_http),
+        }
+    }
+}
+
+/// TOML shape of the Xray component configuration (`BALANSIR_XRAY_CONFIG`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct XrayToml {
+    pub socks_port: Option<u16>,
+    pub http_port: Option<u16>,
+    /// Consecutive failed health probes before failover (default 3).
+    pub failover_threshold: Option<u32>,
+    #[serde(default)]
+    pub profiles: Vec<XrayEndpoint>,
+}
+
+impl XrayToml {
+    pub fn from_file(path: &str) -> Result<Self, String> {
+        let raw =
+            std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+        toml::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let mut names = std::collections::HashSet::new();
+        for profile in &self.profiles {
+            if profile.name.trim().is_empty() {
+                return Err("xray profile name must not be empty".into());
+            }
+            if !names.insert(profile.name.clone()) {
+                return Err(format!("duplicate xray profile name '{}'", profile.name));
+            }
+            profile
+                .into_config(
+                    self.socks_port.unwrap_or(10808),
+                    self.http_port.unwrap_or(10809),
+                )
+                .validate()
+                .map_err(|e| format!("profile '{}': {e}", profile.name))?;
+        }
+        Ok(())
+    }
+}
+
+/// Control handle used by the API seam. It only sets intent flags; the loop
+/// owns the stateful driver.
+#[derive(Clone)]
+pub struct XrayManagerHandle {
+    paused: Arc<AtomicBool>,
+    pinned: Arc<RwLock<Option<String>>>,
+    wake: Arc<Notify>,
+}
+
+impl XrayManagerHandle {
+    pub async fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+        self.wake.notify_one();
+    }
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+    pub async fn select(&self, profile: &str) {
+        *self.pinned.write().await = Some(profile.to_string());
+        self.wake.notify_one();
+    }
+    /// Rotate to the next enabled endpoint: pin it and wake the loop.
+    pub async fn rotate_next(&self, enabled_names: Vec<String>) {
+        let current = self.pinned.read().await.clone();
+        let next = next_enabled(&current, &enabled_names);
+        if let Some(next) = next {
+            *self.pinned.write().await = Some(next);
+            self.wake.notify_one();
+        }
+    }
+}
+
+/// Next enabled profile after `current` (wraps; used for manual rotation).
+fn next_enabled(current: &Option<String>, enabled: &[String]) -> Option<String> {
+    if enabled.is_empty() {
+        return None;
+    }
+    let idx = current
+        .as_ref()
+        .and_then(|c| enabled.iter().position(|e| e == c));
+    let next_idx = match idx {
+        Some(i) => (i + 1) % enabled.len(),
+        None => 0,
+    };
+    Some(enabled[next_idx].clone())
+}
+
+/// Xray component manager.
+pub struct XrayManager {
+    snapshot: SharedSubsystemSnapshot,
+    events: broadcast::Sender<SubsystemEvent>,
+    endpoints: Vec<XrayEndpoint>,
+    socks_port: u16,
+    http_port: u16,
+    failover_threshold: u32,
+    paused: Arc<AtomicBool>,
+    pinned: Arc<RwLock<Option<String>>>,
+    wake: Arc<Notify>,
+    active: RwLock<Option<usize>>,
+    failure_counts: RwLock<Vec<u32>>,
+    health: RwLock<Vec<String>>,
+    last_error: RwLock<Option<String>>,
+    switch_reason: RwLock<Option<String>>,
+    last_switch_ms: RwLock<i64>,
+    driver: RwLock<Option<XrayDriver>>,
+}
+
+impl XrayManager {
+    /// Build the manager from a validated Xray TOML file. All endpoints are
+    /// validated eagerly; a rejected file disables the component (never a
+    /// half-started runtime).
+    pub fn from_toml(
+        xray_cfg: &XrayToml,
+        snapshot: SharedSubsystemSnapshot,
+        events: broadcast::Sender<SubsystemEvent>,
+    ) -> Result<Self, String> {
+        xray_cfg.validate()?;
+        let n = xray_cfg.profiles.len();
+        Ok(Self {
+            snapshot,
+            events,
+            endpoints: xray_cfg.profiles.clone(),
+            socks_port: xray_cfg.socks_port.unwrap_or(10808),
+            http_port: xray_cfg.http_port.unwrap_or(10809),
+            failover_threshold: xray_cfg.failover_threshold.unwrap_or(3).max(1),
+            paused: Arc::new(AtomicBool::new(false)),
+            pinned: Arc::new(RwLock::new(None)),
+            wake: Arc::new(Notify::new()),
+            active: RwLock::new(None),
+            failure_counts: RwLock::new(vec![0; n]),
+            health: RwLock::new(vec!["Unknown".to_string(); n]),
+            last_error: RwLock::new(None),
+            switch_reason: RwLock::new(None),
+            last_switch_ms: RwLock::new(0),
+            driver: RwLock::new(None),
+        })
+    }
+
+    pub fn handle(&self) -> XrayManagerHandle {
+        XrayManagerHandle {
+            paused: Arc::clone(&self.paused),
+            pinned: Arc::clone(&self.pinned),
+            wake: Arc::clone(&self.wake),
+        }
+    }
+
+    fn endpoint_config(&self, idx: usize) -> XrayConfig {
+        self.endpoints[idx].into_config(self.socks_port, self.http_port)
+    }
+
+    fn enabled_indices(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.endpoints.len())
+            .filter(|&i| self.endpoints[i].enabled)
+            .collect();
+        order.sort_by_key(|&i| (self.endpoints[i].priority, i));
+        order
+    }
+
+    fn preferred(&self) -> Option<usize> {
+        self.enabled_indices().first().copied()
+    }
+
+    async fn start_endpoint(&self, idx: usize) -> Result<(), String> {
+        let config = self.endpoint_config(idx);
+        let mut driver = XrayDriver::new(balansir_common::DriverId::Xray, config);
+        driver.start().await.map_err(|e| e.to_string())?;
+        *self.driver.write().await = Some(driver);
+        *self.active.write().await = Some(idx);
+        let name = self.endpoints[idx].name.clone();
+        let _ = self.events.send(SubsystemEvent::XrayStarted {
+            profile: name.clone(),
+        });
+        info!("Xray: endpoint '{name}' started");
+        Ok(())
+    }
+
+    async fn stop_driver(&self) {
+        let mut guard = self.driver.write().await;
+        if let Some(mut driver) = guard.take() {
+            let _ = driver.stop().await;
+            *self.active.write().await = None;
+        }
+    }
+
+    async fn active_name(&self) -> Option<String> {
+        let active = *self.active.read().await;
+        active.map(|i| self.endpoints[i].name.clone())
+    }
+
+    fn index_of(&self, name: &str) -> Option<usize> {
+        self.endpoints.iter().position(|e| e.name == name)
+    }
+
+    /// Ensure an endpoint is running. When the operator pinned a profile the
+    /// loop converges to it (manual override / rotation); otherwise the
+    /// preferred (priority-ordered) endpoint starts.
+    async fn ensure_running(&self) -> Result<(), String> {
+        let pinned_name = self.pinned.read().await.clone();
+        let active = *self.active.read().await;
+
+        if active.is_some() && self.driver.read().await.is_some() {
+            if let Some(pinned) = &pinned_name {
+                if active != self.index_of(pinned) {
+                    return self.switch_to(pinned, "manual override".into()).await;
+                }
+            }
+            return Ok(());
+        }
+        if let Some(pinned) = &pinned_name {
+            if let Some(idx) = self.index_of(pinned) {
+                return self.start_endpoint(idx).await;
+            }
+        }
+        match self.preferred() {
+            Some(idx) => self.start_endpoint(idx).await,
+            None => Err("no enabled Xray endpoints configured".into()),
+        }
+    }
+
+    async fn switch_to(&self, name: &str, reason: String) -> Result<(), String> {
+        let idx = self
+            .index_of(name)
+            .ok_or_else(|| format!("unknown xray profile '{name}'"))?;
+        let prev_name = self.active_name().await;
+        self.stop_driver().await;
+        self.start_endpoint(idx).await?;
+        self.failure_counts.write().await[idx] = 0;
+        self.health.write().await[idx] = "Healthy".to_string();
+        *self.switch_reason.write().await = Some(reason.clone());
+        *self.last_switch_ms.write().await = now_ms();
+        let to = self.endpoints[idx].name.clone();
+        info!("Xray: switched {prev_name:?} -> {to} ({reason})");
+        let _ = self.events.send(SubsystemEvent::XraySwitched {
+            from: prev_name,
+            to: to.clone(),
+            reason,
+        });
+        Ok(())
+    }
+
+    async fn switch_to_index(&self, idx: usize, reason: String) -> Result<(), String> {
+        let prev_name = self.active_name().await;
+        self.stop_driver().await;
+        self.start_endpoint(idx).await?;
+        self.failure_counts.write().await[idx] = 0;
+        self.health.write().await[idx] = "Healthy".to_string();
+        *self.switch_reason.write().await = Some(reason.clone());
+        *self.last_switch_ms.write().await = now_ms();
+        let to = self.endpoints[idx].name.clone();
+        info!("Xray: switched {prev_name:?} -> {to} ({reason})");
+        let _ = self.events.send(SubsystemEvent::XraySwitched {
+            from: prev_name,
+            to: to.clone(),
+            reason,
+        });
+        Ok(())
+    }
+
+    /// Health-check the running endpoint; failover when it degrades past the
+    /// threshold. Returns the name that ended up active.
+    async fn health_and_failover(&self) -> Option<String> {
+        let active = *self.active.read().await;
+        let idx = match active {
+            Some(i) => i,
+            None => return None,
+        };
+        let driver = self.driver.read().await;
+        let health = match &*driver {
+            Some(d) => format!("{:?}", d.health_check().await),
+            None => return None,
+        };
+        drop(driver);
+
+        let mut health_vec = self.health.write().await;
+        if health_vec[idx] != health {
+            let name = self.endpoints[idx].name.clone();
+            let _ = self.events.send(SubsystemEvent::XrayHealthChanged {
+                profile: name,
+                health: health.clone(),
+            });
+        }
+        health_vec[idx] = health.clone();
+        drop(health_vec);
+
+        let healthy = health == "Healthy";
+        let mut failures = self.failure_counts.write().await;
+        if healthy {
+            failures[idx] = 0;
+            return Some(self.endpoints[idx].name.clone());
+        }
+        failures[idx] += 1;
+        let threshold = self.failover_threshold;
+        if failures[idx] < threshold {
+            return Some(self.endpoints[idx].name.clone());
+        }
+        drop(failures);
+
+        // Endpoint is failing: fail over to the next enabled endpoint.
+        let enabled = self.enabled_indices();
+        let next = enabled
+            .iter()
+            .copied()
+            .find(|&i| i != idx)
+            .or_else(|| enabled.first().copied());
+        match next {
+            Some(next) if next != idx => {
+                let name = self.endpoints[idx].name.clone();
+                let reason = format!(
+                    "endpoint '{name}' failed {} consecutive health probes",
+                    self.failover_threshold
+                );
+                let to = self.endpoints[next].name.clone();
+                if self.switch_to_index(next, reason).await.is_err() {
+                    return Some(name);
+                }
+                Some(to)
+            }
+            _ => Some(self.endpoints[idx].name.clone()),
+        }
+    }
+
+    async fn observe_snapshot(&self) -> XraySnapshot {
+        let active = *self.active.read().await;
+        let health = self.health.read().await.clone();
+        let failures = self.failure_counts.read().await.clone();
+        let paused = self.paused.load(Ordering::Relaxed);
+        let pinned = self.pinned.read().await.clone();
+        let last_error = self.last_error.read().await.clone();
+        let switch_reason = self.switch_reason.read().await.clone();
+        let last_switch_ms = *self.last_switch_ms.read().await;
+
+        let profiles = self
+            .endpoints
+            .iter()
+            .enumerate()
+            .map(|(i, e)| XrayProfileView {
+                name: e.name.clone(),
+                server: e.server.clone(),
+                port: e.port,
+                transport: format!("{:?}", e.transport),
+                tls: e.tls.is_some(),
+                priority: e.priority,
+                enabled: e.enabled,
+                active: active == Some(i),
+                health: health.get(i).cloned().unwrap_or_else(|| "Unknown".into()),
+                failure_count: failures.get(i).copied().unwrap_or(0),
+            })
+            .collect();
+
+        let active_name = active.map(|i| self.endpoints[i].name.clone());
+        XraySnapshot {
+            profiles,
+            active: active_name,
+            paused,
+            pinned,
+            last_error,
+            socks_port: self.socks_port,
+            http_port: self.http_port,
+            switch_reason,
+            last_switch_ms,
+        }
+    }
+
+    /// Run the Xray component loop forever (daemon task).
+    pub async fn run_loop(self, interval_secs: u64) -> ! {
+        info!(
+            "Xray component running ({} endpoints, interval {}s)",
+            self.endpoints.len(),
+            interval_secs
+        );
+        loop {
+            tokio::select! {
+                _ = self.wake.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
+            }
+            let paused = self.paused.load(Ordering::Relaxed);
+
+            if paused {
+                if self.driver.read().await.is_some() {
+                    self.stop_driver().await;
+                    let _ = self.events.send(SubsystemEvent::XrayStopped);
+                }
+            } else {
+                match self.ensure_running().await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!("Xray: {e}");
+                        *self.last_error.write().await = Some(e.clone());
+                        let _ = self.events.send(SubsystemEvent::XrayError { detail: e });
+                    }
+                }
+                if self.driver.read().await.is_some() {
+                    self.health_and_failover().await;
+                }
+            }
+            let snapshot = self.observe_snapshot().await;
+            self.snapshot
+                .update(move |s| {
+                    s.xray = snapshot.clone();
+                })
+                .await;
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_toml() -> XrayToml {
+        toml::from_str(
+            r#"
+socks_port = 11080
+http_port = 11081
+failover_threshold = 2
+
+[[profiles]]
+name = "jp-1"
+server = "jp1.example.com"
+port = 443
+uuid = "11111111-2222-3333-4444-555555555555"
+flow = "xtls-rprx-vision"
+priority = 10
+
+[[profiles]]
+name = "us-2"
+server = "us2.example.com"
+port = 8443
+uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+transport = { WebSocket = { path = "/ws" } }
+tls = { server_name = "us2.example.com", allow_insecure = false }
+priority = 20
+"#,
+        )
+        .expect("valid toml")
+    }
+
+    #[test]
+    fn parses_profiles() {
+        let cfg = sample_toml();
+        assert_eq!(cfg.profiles.len(), 2);
+        assert_eq!(cfg.socks_port, Some(11080));
+        assert_eq!(cfg.failover_threshold, Some(2));
+    }
+
+    #[test]
+    fn rejects_duplicate_names() {
+        let mut cfg = sample_toml();
+        cfg.profiles[1].name = "jp-1".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_bad_endpoint() {
+        let mut cfg = sample_toml();
+        cfg.profiles[0].server = " ".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rotation_picks_next_enabled() {
+        let enabled = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(next_enabled(&None, &enabled).as_deref(), Some("a"));
+        assert_eq!(next_enabled(&Some("a".into()), &enabled).as_deref(), Some("b"));
+        assert_eq!(next_enabled(&Some("c".into()), &enabled).as_deref(), Some("a"));
+        assert_eq!(next_enabled(&Some("a".into()), &[]), None);
+    }
+
+    #[test]
+    fn preferred_orders_by_priority() {
+        let cfg = sample_toml();
+        let manager = XrayManager::from_toml(
+            &cfg,
+            SharedSubsystemSnapshot::new(),
+            broadcast::channel(16).0,
+        )
+        .expect("valid");
+        let preferred = manager.preferred().expect("has endpoints");
+        assert_eq!(manager.endpoints[preferred].name, "jp-1");
+    }
+
+    #[tokio::test]
+    async fn snapshot_reflects_active_profile() {
+        let cfg = sample_toml();
+        let manager = XrayManager::from_toml(
+            &cfg,
+            SharedSubsystemSnapshot::new(),
+            broadcast::channel(16).0,
+        )
+        .expect("valid");
+        let snap = manager.observe_snapshot().await;
+        assert_eq!(snap.profiles.len(), 2);
+        assert!(snap.active.is_none());
+        assert!(!snap.paused);
+        assert_eq!(snap.socks_port, 11080);
+        assert_eq!(snap.profiles[0].transport, "Tcp");
+        assert!(snap.profiles[1].tls);
+    }
+}

@@ -43,6 +43,7 @@ pub fn api_bind() -> String {
 pub async fn start_api_server(
     manager: Arc<SubsystemManager>,
     b4_control: Option<crate::b4_manager::B4ManagerHandle>,
+    #[cfg(feature = "xray")] xray_control: Option<crate::xray_manager::XrayManagerHandle>,
     bind: String,
 ) -> Result<(), String> {
     if bind.trim().is_empty() {
@@ -52,6 +53,10 @@ pub async fn start_api_server(
 
     if let Some(handle) = b4_control {
         manager.set_b4_handle(handle);
+    }
+    #[cfg(feature = "xray")]
+    if let Some(handle) = xray_control {
+        manager.set_xray_handle(handle);
     }
 
     let control: Arc<dyn balansir_common::subsystems::SubsystemControl> =

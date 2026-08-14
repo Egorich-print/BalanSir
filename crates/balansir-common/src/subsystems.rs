@@ -85,6 +85,47 @@ pub struct B4Snapshot {
     pub paused: bool,
 }
 
+/// One Xray endpoint view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XrayProfileView {
+    pub name: String,
+    pub server: String,
+    pub port: u16,
+    pub transport: String,
+    pub tls: bool,
+    /// Lower is preferred for automatic selection.
+    pub priority: i32,
+    pub enabled: bool,
+    /// Whether this endpoint is the one currently running.
+    pub active: bool,
+    /// Last observed health: Unknown / Healthy / Degraded / Unhealthy.
+    pub health: String,
+    /// Consecutive failed health probes (drives failover).
+    pub failure_count: u32,
+}
+
+/// Xray component view: endpoint profiles, the active transport endpoint,
+/// selection mode, and failover/rotation diagnostics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct XraySnapshot {
+    pub profiles: Vec<XrayProfileView>,
+    /// Name of the active endpoint, if one is running.
+    pub active: Option<String>,
+    /// Operator pause: the proxy process is stopped and traffic stays direct.
+    pub paused: bool,
+    /// Operator pinned an endpoint (manual override, still failover-aware).
+    pub pinned: Option<String>,
+    pub last_error: Option<String>,
+    /// Local SOCKS/HTTP inbound ports of the active endpoint.
+    pub socks_port: u16,
+    pub http_port: u16,
+    /// Why the last switch happened (actionable, e.g. "endpoint jp-2 failed 3
+    /// health probes", "manual rotation").
+    pub switch_reason: Option<String>,
+    /// Unix epoch millis of the last switch.
+    pub last_switch_ms: i64,
+}
+
 /// Subsystem state-change events, emitted by the daemon managers and bridged
 /// to SSE for the WebUI (one event vocabulary, not one per subsystem).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +178,22 @@ pub enum SubsystemEvent {
     B4Error {
         detail: String,
     },
+    XrayStarted {
+        profile: String,
+    },
+    XrayStopped,
+    XraySwitched {
+        from: Option<String>,
+        to: String,
+        reason: String,
+    },
+    XrayHealthChanged {
+        profile: String,
+        health: String,
+    },
+    XrayError {
+        detail: String,
+    },
 }
 
 impl SubsystemEvent {
@@ -158,6 +215,11 @@ impl SubsystemEvent {
             Self::B4Recovered { .. } => "b4_recovered",
             Self::B4Drift { .. } => "b4_drift",
             Self::B4Error { .. } => "b4_error",
+            Self::XrayStarted { .. } => "xray_started",
+            Self::XrayStopped => "xray_stopped",
+            Self::XraySwitched { .. } => "xray_switched",
+            Self::XrayHealthChanged { .. } => "xray_health_changed",
+            Self::XrayError { .. } => "xray_error",
         }
     }
 }
@@ -169,6 +231,7 @@ pub struct SubsystemSnapshot {
     pub interfaces: Vec<InterfaceInfo>,
     pub tailscale: TailscaleSnapshot,
     pub b4: B4Snapshot,
+    pub xray: XraySnapshot,
     /// Unix epoch millis of the last successful refresh.
     pub updated_at_ms: i64,
     /// True when the executor could not be reached for the last refresh.
@@ -238,4 +301,12 @@ pub trait SubsystemControl: Send + Sync {
     async fn b4_set_paused(&self, paused: bool) -> Result<(), String>;
     /// Whether the B4 engine is currently paused.
     async fn b4_is_paused(&self) -> bool;
+    /// Pause/resume the Xray transport (stop/start the proxy process).
+    async fn xray_set_paused(&self, paused: bool) -> Result<(), String>;
+    /// Whether the Xray transport is currently paused.
+    async fn xray_is_paused(&self) -> bool;
+    /// Pin a specific Xray endpoint (manual override; failover-aware).
+    async fn xray_select(&self, profile: &str) -> Result<(), String>;
+    /// Rotate to the next enabled endpoint (manual rotation).
+    async fn xray_rotate(&self) -> Result<(), String>;
 }

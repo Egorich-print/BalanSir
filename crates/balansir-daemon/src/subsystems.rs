@@ -100,6 +100,8 @@ pub struct SubsystemManager {
     events: broadcast::Sender<SubsystemEvent>,
     interface_filter: RwLock<String>,
     b4: RwLock<Option<crate::b4_manager::B4ManagerHandle>>,
+    #[cfg(feature = "xray")]
+    xray: RwLock<Option<crate::xray_manager::XrayManagerHandle>>,
 }
 
 /// Map an executor QoS result to an error when the executor reported failure
@@ -121,12 +123,20 @@ impl SubsystemManager {
             events,
             interface_filter: RwLock::new(String::new()),
             b4: RwLock::new(None),
+            #[cfg(feature = "xray")]
+            xray: RwLock::new(None),
         }
     }
 
     /// Attach the B4 controller handle (pause/resume for the API seam).
     pub fn set_b4_handle(&self, handle: crate::b4_manager::B4ManagerHandle) {
         *self.b4.blocking_write() = Some(handle);
+    }
+
+    /// Attach the Xray manager handle (pause/select/rotate for the API seam).
+    #[cfg(feature = "xray")]
+    pub fn set_xray_handle(&self, handle: crate::xray_manager::XrayManagerHandle) {
+        *self.xray.blocking_write() = Some(handle);
     }
 
     pub fn snapshot(&self) -> SharedSubsystemSnapshot {
@@ -509,6 +519,77 @@ impl balansir_common::subsystems::SubsystemControl for ControlImpl {
             Some(handle) => handle.is_paused(),
             None => false,
         }
+    }
+
+    #[cfg(feature = "xray")]
+    async fn xray_set_paused(&self, paused: bool) -> Result<(), String> {
+        let handle = self.manager.xray.read().await;
+        match handle.as_ref() {
+            Some(handle) => {
+                handle.set_paused(paused).await;
+                Ok(())
+            }
+            None => Err("Xray not configured (set BALANSIR_XRAY_CONFIG)".to_string()),
+        }
+    }
+
+    #[cfg(feature = "xray")]
+    async fn xray_is_paused(&self) -> bool {
+        match self.manager.xray.read().await.as_ref() {
+            Some(handle) => handle.is_paused(),
+            None => false,
+        }
+    }
+
+    #[cfg(feature = "xray")]
+    async fn xray_select(&self, profile: &str) -> Result<(), String> {
+        let handle = self.manager.xray.read().await;
+        match handle.as_ref() {
+            Some(handle) => {
+                handle.select(profile).await;
+                Ok(())
+            }
+            None => Err("Xray not configured (set BALANSIR_XRAY_CONFIG)".to_string()),
+        }
+    }
+
+    #[cfg(feature = "xray")]
+    async fn xray_rotate(&self) -> Result<(), String> {
+        let handle = self.manager.xray.read().await;
+        match handle.as_ref() {
+            Some(handle) => {
+                let names = {
+                    let snapshot = self.manager.snapshot().read().await;
+                    snapshot
+                        .xray
+                        .profiles
+                        .iter()
+                        .filter(|p| p.enabled)
+                        .map(|p| p.name.clone())
+                        .collect()
+                };
+                handle.rotate_next(names).await;
+                Ok(())
+            }
+            None => Err("Xray not configured (set BALANSIR_XRAY_CONFIG)".to_string()),
+        }
+    }
+
+    #[cfg(not(feature = "xray"))]
+    async fn xray_set_paused(&self, _paused: bool) -> Result<(), String> {
+        Err("Xray support not compiled into this daemon".to_string())
+    }
+    #[cfg(not(feature = "xray"))]
+    async fn xray_is_paused(&self) -> bool {
+        false
+    }
+    #[cfg(not(feature = "xray"))]
+    async fn xray_select(&self, _profile: &str) -> Result<(), String> {
+        Err("Xray support not compiled into this daemon".to_string())
+    }
+    #[cfg(not(feature = "xray"))]
+    async fn xray_rotate(&self) -> Result<(), String> {
+        Err("Xray support not compiled into this daemon".to_string())
     }
 }
 

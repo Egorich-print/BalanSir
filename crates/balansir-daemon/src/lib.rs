@@ -22,3 +22,5 @@ pub mod subsystems;
 pub mod wireguard;
 #[cfg(feature = "xray")]
 pub mod xray;
+#[cfg(feature = "xray")]
+pub mod xray_manager;

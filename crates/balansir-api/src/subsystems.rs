@@ -101,6 +101,68 @@ pub async fn set_b4_paused(
     }
 }
 
+/// `GET /xray` — Xray transport state (profiles, active endpoint, selection
+/// mode, failover/rotation diagnostics).
+pub async fn get_xray(State(state): State<Arc<ApiState>>) -> Response {
+    let snapshot = match snapshot_or_unavailable(&state).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    Json(snapshot.xray).into_response()
+}
+
+/// `POST /xray/pause` — pause/resume the Xray transport (stop/start the
+/// proxy process; traffic falls back to the direct path while paused).
+pub async fn set_xray_paused(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let paused = match body.get("paused").and_then(|v| v.as_bool()) {
+        Some(p) => p,
+        None => return error_response("body requires \"paused\": true|false"),
+    };
+    match control.xray_set_paused(paused).await {
+        Ok(()) => Json(serde_json::json!({ "paused": paused })).into_response(),
+        Err(detail) => error_response(&detail),
+    }
+}
+
+/// `POST /xray/select` — pin a specific endpoint (manual override; still
+/// failover-aware so a dead endpoint cannot pin the network indefinitely).
+pub async fn select_xray(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let profile = match body.get("profile").and_then(|v| v.as_str()) {
+        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => return error_response("body requires \"profile\": <endpoint name>"),
+    };
+    match control.xray_select(&profile).await {
+        Ok(()) => Json(serde_json::json!({ "pinned": profile })).into_response(),
+        Err(detail) => error_response(&detail),
+    }
+}
+
+/// `POST /xray/rotate` — move to the next enabled endpoint (manual rotation).
+pub async fn rotate_xray(State(state): State<Arc<ApiState>>) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match control.xray_rotate().await {
+        Ok(()) => Json(serde_json::json!({ "rotated": true })).into_response(),
+        Err(detail) => error_response(&detail),
+    }
+}
+
 /// `GET /qos` — shaping intent, applied qdiscs, capabilities and drift.
 pub async fn get_qos(State(state): State<Arc<ApiState>>) -> Response {
     let snapshot = match snapshot_or_unavailable(&state).await {

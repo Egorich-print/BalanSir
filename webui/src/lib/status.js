@@ -139,6 +139,50 @@ export function b4Status(snap) {
   return { status: HEALTHY, title: 'Healthy', reasons: ['B4 converged, direct paths healthy'] };
 }
 
+export function xrayStatus(snap) {
+  if (!snap) return { status: UNAVAILABLE, title: 'Unavailable', reasons: ['No snapshot yet'] };
+  const { xray } = snap;
+  if (!xray || xray.profiles.length === 0) {
+    return {
+      status: DISABLED,
+      title: 'Disabled',
+      reasons: ['No Xray profiles (set BALANSIR_XRAY_CONFIG)'],
+    };
+  }
+  const reasons = [];
+  if (xray.last_error) reasons.push(`Xray error: ${xray.last_error}`);
+  if (xray.switch_reason) reasons.push(`Last switch: ${xray.switch_reason}`);
+  if (xray.paused) {
+    return {
+      status: DISABLED,
+      title: 'Paused',
+      reasons: ['Transport paused — traffic uses the direct path'],
+    };
+  }
+  if (!xray.active) {
+    return {
+      status: xray.last_error ? BLOCKED : DEGRADED,
+      title: xray.last_error ? 'Blocked' : 'Not running',
+      reasons,
+    };
+  }
+  const active = xray.profiles.find((p) => p.name === xray.active);
+  if (active && (active.health === 'Unhealthy' || active.health === 'Degraded')) {
+    reasons.push(
+      `Active endpoint '${active.name}' is ${active.health.toLowerCase()} ` +
+        `(${active.failure_count} failed probe(s))`,
+    );
+    return { status: DEGRADED, title: 'Degraded', reasons };
+  }
+  if (xray.pinned && xray.pinned !== xray.active) {
+    reasons.push(`Pinned endpoint '${xray.pinned}' — converging`);
+    return { status: RECOVERING, title: 'Recovering', reasons };
+  }
+  if (xray.pinned) reasons.push(`Pinned to '${xray.pinned}' (manual override)`);
+  reasons.push(`Proxy active via '${xray.active}' (SOCKS ${xray.socks_port})`);
+  return { status: HEALTHY, title: 'Healthy', reasons };
+}
+
 export function systemStatus(snap, health) {
   const parts = [
     health && health.status !== 'ok'
@@ -151,6 +195,7 @@ export function systemStatus(snap, health) {
     networkStatus(snap),
     tailscaleStatus(snap),
     b4Status(snap),
+    xrayStatus(snap),
   ].filter(Boolean);
   const overall = worst(...parts);
   return {

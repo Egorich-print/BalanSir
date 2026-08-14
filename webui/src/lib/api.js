@@ -42,6 +42,17 @@ export const api = {
   b4: () => req('/b4'),
   setB4Paused: (paused) =>
     req('/b4/pause', { method: 'POST', body: JSON.stringify({ paused }) }),
+
+  xray: () => req('/xray'),
+  setXrayPaused: (paused) =>
+    req('/xray/pause', { method: 'POST', body: JSON.stringify({ paused }) }),
+  xraySelect: (profile) =>
+    req('/xray/select', {
+      method: 'POST',
+      body: JSON.stringify({ profile }),
+    }),
+  xrayRotate: () => req('/xray/rotate', { method: 'POST' }),
+
   qos: () => req('/qos'),
   setQos: (interfaces) =>
     req('/qos', { method: 'POST', body: JSON.stringify({ interfaces }) }),

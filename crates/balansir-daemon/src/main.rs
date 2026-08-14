@@ -182,11 +182,53 @@ async fn main() -> Result<()> {
             loop_manager.run_loop().await;
         });
 
+        // Xray transport component (BALANSIR_XRAY_CONFIG): endpoint profiles,
+        // active process, failover/rotation/recovery. Not started by default —
+        // the transport is only active when the operator configures it.
+        #[cfg(feature = "xray")]
+        let xray_control: Option<balansir_daemon::xray_manager::XrayManagerHandle> = {
+            match std::env::var("BALANSIR_XRAY_CONFIG") {
+                Ok(xray_path) => {
+                    match balansir_daemon::xray_manager::XrayToml::from_file(&xray_path) {
+                        Ok(xray_cfg) => {
+                            match balansir_daemon::xray_manager::XrayManager::from_toml(
+                                &xray_cfg,
+                                manager.snapshot(),
+                                manager.event_sender(),
+                            ) {
+                                Ok(xray_manager) => {
+                                    let handle = xray_manager.handle();
+                                    tokio::spawn(async move {
+                                        xray_manager.run_loop(10).await;
+                                    });
+                                    info!("Xray component started from {xray_path}");
+                                    Some(handle)
+                                }
+                                Err(e) => {
+                                    warn!("Xray config {xray_path} rejected: {e} (component disabled)");
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Xray config {xray_path} rejected: {e} (component disabled)");
+                            None
+                        }
+                    }
+                }
+                Err(_) => None,
+            }
+        };
+        #[cfg(not(feature = "xray"))]
+        let xray_control: Option<()> = None;
+
         let api_bind_clone = api_bind.clone();
         tokio::spawn(async move {
             if let Err(e) = balansir_daemon::server::start_api_server(
                 manager,
                 b4_control,
+                #[cfg(feature = "xray")]
+                xray_control,
                 api_bind_clone,
             )
             .await
