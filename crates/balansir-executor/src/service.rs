@@ -214,7 +214,21 @@ impl Executor for NftablesExecutor {
         let fingerprint = rule_fingerprint(request);
 
         // Idempotency (A1, ADR-015): the exact same rule is already installed.
-        if self.fingerprint_of(policy_id) == Some(fingerprint) {
+        //
+        // The fingerprint cache alone is not ground truth (P4.1, ADR-020): an
+        // external kernel edit or a chain flush can remove the rule while the
+        // cache still lists it. Only short-circuit when the rule is *actually
+        // present in the kernel*; otherwise fall through to (re)apply so the
+        // daemon's ownership loop converges instead of being swallowed by
+        // stale accounting.
+        if self.fingerprint_of(policy_id) == Some(fingerprint)
+            && self
+                .backend
+                .find_handle_by_comment(&rule_comment(policy_id))
+                .ok()
+                .flatten()
+                .is_some()
+        {
             return ActionResult::AlreadyApplied;
         }
 

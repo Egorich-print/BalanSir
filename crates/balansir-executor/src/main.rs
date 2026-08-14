@@ -51,6 +51,13 @@ async fn main() -> Result<()> {
     // failure rather than a silent no-op.
     let backend = NftablesBackend::new("balansir", "forward")
         .map_err(|e| Error::Misconfiguration(format!("nftables backend: {e}")))?;
+    // Create the table + chain once, before serving any request. Without this
+    // every AddRule would fail with "No such file or directory" (the table
+    // does not exist yet) — the netns tests call setup() themselves, so the
+    // production path must do it here.
+    backend
+        .init()
+        .map_err(|e| Error::Misconfiguration(format!("nftables init: {e}")))?;
     let executor = Box::new(NftablesExecutor::new(backend));
 
     // Additional privileged mechanisms. Each is wired independently so a

@@ -71,37 +71,35 @@ impl NftablesBackend {
         args
     }
 
+    /// Create the table and chain once, tolerating "already exists" (the
+    /// object is present from a previous run) but failing loudly on any other
+    /// error — a missing mechanism must not be a silent no-op.
     pub fn init(&self) -> Result<()> {
-        // Create table if not exists
-        let output = Command::new(nft_bin()?)
-            .args(["add", "table", "inet", &self.table_name])
-            .output();
-
-        match output {
-            Ok(_) => {
-                debug!("Created nftables table: {}", self.table_name);
-            }
-            Err(e) => {
-                // Table might already exist
-                debug!("Table creation result: {}", e);
-            }
-        }
-
-        // Create chain if not exists
-        let output = Command::new(nft_bin()?)
-            .args(["add", "chain", "inet", &self.table_name, &self.chain_name])
-            .output();
-
-        match output {
-            Ok(_) => {
-                debug!("Created nftables chain: {}", self.chain_name);
-            }
-            Err(e) => {
-                debug!("Chain creation result: {}", e);
-            }
-        }
-
+        self.create_if_absent(["add", "table", "inet", &self.table_name], "table")?;
+        self.create_if_absent(
+            ["add", "chain", "inet", &self.table_name, &self.chain_name],
+            "chain",
+        )?;
         Ok(())
+    }
+
+    fn create_if_absent<const N: usize>(&self, args: [&str; N], what: &str) -> Result<()> {
+        let output = Command::new(nft_bin()?).args(args).output()?;
+        if output.status.success() {
+            debug!("Created nftables {what}");
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // nft reports "File exists" (table/chain already present) as an error
+        // status; that is the idempotent-until-now case and not a failure.
+        if stderr.contains("File exists") {
+            debug!("nftables {what} already exists");
+            Ok(())
+        } else {
+            Err(balansir_common::Error::Fatal(format!(
+                "nft create {what} failed: {stderr}"
+            )))
+        }
     }
 
     pub fn add_rule(&self, spec: &NftRuleSpec) -> Result<()> {
@@ -179,7 +177,7 @@ impl NftablesBackend {
 
     /// Return the handle (`# handle N`) of the rule tagged with `comment`, or
     /// `None` if absent. Parses `nft -a list chain`.
-    fn find_handle_by_comment(&self, comment: &str) -> Result<Option<String>> {
+    pub fn find_handle_by_comment(&self, comment: &str) -> Result<Option<String>> {
         let output = Command::new(nft_bin()?)
             .args([
                 "-a",

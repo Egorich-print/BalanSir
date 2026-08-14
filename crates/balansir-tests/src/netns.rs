@@ -197,7 +197,8 @@ mod tests {
         match result {
             ActionResult::Applied { .. } => {
                 let rules = executor.list_rules().unwrap();
-                assert!(rules.iter().any(|r| r.contains("mark set 42")));
+                // nft renders marks in hex (`meta mark set 0x...`), not decimal.
+                assert!(rules.iter().any(|r| r.contains("meta mark set 0x0000002a")));
             }
             _ => panic!("Expected Applied"),
         }
@@ -253,7 +254,7 @@ mod tests {
         assert!(
             listed
                 .iter()
-                .any(|l| l.contains("mark set 16") && l.contains("comment \"balansir:42\"")),
+                .any(|l| l.contains("meta mark set 0x00000010") && l.contains("comment \"balansir:42\"")),
             "installed rule must be present with mark + comment: {listed:?}"
         );
 
@@ -269,6 +270,95 @@ mod tests {
         backend.remove_rule_by_comment("balansir:42").unwrap();
 
         let _ = backend.flush();
+        let _ = std::process::Command::new("nft")
+            .args(["delete", "table", "inet", &table])
+            .output();
+    }
+
+    /// P4.1 (ADR-020) convergence: the executor's idempotency short-circuit
+    /// must be verified against the *kernel*, not just the in-memory
+    /// fingerprint cache. If an external actor deletes a rule, a re-issued
+    /// AddRule for the same policy id must re-apply it (`Applied`), never
+    /// report `AlreadyApplied` from stale accounting.
+    #[test]
+    #[ignore] // Run with --ignored flag when root
+    fn test_executor_reapplies_externally_deleted_rule() {
+        if !is_root() {
+            eprintln!("Skipping: requires root/CAP_NET_ADMIN");
+            return;
+        }
+
+        use balansir_executor::executor::Executor as _;
+        use balansir_executor::nftables::NftablesBackend;
+        use balansir_executor::service::NftablesExecutor;
+        use balansir_common::{Action, ActionRequest, ActionResult, DecisionTrace};
+
+        let table = format!("balansir_conv_{}", std::process::id());
+        let backend = NftablesBackend::new(&table, "forward").unwrap();
+        backend.init().unwrap();
+        let executor = NftablesExecutor::new(backend);
+
+        let request = ActionRequest {
+            action: Action::Block,
+            src_ip: "192.168.1.100".parse().unwrap(),
+            dst_ip: "10.0.0.5".parse().unwrap(),
+            src_port: 0,
+            dst_port: 443,
+            protocol: 6,
+            interface: 1,
+            trace: DecisionTrace {
+                policy_id: 7,
+                steps: SmallVec::new(),
+                action: Action::Block,
+                execution_time_us: 0,
+                correlation_id: 0,
+            },
+        };
+
+        // First apply lands in the kernel and fills the fingerprint cache.
+        match futures::executor::block_on(executor.execute(&request)) {
+            ActionResult::Applied { .. } => {}
+            other => panic!("expected Applied on first apply, got {other:?}"),
+        }
+
+        // Simulate an external kernel edit: the rule is deleted out-of-band.
+        let chain = NftablesBackend::new(&table, "forward").unwrap();
+        let handle = chain
+            .find_handle_by_comment("balansir:7")
+            .unwrap()
+            .expect("rule must be present before external delete");
+        std::process::Command::new("nft")
+            .args([
+                "delete", "rule", "inet", &table, "forward", "handle", &handle,
+            ])
+            .status()
+            .unwrap();
+        assert!(
+            !NftablesBackend::new(&table, "forward")
+                .unwrap()
+                .list_rules()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("balansir:7")),
+            "rule must be gone from the kernel after external delete"
+        );
+
+        // Re-issue the identical AddRule: the cache matches, but the kernel
+        // does not — the executor must converge by re-applying.
+        match futures::executor::block_on(executor.execute(&request)) {
+            ActionResult::Applied { .. } => {}
+            other => panic!("expected re-Applied after external delete, got {other:?}"),
+        }
+        assert!(
+            NftablesBackend::new(&table, "forward")
+                .unwrap()
+                .list_rules()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("balansir:7")),
+            "rule must be back in the kernel after re-apply"
+        );
+
         let _ = std::process::Command::new("nft")
             .args(["delete", "table", "inet", &table])
             .output();

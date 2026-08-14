@@ -14,7 +14,7 @@ use balansir_control::snapshot_store::MemorySnapshotStore;
 use balansir_control::traits::{Executor, Planner};
 use balansir_control::{Coordinator, CoordinatorConfig, ReconcileReason};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Reconciliation loop for maintaining desired state.
 ///
@@ -433,6 +433,7 @@ impl Reconciler {
     /// followed by a reconcile. Split out so the loop logic is testable without
     /// real wall-clock intervals.
     async fn step(&self, cycle: u32) {
+        debug!(cycle, "Reconciliation loop step");
         // Periodic ownership re-seed: bring ActualState back to what the
         // kernel actually holds before diffing, so external edits or an
         // executor restart cannot hide behind stale accounting.

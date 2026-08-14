@@ -23,6 +23,7 @@ pub struct DesiredConfig {
 
 /// Policy-level semantics for a config (P1, ADR-019).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     /// What an *empty* rule set means. `Pass` (default) installs nothing
     /// (fail-open, current behavior). `Drop` installs a single terminal
@@ -56,6 +57,7 @@ impl DesiredConfig {
 
 /// One rule entry in the config file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuleConfig {
     pub id: u32,
     pub action: String,
@@ -80,6 +82,7 @@ pub struct RuleConfig {
 
 /// One driver entry in the config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DriverConfig {
     pub id: String,
     pub action: String,
@@ -442,5 +445,32 @@ mod tests {
 
         let pass: DesiredConfig = toml::from_str("").unwrap();
         assert_eq!(pass.policy.empty_config_action, EmptyConfigAction::Pass);
+    }
+
+    /// Strict compile (ADR-010): a misspelled or unsupported field inside a
+    /// rule/driver/policy entry must reject the whole config — never be
+    /// silently ignored (a rule the operator thinks is scoped may not be).
+    #[test]
+    fn unknown_rule_field_rejects_config() {
+        let bad = "[[rules]]\nid = 1\naction = \"block\"\nsrc_cidr = \"192.168.1.0/24\"\n";
+        let err = toml::from_str::<DesiredConfig>(bad).unwrap_err();
+        assert!(
+            err.to_string().contains("src_cidr"),
+            "error must name the unknown field: {err}"
+        );
+
+        let bad_driver = "[[drivers]]\nid = \"dns\"\naction = \"start\"\nextra = 1\n";
+        let err = toml::from_str::<DesiredConfig>(bad_driver).unwrap_err();
+        assert!(
+            err.to_string().contains("extra"),
+            "error must name the unknown driver field: {err}"
+        );
+
+        let bad_policy = "[policy]\nempty_config_action = \"drop\"\nsomething = 1\n";
+        let err = toml::from_str::<DesiredConfig>(bad_policy).unwrap_err();
+        assert!(
+            err.to_string().contains("something"),
+            "error must name the unknown policy field: {err}"
+        );
     }
 }
