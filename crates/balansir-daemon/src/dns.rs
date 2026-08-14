@@ -3,12 +3,13 @@ use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
 use crate::driver::ComponentDriver;
+use crate::reconciliation::DnsRegistry;
 
 fn ss_bin() -> std::path::PathBuf {
     balansir_common::paths::resolve_bin_or_default("ss")
@@ -51,10 +52,20 @@ impl Default for DnsForwarderConfig {
     }
 }
 
+impl DnsForwarderConfig {
+    /// Load a DNS forwarder config from a TOML file (`BALANSIR_DNS_CONFIG`).
+    pub fn from_file(path: &str) -> Result<Self, String> {
+        let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+        toml::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))
+    }
+}
+
 /// Small bounded query-response cache. Keyed by the raw query bytes (no
 /// parsing, no injection surface); entries expire after `CACHE_TTL`.
+type CacheEntry = (Vec<u8>, Instant);
+
 #[derive(Default)]
-struct DnsCache(Mutex<HashMap<Vec<u8>, (Vec<u8>, Instant)>>);
+struct DnsCache(Mutex<HashMap<Vec<u8>, CacheEntry>>);
 
 impl DnsCache {
     fn get(&self, query: &[u8]) -> Option<Vec<u8>> {
@@ -97,12 +108,19 @@ async fn forward_query(query: &[u8], upstream: SocketAddr) -> Option<Vec<u8>> {
 
 /// UDP DNS forwarding loop. Answers queries from `socket`, failing over
 /// across `upstreams` in round-robin order, and caches responses.
+///
+/// When a `DnsRegistry` is attached (the shared DNS observation truth for the
+/// policy plane), every response forwarded from an upstream is parsed and its
+/// A/AAAA answer set is recorded — so real DNS traffic feeds the flow
+/// compiler and the B4 observer. Cached responses are not re-parsed (the
+/// cache TTL bounds registry freshness).
 async fn forward_loop(
     socket: UdpSocket,
     upstreams: Vec<SocketAddr>,
     cache: DnsCache,
     cache_size: usize,
     log_queries: bool,
+    registry: Option<Arc<DnsRegistry>>,
 ) {
     let mut round_robin = 0usize;
     let mut buf = vec![0u8; 4096];
@@ -133,6 +151,13 @@ async fn forward_loop(
                 round_robin = (round_robin + 1).max(1) % upstreams.len();
                 if let Some(r) = &response {
                     cache.put(query.clone(), r.clone(), cache_size);
+                    // P6 (ADR-023): record the DNS observation for the policy
+                    // plane (flow compiler + B4 observer).
+                    if let Some(registry) = &registry {
+                        if crate::dns_plane::ingest(registry, &query, r) {
+                            tracing::trace!("dns observation recorded");
+                        }
+                    }
                 }
                 response
             }
@@ -153,6 +178,9 @@ pub struct DnsForwarderDriver {
     health: HealthStatus,
     task: Option<JoinHandle<()>>,
     local: Option<SocketAddr>,
+    /// Shared DNS observation truth for the policy plane (P6/ADR-023).
+    /// When attached, forwarded responses populate it (domain → A/AAAA).
+    registry: Option<Arc<DnsRegistry>>,
 }
 
 impl DnsForwarderDriver {
@@ -165,7 +193,14 @@ impl DnsForwarderDriver {
             health: HealthStatus::Unknown,
             task: None,
             local: None,
+            registry: None,
         }
+    }
+
+    /// Attach the shared `DnsRegistry` so forwarded responses become policy
+    /// plane observations. Must be called before `start`.
+    pub fn attach_registry(&mut self, registry: Arc<DnsRegistry>) {
+        self.registry = Some(registry);
     }
 
     /// Actual bound listener address (useful when configured with port 0).
@@ -208,12 +243,14 @@ impl ComponentDriver for DnsForwarderDriver {
         tracing::info!(listen = ?local, upstreams = ?upstreams, "DNS forwarder started");
 
         let cache = DnsCache::default();
+        let registry = self.registry.clone();
         let task = tokio::spawn(forward_loop(
             socket,
             upstreams,
             cache,
             self.config.cache_size,
             self.config.log_queries,
+            registry,
         ));
 
         self.task = Some(task);
@@ -292,7 +329,7 @@ mod tests {
             let mut buf = [0u8; 4096];
             loop {
                 match listener.recv_from(&mut buf) {
-                    Ok((n, peer)) => {
+                    Ok((_n, peer)) => {
                         count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let response = [0xAB, 0xCD]; // opaque DNS response
                         let _ = listener.send_to(&response[..], peer);
@@ -386,6 +423,90 @@ mod tests {
         assert_eq!(second, Some(vec![0xAB, 0xCD]));
         // Only the first query reached the upstream; the second hit the cache.
         assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 1);
+        driver.stop().await.expect("stop");
+    }
+
+    /// A real DNS A query for `obs.example.com` and the matching response
+    /// (answer uses a compression pointer to the question name).
+    fn obs_query() -> Vec<u8> {
+        let mut q = Vec::new();
+        q.extend_from_slice(&0x1234u16.to_be_bytes());
+        q.extend_from_slice(&0x0100u16.to_be_bytes()); // RD
+        q.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+        q.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // AN/NS/AR
+        q.extend_from_slice(b"\x03obs\x07example\x03com\x00");
+        q.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
+        q.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+        q
+    }
+
+    fn obs_response() -> Vec<u8> {
+        let mut r = obs_query();
+        r[2..4].copy_from_slice(&0x8180u16.to_be_bytes()); // QR|RD|RA
+        r[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT=1
+        r.extend_from_slice(&[0xC0, 0x0C]); // pointer to question name
+        r.extend_from_slice(&1u16.to_be_bytes()); // TYPE A
+        r.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
+        r.extend_from_slice(&300u32.to_be_bytes()); // TTL
+        r.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH
+        r.extend_from_slice(&[203, 0, 113, 42]); // 203.0.113.42
+        r
+    }
+
+    #[tokio::test]
+    async fn forwarded_responses_feed_the_policy_registry() {
+        // Upstream answers with a real A record; the driver must parse it and
+        // record obs.example.com → [203.0.113.42] in the shared registry,
+        // making the observation visible to the flow compiler / B4 observer.
+        let addr = std::sync::Arc::new(std::sync::Mutex::new(None::<SocketAddr>));
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        *addr.lock().unwrap() = Some(listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match listener.recv_from(&mut buf) {
+                    Ok((_n, peer)) => {
+                        let _ = listener.send_to(&obs_response(), peer);
+                    }
+                    Err(_)
+                        if std::io::Error::last_os_error().kind()
+                            == std::io::ErrorKind::WouldBlock =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+
+        let registry = DnsRegistry::new();
+        let mut driver = DnsForwarderDriver::new(
+            DriverId::DnsForwarder,
+            DnsForwarderConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                upstreams: vec![addr.lock().unwrap().unwrap()],
+                cache_size: 0, // force an upstream round-trip every query
+                ..DnsForwarderConfig::default()
+            },
+        );
+        driver.attach_registry(std::sync::Arc::new(registry.clone()));
+        driver.start().await.expect("start");
+        let local = driver.local_addr().expect("bound");
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(&obs_query(), local).await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = tokio::time::timeout(Duration::from_secs(3), client.recv(&mut buf))
+            .await
+            .expect("response");
+
+        // The observation must reach the shared registry (policy plane).
+        let ips = registry
+            .resolve("obs.example.com")
+            .expect("registry populated from forwarded response");
+        assert!(ips.contains(&"203.0.113.42".parse().unwrap()));
+
         driver.stop().await.expect("stop");
     }
 

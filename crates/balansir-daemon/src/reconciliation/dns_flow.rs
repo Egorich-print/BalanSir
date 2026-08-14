@@ -29,9 +29,20 @@ fn derived_rule_id(base: u32, ip: &IpAddr) -> u32 {
 /// The daemon populates it from its DNS/conn observation source; the compiler
 /// reads it but treats missing/unknown domains as "compile to nothing" (the
 /// rule is dropped from the compiled desired state until it resolves).
+///
+/// Entries recorded from DNS observations carry a TTL and expire; entries
+/// recorded via `insert` (authoritative external feeds / tests) never expire.
+/// This gives honest staleness semantics: an observation that stops being
+/// refreshed (the domain is no longer resolved through BalanSir) eventually
+/// stops being enforced instead of pinning stale IPs forever.
+///
+/// One registry entry: resolved addresses plus an optional expiry (None =
+/// authoritative, never expires).
+type RegistryEntry = (Vec<IpAddr>, Option<std::time::Instant>);
+
 #[derive(Debug, Default, Clone)]
 pub struct DnsRegistry {
-    inner: std::sync::Arc<std::sync::Mutex<HashMap<String, Vec<IpAddr>>>>,
+    inner: std::sync::Arc<std::sync::Mutex<HashMap<String, RegistryEntry>>>,
 }
 
 impl DnsRegistry {
@@ -40,11 +51,22 @@ impl DnsRegistry {
     }
 
     /// Record the resolved addresses for a domain (replaces previous set).
+    /// Authoritative: the entry never expires until replaced or removed.
     pub fn insert(&self, domain: &str, ips: Vec<IpAddr>) {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(domain.to_ascii_lowercase(), ips);
+            .insert(domain.to_ascii_lowercase(), (ips, None));
+    }
+
+    /// Record the resolved addresses for a domain with a freshness TTL.
+    /// The entry expires `ttl` after insertion and is removed on the first
+    /// read after expiry.
+    pub fn insert_with_ttl(&self, domain: &str, ips: Vec<IpAddr>, ttl: std::time::Duration) {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            domain.to_ascii_lowercase(),
+            (ips, Some(std::time::Instant::now() + ttl)),
+        );
     }
 
     /// Remove a domain mapping entirely.
@@ -55,13 +77,19 @@ impl DnsRegistry {
             .remove(&domain.to_ascii_lowercase());
     }
 
-    /// Resolved addresses for a domain, or `None` if unknown.
+    /// Resolved addresses for a domain, or `None` if unknown/expired.
     pub fn resolve(&self, domain: &str) -> Option<Vec<IpAddr>> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&domain.to_ascii_lowercase())
-            .cloned()
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let key = domain.to_ascii_lowercase();
+        match inner.get(&key) {
+            Some((ips, Some(expires))) if *expires <= std::time::Instant::now() => {
+                // Expired observation: forget it so policy stops trusting it.
+                inner.remove(&key);
+                None
+            }
+            Some((ips, _)) => Some(ips.clone()),
+            None => None,
+        }
     }
 }
 

@@ -59,6 +59,9 @@ pub struct Reconciler {
     /// step and `Reconciler::build_plan` route through this same `Planner`
     /// port instance, so there is exactly one authoritative planning path.
     planner: Arc<dyn Planner>,
+    /// Optional shared metrics (one system, ADR-009/012): reconciliation
+    /// outcomes update the same counters/gauges the API and IPC expose.
+    metrics: std::sync::Mutex<Option<Arc<balansir_common::metrics::SharedMetrics>>>,
 }
 
 /// Configuration for the reconciliation loop.
@@ -200,6 +203,7 @@ impl Reconciler {
             flow_compiler: tokio::sync::Mutex::new(None),
             config_fingerprint: tokio::sync::Mutex::new(None),
             planner,
+            metrics: std::sync::Mutex::new(None),
         }
     }
 
@@ -277,6 +281,46 @@ impl Reconciler {
         self.events.attach(sink);
     }
 
+    /// Attach the shared metrics instance. Reconciliation outcomes then update
+    /// the same counters/gauges the API `/metrics` and IPC `GetMetrics` expose
+    /// (one metrics system, ADR-009/ADR-012).
+    pub async fn attach_metrics(&self, metrics: Arc<balansir_common::metrics::SharedMetrics>) {
+        *self.metrics.lock().unwrap_or_else(|e| e.into_inner()) = Some(metrics);
+    }
+
+    /// Record a reconciliation outcome into the shared metrics (if attached):
+    /// a counter on success/failure and live desired/actual rule gauges that
+    /// always report the *current* state (never a stale snapshot). Best-effort:
+    /// never blocks the reconcile path on a contended lock.
+    fn record_reconcile(&self, ok: bool) {
+        let Some(metrics) = self
+            .metrics
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        let desired = self
+            .desired_state
+            .try_lock()
+            .map(|d| d.rules.len() as i64)
+            .unwrap_or(0);
+        let actual = self
+            .actual_state
+            .try_lock()
+            .map(|a| a.active_rules.len() as i64)
+            .unwrap_or(0);
+        let m = metrics.get();
+        if ok {
+            m.record_reconciliation();
+        } else {
+            m.record_reconciliation_failure();
+        }
+        m.set_desired_rules(desired);
+        m.set_active_rules(actual);
+    }
+
     /// Current desired state (read snapshot).
     pub async fn desired(&self) -> DesiredState {
         self.desired_state.lock().await.clone()
@@ -334,10 +378,12 @@ impl Reconciler {
             Ok(()) => {
                 *self.desired_raw.lock().await = Some(raw);
                 *self.config_fingerprint.lock().await = Some(fp);
+                self.record_reconcile(true);
                 Ok(())
             }
             Err(e) => {
                 *self.desired_state.lock().await = prev;
+                self.record_reconcile(false);
                 Err(ReconciliationError::Reconcile(e.to_string()))
             }
         }
@@ -442,10 +488,13 @@ impl Reconciler {
 
     /// Trigger a single reconciliation cycle.
     pub async fn reconcile(&self) -> ReconciliationResult<()> {
-        self.coordinator
+        let result = self
+            .coordinator
             .reconcile(ReconcileReason::Scheduled)
             .await
-            .map_err(|e| ReconciliationError::Reconcile(e.to_string()))
+            .map_err(|e| ReconciliationError::Reconcile(e.to_string()));
+        self.record_reconcile(result.is_ok());
+        result
     }
 
     /// Trigger an atomic reconciliation (rollback handled by the coordinator).

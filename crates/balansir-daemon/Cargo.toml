@@ -10,7 +10,11 @@ name = "balansir-cli"
 path = "src/cli.rs"
 
 [features]
-default = ["wireguard", "xray", "hysteria", "b4"]
+# `dns` is on by default: the DNS forwarder is the P6 observation source that
+# feeds the shared DnsRegistry (flow compiler + B4 observer). It only binds a
+# socket when BALANSIR_DNS_CONFIG is set, so it is inert on hosts that do not
+# run the forwarder.
+default = ["wireguard", "xray", "hysteria", "b4", "dns"]
 wireguard = []
 xray = []
 hysteria = []

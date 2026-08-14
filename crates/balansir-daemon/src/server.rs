@@ -43,9 +43,13 @@ pub fn api_bind() -> String {
 /// the daemon-managed `SubsystemManager` and optional B4 controller handle.
 /// The manager ownership loop and the B4 runtime loop are spawned by the
 /// caller (main); this function only wires the API and runs until it exits.
+///
+/// `metrics` is the daemon's shared instance so `/metrics` and the IPC
+/// `GetMetrics` endpoint report the same counters/gauges (one metrics system).
 pub async fn start_api_server(
     manager: Arc<SubsystemManager>,
     reconciler: Arc<Reconciler>,
+    metrics: Arc<balansir_common::metrics::SharedMetrics>,
     b4_control: Option<crate::b4_manager::B4ManagerHandle>,
     #[cfg(feature = "xray")] xray_control: Option<crate::xray_manager::XrayManagerHandle>,
     bind: String,
@@ -83,7 +87,7 @@ pub async fn start_api_server(
     );
 
     let state = Arc::new(
-        balansir_api::ApiState::new(Arc::new(balansir_common::metrics::SharedMetrics::new()))
+        balansir_api::ApiState::new(metrics)
             .with_subsystems(control, snapshot, events)
             .with_control(plane),
     );

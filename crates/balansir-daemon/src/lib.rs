@@ -7,8 +7,8 @@ pub mod b4_manager;
 pub mod capability;
 #[cfg(feature = "dns")]
 pub mod dns;
+pub mod dns_plane;
 pub mod driver;
-pub mod health;
 #[cfg(feature = "hysteria")]
 pub mod hysteria;
 #[cfg(target_os = "linux")]

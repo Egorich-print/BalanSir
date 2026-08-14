@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 use balansir_daemon::driver::factory::ConfiguredFactory;
 use balansir_daemon::driver::health::TierTracker;
 use balansir_daemon::driver::lifecycle::{DriverIntent, DriverLifecycleManager};
+use balansir_daemon::driver::ComponentDriver;
 use balansir_daemon::reconciliation::{ExecutorClient, Reconciler, ReconcilerConfig};
 
 const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
@@ -124,6 +125,49 @@ async fn main() -> Result<()> {
     let dns_registry = std::sync::Arc::new(balansir_daemon::reconciliation::DnsRegistry::new());
     let compiler = balansir_daemon::reconciliation::FlowCompiler::new((*dns_registry).clone());
     reconciler.with_flow_compiler(compiler).await;
+    // Metrics: attach the shared instance to the reconciler so reconciliation
+    // outcomes update the same counters/gauges the API and IPC expose (one
+    // metrics system, ADR-009/ADR-012).
+    reconciler.attach_metrics(Arc::clone(&metrics)).await;
+
+    // P6 (ADR-023): DNS observation source. When BALANSIR_DNS_CONFIG points at
+    // a forwarder config, start the DNS forwarder driver with the SAME shared
+    // registry the flow compiler and B4 observer read — real DNS traffic then
+    // feeds policy compilation and B4 DNS observation. The driver is inert
+    // unless configured (and must stay alive for the daemon's lifetime, hence
+    // the holder below).
+    #[cfg(feature = "dns")]
+    let dns_forwarder_holder: Option<balansir_daemon::dns::DnsForwarderDriver> = {
+        match std::env::var("BALANSIR_DNS_CONFIG") {
+            Ok(dns_path) => match balansir_daemon::dns::DnsForwarderConfig::from_file(&dns_path) {
+                Ok(dns_cfg) => {
+                    let mut driver = balansir_daemon::dns::DnsForwarderDriver::new(
+                        balansir_common::DriverId::DnsForwarder,
+                        dns_cfg,
+                    );
+                    driver.attach_registry(Arc::clone(&dns_registry));
+                    match driver.start().await {
+                        Ok(()) => {
+                            info!("DNS forwarder started from {dns_path}");
+                            Some(driver)
+                        }
+                        Err(e) => {
+                            warn!("DNS forwarder from {dns_path} failed to start: {e}");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("DNS config {dns_path} rejected: {e}");
+                    None
+                }
+            },
+            Err(_) => None,
+        }
+    };
+    #[cfg(not(feature = "dns"))]
+    let _dns_forwarder_holder: Option<()> = None;
+    let _ = &dns_forwarder_holder;
 
     let dns_loop_reconciler = Arc::clone(&reconciler);
     tokio::spawn(async move {
@@ -226,10 +270,12 @@ async fn main() -> Result<()> {
 
         let api_bind_clone = api_bind.clone();
         let api_reconciler = Arc::clone(&reconciler);
+        let api_metrics = Arc::clone(&metrics);
         tokio::spawn(async move {
             if let Err(e) = balansir_daemon::server::start_api_server(
                 manager,
                 api_reconciler,
+                api_metrics,
                 b4_control,
                 #[cfg(feature = "xray")]
                 xray_control,
