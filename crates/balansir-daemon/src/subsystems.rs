@@ -102,6 +102,10 @@ pub struct SubsystemManager {
     b4: RwLock<Option<crate::b4_manager::B4ManagerHandle>>,
     #[cfg(feature = "xray")]
     xray: RwLock<Option<crate::xray_manager::XrayManagerHandle>>,
+    /// Previous CPU sample for utilization deltas.
+    cpu_prev: RwLock<Option<crate::system_stats::CpuSample>>,
+    /// Previous interface counters for throughput deltas: name → (rx, tx, ms).
+    last_counters: RwLock<std::collections::HashMap<String, (u64, u64, u64)>>,
 }
 
 /// Map an executor QoS result to an error when the executor reported failure
@@ -125,6 +129,8 @@ impl SubsystemManager {
             b4: RwLock::new(None),
             #[cfg(feature = "xray")]
             xray: RwLock::new(None),
+            cpu_prev: RwLock::new(None),
+            last_counters: RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -185,6 +191,7 @@ impl SubsystemManager {
         let filter = self.interface_filter.read().await.clone();
         match exec.interface_info(&filter).await {
             Ok(list) => {
+                self.update_interface_rates(&list).await;
                 self.snapshot
                     .update(|s| s.interfaces = list).await;
                 debug!("subsystems: interface refresh ok");
@@ -196,6 +203,13 @@ impl SubsystemManager {
                     detail: format!("interface refresh: {e}"),
                 });
             }
+        }
+
+        // System resources (CPU/RAM/load/uptime) ---------------------------
+        let cpu_prev = *self.cpu_prev.read().await;
+        if let Some((stats, cur)) = crate::system_stats::system_stats(cpu_prev.as_ref()) {
+            *self.cpu_prev.write().await = Some(cur);
+            self.snapshot.update(|s| s.system = stats).await;
         }
 
         // QoS -------------------------------------------------------------
@@ -248,6 +262,43 @@ impl SubsystemManager {
         if let Some(err) = qos_err {
             warn!("subsystems: QoS convergence failed: {err}");
         }
+    }
+
+    /// Derive per-interface throughput from consecutive counter samples and
+    /// publish it into the snapshot (single source of truth for the dashboard).
+    async fn update_interface_rates(&self, interfaces: &[balansir_common::network::InterfaceInfo]) {
+        let now_ms = crate::system_stats::now_ms();
+        let prev_map = self.last_counters.read().await.clone();
+
+        let mut rates: Vec<balansir_common::subsystems::InterfaceRate> = Vec::with_capacity(interfaces.len());
+        for iface in interfaces {
+            let (rx_bps, tx_bps) = match prev_map.get(&iface.name) {
+                Some((prev_rx, prev_tx, prev_ms)) if *prev_ms < now_ms => {
+                    let elapsed = std::time::Duration::from_millis(now_ms - *prev_ms);
+                    (
+                        crate::system_stats::rate_bps(*prev_rx, iface.rx_bytes, elapsed),
+                        crate::system_stats::rate_bps(*prev_tx, iface.tx_bytes, elapsed),
+                    )
+                }
+                _ => (0, 0),
+            };
+            rates.push(balansir_common::subsystems::InterfaceRate {
+                interface: iface.name.clone(),
+                rx_bps,
+                tx_bps,
+            });
+        }
+        rates.sort_by(|a, b| a.interface.cmp(&b.interface));
+
+        // Record this sample as the base for the next refresh.
+        let mut map = self.last_counters.write().await;
+        map.clear();
+        for iface in interfaces {
+            map.insert(iface.name.clone(), (iface.rx_bytes, iface.tx_bytes, now_ms));
+        }
+        drop(map);
+
+        self.snapshot.update(|s| s.interface_rates = rates).await;
     }
 
     /// Run the periodic observation loop until the task is aborted.

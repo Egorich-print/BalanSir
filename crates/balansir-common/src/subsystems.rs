@@ -126,6 +126,27 @@ pub struct XraySnapshot {
     pub last_switch_ms: i64,
 }
 
+/// Lightweight system resource view (read from `/proc`, no extra collectors).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SystemStats {
+    /// CPU utilization percent since the previous sample.
+    pub cpu_percent: f64,
+    pub mem_used_mb: u64,
+    pub mem_total_mb: u64,
+    pub load1: f64,
+    pub load5: f64,
+    pub load15: f64,
+    pub uptime_secs: u64,
+}
+
+/// Interface throughput derived from consecutive counter samples (bits/sec).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InterfaceRate {
+    pub interface: String,
+    pub rx_bps: u64,
+    pub tx_bps: u64,
+}
+
 /// Subsystem state-change events, emitted by the daemon managers and bridged
 /// to SSE for the WebUI (one event vocabulary, not one per subsystem).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +253,10 @@ pub struct SubsystemSnapshot {
     pub tailscale: TailscaleSnapshot,
     pub b4: B4Snapshot,
     pub xray: XraySnapshot,
+    /// Live system resources (CPU/RAM/load/uptime), refreshed by the daemon.
+    pub system: SystemStats,
+    /// Per-interface throughput derived from counter deltas.
+    pub interface_rates: Vec<InterfaceRate>,
     /// Unix epoch millis of the last successful refresh.
     pub updated_at_ms: i64,
     /// True when the executor could not be reached for the last refresh.

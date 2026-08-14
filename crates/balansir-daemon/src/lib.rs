@@ -18,6 +18,7 @@ pub mod secrets;
 pub mod server;
 pub mod startup;
 pub mod subsystems;
+pub mod system_stats;
 #[cfg(feature = "wireguard")]
 pub mod wireguard;
 #[cfg(feature = "xray")]

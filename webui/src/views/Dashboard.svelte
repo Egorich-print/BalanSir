@@ -1,5 +1,5 @@
 <script>
-  import { qosStatus, tailscaleStatus, networkStatus } from '../lib/status.js';
+  import { qosStatus, tailscaleStatus, networkStatus, b4Status, xrayStatus } from '../lib/status.js';
   import StatusBadge from '../components/StatusBadge.svelte';
   import { fmtBytes } from '../lib/api.js';
 
@@ -11,10 +11,14 @@
   $: qos = qosStatus(snapshot);
   $: net = networkStatus(snapshot);
   $: ts = tailscaleStatus(snapshot);
+  $: b4 = b4Status(snapshot);
+  $: xray = xrayStatus(snapshot);
 
   $: totalRx = snapshot ? snapshot.interfaces.reduce((a, i) => a + i.rx_bytes, 0) : 0;
   $: totalTx = snapshot ? snapshot.interfaces.reduce((a, i) => a + i.tx_bytes, 0) : 0;
   $: upCount = snapshot ? snapshot.interfaces.filter((i) => i.link_up).length : 0;
+  $: rates = snapshot ? (snapshot.interface_rates || []) : [];
+  $: sys = snapshot ? snapshot.system : null;
 
   function uptime(secs) {
     if (!secs) return '—';
@@ -23,6 +27,23 @@
     const m = Math.floor((secs % 3600) / 60);
     return [d ? `${d}d` : '', h ? `${h}h` : '', `${m}m`].filter(Boolean).join(' ') || '0m';
   }
+
+  function fmtRate(bps) {
+    if (!bps) return '0 b/s';
+    if (bps >= 1e9) return `${(bps / 1e9).toFixed(2)} Gb/s`;
+    if (bps >= 1e6) return `${(bps / 1e6).toFixed(1)} Mb/s`;
+    if (bps >= 1e3) return `${(bps / 1e3).toFixed(0)} kb/s`;
+    return `${bps} b/s`;
+  }
+
+  // Active path: B4 engine or Xray proxy overriding the direct path.
+  $: activePath = snapshot
+    ? {
+        direct: !(snapshot.xray && snapshot.xray.active && !snapshot.xray.paused),
+        b4: !!(snapshot.b4 && snapshot.b4.enabled && (snapshot.b4.flows || []).some((f) => f.state === 'Adapting' || f.state === 'Monitoring' || f.state === 'Fallback')),
+        xray: !!(snapshot.xray && snapshot.xray.active && !snapshot.xray.paused),
+      }
+    : { direct: true, b4: false, xray: false };
 </script>
 
 <div class="dashboard">
@@ -87,6 +108,58 @@
     </div>
 
     <div class="card">
+      <h3>Throughput (live)</h3>
+      {#if rates.length === 0}
+        <p class="meta">Waiting for counter samples…</p>
+      {/if}
+      <table class="rates">
+        <tbody>
+          {#each rates as r}
+            <tr>
+              <td><code>{r.interface}</code></td>
+              <td>↓ {fmtRate(r.rx_bps)}</td>
+              <td>↑ {fmtRate(r.tx_bps)}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>Active path</h3>
+      <div class="path-row">
+        <span>Direct</span>
+        <StatusBadge status={activePath.direct ? 'healthy' : 'disabled'}
+          title={activePath.direct ? 'In use' : 'Overridden'} />
+      </div>
+      <div class="path-row">
+        <span>B4 adaptation</span>
+        <StatusBadge status={activePath.b4 ? 'degraded' : 'healthy'}
+          title={activePath.b4 ? 'Active' : 'Idle'} />
+      </div>
+      <div class="path-row">
+        <span>Xray proxy</span>
+        <StatusBadge status={activePath.xray ? 'degraded' : 'disabled'}
+          title={activePath.xray ? 'In use' : 'Inactive'} />
+      </div>
+      <p class="meta">
+        B4: <span class="minibadge {b4.status}">{b4.title}</span>
+        · Xray: <span class="minibadge {xray.status}">{xray.title}</span>
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>System</h3>
+      {#if sys}
+        <p class="meta">CPU {sys.cpu_percent}% · RAM {sys.mem_used_mb}/{sys.mem_total_mb} MB</p>
+        <p class="meta">Load {sys.load1.toFixed(2)} / {sys.load5.toFixed(2)} / {sys.load15.toFixed(2)}</p>
+        <p class="meta">Uptime {uptime(sys.uptime_secs)}</p>
+      {:else}
+        <p class="meta">System stats unavailable (no /proc).</p>
+      {/if}
+    </div>
+
+    <div class="card">
       <h3>Tailscale</h3>
       <StatusBadge status={ts.status} title={ts.title} />
       <ul class="reasons">
@@ -116,4 +189,19 @@
   .meta { color: #7a8aa5; font-size: 0.82rem; margin: 8px 0 0; }
   .err { color: #ff6b6b; font-size: 0.85rem; }
   .reasons li { margin: 2px 0; }
+  .rates { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .rates td { padding: 3px 0; color: #a8b6cc; }
+  .rates td:first-child { color: #4ecdc4; }
+  .path-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 0.85rem; color: #a8b6cc; }
+  .minibadge {
+    display: inline-block;
+    padding: 0.1rem 0.45rem;
+    border-radius: 8px;
+    font-size: 0.72rem;
+    font-weight: 600;
+  }
+  .minibadge.healthy { background: #1f3d2b; color: #5fdba7; }
+  .minibadge.degraded, .minibadge.recovering { background: #3d331f; color: #f5c26b; }
+  .minibadge.blocked, .minibadge.fallback { background: #3d1f1f; color: #ff6b6b; }
+  .minibadge.disabled, .minibadge.unavailable { background: #2a2f3a; color: #7a8aa5; }
 </style>
