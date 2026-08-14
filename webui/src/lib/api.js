@@ -35,6 +35,9 @@ export const api = {
   events: () => get('/events'),
   reconcile: () => post('/reconcile'),
   setDesired: (state) => post('/desired', state),
+  tailscaleStatus: () => get('/tailscale/status'),
+  tailscaleUp: () => post('/tailscale/up'),
+  tailscaleDown: () => post('/tailscale/down'),
 };
 
 export function eventsStream(onEvent, onStatus) {

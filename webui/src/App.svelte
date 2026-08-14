@@ -15,6 +15,9 @@
   let error = null;
   let tab = 'overview';
   let reloading = false;
+  let tailscale = null;
+  let tsBusy = false;
+  let tsError = null;
 
   let pollTimer = null;
   let es = null;
@@ -51,6 +54,14 @@
       error = e.message;
     }
     try {
+      const ts = await api.tailscaleStatus();
+      tailscale = ts;
+      tsError = ts.error || null;
+    } catch (e) {
+      tailscale = null;
+      tsError = e.message;
+    }
+    try {
       const resp = await fetch('/api/metrics');
       metricsText = await resp.text();
     } catch (_) { /* metrics optional */ }
@@ -65,6 +76,30 @@
       error = e.message;
     } finally {
       reloading = false;
+    }
+  }
+
+  async function tsUp() {
+    tsBusy = true;
+    try {
+      await api.tailscaleUp();
+      await refresh();
+    } catch (e) {
+      tsError = e.message;
+    } finally {
+      tsBusy = false;
+    }
+  }
+
+  async function tsDown() {
+    tsBusy = true;
+    try {
+      await api.tailscaleDown();
+      await refresh();
+    } catch (e) {
+      tsError = e.message;
+    } finally {
+      tsBusy = false;
     }
   }
 
@@ -124,6 +159,7 @@
   <nav class="tabs">
     <button class:active={tab === 'overview'} on:click={() => tab = 'overview'}>Overview</button>
     <button class:active={tab === 'policy'} on:click={() => tab = 'policy'}>Policy</button>
+    <button class:active={tab === 'tailscale'} on:click={() => tab = 'tailscale'}>Tailscale</button>
     <button class:active={tab === 'events'} on:click={() => tab = 'events'}>Events</button>
     <button class:active={tab === 'metrics'} on:click={() => tab = 'metrics'}>Metrics</button>
   </nav>
@@ -230,6 +266,33 @@
     </section>
   {/if}
 
+  {#if tab === 'tailscale'}
+    <section>
+      <div class="card">
+        <h2>Tailscale</h2>
+        {#if tailscale}
+          <div class="ts-grid">
+            <div class="ts-item"><span>Installed</span><b>{tailscale.installed ? 'yes' : 'no'}</b></div>
+            <div class="ts-item"><span>Backend</span><b>{tailscale.backend_state || '—'}</b></div>
+            <div class="ts-item"><span>Node IP</span><b>{tailscale.self_ip || '—'}</b></div>
+            <div class="ts-item"><span>Hostname</span><b>{tailscale.hostname || '—'}</b></div>
+            <div class="ts-item"><span>Peers</span><b>{tailscale.peers ?? '—'}</b></div>
+            <div class="ts-item"><span>Version</span><b>{tailscale.version || '—'}</b></div>
+          </div>
+          {#if tsError}
+            <p class="error">{tsError}</p>
+          {/if}
+          <div class="ts-actions">
+            <button on:click={tsUp} disabled={tsBusy}>⬆ Up (login flow)</button>
+            <button on:click={tsDown} disabled={tsBusy}>⬇ Down</button>
+          </div>
+        {:else}
+          <p>Tailscale not available (daemon offline or not installed).</p>
+        {/if}
+      </div>
+    </section>
+  {/if}
+
   {#if tab === 'metrics'}
     <section>
       <div class="card">
@@ -276,5 +339,10 @@
   .event { padding: 8px; border-bottom: 1px solid #0f3460; font-size: 0.9em; }
   .e-type { font-weight: bold; color: #4ecdc4; margin-right: 8px; }
   .e-time { float: right; color: #888; font-size: 0.8em; }
+  .ts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .ts-item { background: #0f3460; border-radius: 8px; padding: 10px; }
+  .ts-item span { display: block; font-size: 0.8em; color: #888; }
+  .ts-item b { font-size: 1.1em; }
+  .ts-actions { display: flex; gap: 10px; }
   .footer { text-align: center; margin-top: 30px; color: #666; font-size: 0.9em; }
 </style>
