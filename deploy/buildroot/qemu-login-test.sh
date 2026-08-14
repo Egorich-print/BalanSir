@@ -52,7 +52,19 @@ for name_cmd in \
     "fingerprint|balansir-cli fingerprint" \
     "desired|balansir-cli desired" \
     "nft|nft --version" \
-    "ifaces|ip -brief addr"; do
+
+    "cli-status|balansir-cli status" \
+    "fingerprint|balansir-cli fingerprint" \
+    "desired|balansir-cli desired" \
+    "nft|nft --version" \
+    "ifaces|ip -brief addr" \
+    "api-health|curl -s http://127.0.0.1:8080/api/health | head -c 300" \
+    "api-desired|curl -s http://127.0.0.1:8080/api/desired | head -c 300" \
+    "api-qos|curl -s http://127.0.0.1:8080/api/qos/status | head -c 300" \
+    "api-paths|curl -s http://127.0.0.1:8080/api/health/paths | head -c 300" \
+    "api-tailscale|curl -s http://127.0.0.1:8080/api/tailscale/status | head -c 300" \
+    "api-xray|curl -s http://127.0.0.1:8080/api/xray/status | head -c 300"; do
+
     name="${name_cmd%%|*}"
     cmd="${name_cmd#*|}"
     echo "--- $name ---"
