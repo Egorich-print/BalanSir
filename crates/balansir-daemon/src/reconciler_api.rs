@@ -88,3 +88,28 @@ impl ApiSurface for ReconcilerApi {
         Arc::clone(&self.events)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reconciliation::dummy::DummyExecutorAdapter;
+    use crate::reconciliation::{Reconciler, ReconcilerConfig};
+
+    #[tokio::test]
+    async fn api_surface_reports_reconciler_state() {
+        let bridge = Arc::new(balansir_api::surface::ApiEventBridge::new(16));
+        let reconciler = Arc::new(Reconciler::new_with_api(
+            DesiredState::default(),
+            Arc::new(DummyExecutorAdapter::new()),
+            ReconcilerConfig::default(),
+            Arc::clone(&bridge),
+        ));
+        let api = ReconcilerApi::new(reconciler, Arc::new(SharedMetrics::new()), bridge);
+
+        // Initially empty desired.
+        let d = api.desired().await;
+        assert_eq!(d.rules.len(), 0);
+        assert!(api.fingerprint().await.is_none());
+        assert!(api.reconcile().await.is_ok());
+    }
+}

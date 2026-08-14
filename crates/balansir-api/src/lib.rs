@@ -79,10 +79,13 @@ pub struct DriftItemInfo {
     pub details: String,
 }
 
-/// Create API router
+/// Create API router.
+///
+/// The API lives under `/api`; the root serves the WebUI static build when
+/// `BALANSIR_WEBUI_DIR` points at a build directory (SPA fallback to
+/// index.html), otherwise a small JSON index.
 pub fn create_router(state: Arc<ApiState>) -> Router {
-    Router::new()
-        .route("/", get(index))
+    let api = Router::new()
         // Health & Status
         .route("/health", get(handlers::health))
         .route("/ready", get(handlers::ready))
@@ -112,7 +115,20 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .with_state(state.clone())
         // Token auth is opt-in: only enforced when BALANSIR_API_TOKEN is set,
         // so it does not break health probes or local unauthenticated installs.
-        .layer(middleware::from_fn_with_state(state, auth_middleware))
+        .layer(middleware::from_fn_with_state(state, auth_middleware));
+
+    let webui_dir = std::env::var("BALANSIR_WEBUI_DIR")
+        .ok()
+        .filter(|d| !d.is_empty());
+
+    match webui_dir {
+        Some(dir) => {
+            let svc =
+                tower_http::services::ServeDir::new(&dir).append_index_html_on_directories(true);
+            Router::new().nest("/api", api).fallback_service(svc)
+        }
+        None => Router::new().route("/", get(index)).nest("/api", api),
+    }
 }
 
 /// Index page
@@ -123,10 +139,10 @@ async fn index() -> impl IntoResponse {
         "endpoints": [
             "/health",
             "/metrics",
-            "/desired",
-            "/drift",
-            "/reconcile",
-            "/events"
+            "/api/desired",
+            "/api/drift",
+            "/api/reconcile",
+            "/api/events"
         ]
     }))
 }
@@ -202,14 +218,14 @@ mod tests {
         let client = reqwest::Client::new();
 
         let no_auth = client
-            .get(format!("http://{}/", addr))
+            .get(format!("http://{}/api/desired", addr))
             .send()
             .await
             .unwrap();
         assert_eq!(no_auth.status(), StatusCode::UNAUTHORIZED);
 
         let bad = client
-            .get(format!("http://{}/", addr))
+            .get(format!("http://{}/api/desired", addr))
             .bearer_auth("wrong")
             .send()
             .await
@@ -217,7 +233,7 @@ mod tests {
         assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
 
         let ok = client
-            .get(format!("http://{}/", addr))
+            .get(format!("http://{}/api/desired", addr))
             .bearer_auth("sekret")
             .send()
             .await
@@ -272,7 +288,7 @@ mod tests {
 
         // Desired reflects the configured rule and drivers.
         let resp = client
-            .get(format!("http://{}/desired", addr))
+            .get(format!("http://{}/api/desired", addr))
             .send()
             .await
             .unwrap();
@@ -283,7 +299,7 @@ mod tests {
 
         // Drivers list comes from desired config.
         let resp = client
-            .get(format!("http://{}/drivers", addr))
+            .get(format!("http://{}/api/drivers", addr))
             .send()
             .await
             .unwrap();
@@ -293,7 +309,7 @@ mod tests {
 
         // Reconcile actually converges: generation bumps and events are recorded.
         let resp = client
-            .post(format!("http://{}/reconcile", addr))
+            .post(format!("http://{}/api/reconcile", addr))
             .send()
             .await
             .unwrap();
@@ -301,7 +317,7 @@ mod tests {
         assert_eq!(body["ok"], true, "reconcile response: {body}");
 
         let resp = client
-            .get(format!("http://{}/events", addr))
+            .get(format!("http://{}/api/events", addr))
             .send()
             .await
             .unwrap();
@@ -352,7 +368,7 @@ mod tests {
         });
 
         let resp = client
-            .post(format!("http://{}/reload", addr))
+            .post(format!("http://{}/api/reload", addr))
             .json(&candidate)
             .send()
             .await
@@ -365,7 +381,7 @@ mod tests {
         );
 
         let resp = client
-            .get(format!("http://{}/desired", addr))
+            .get(format!("http://{}/api/desired", addr))
             .send()
             .await
             .unwrap();
