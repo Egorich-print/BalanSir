@@ -4,6 +4,7 @@ use crate::error::ControlResult;
 use crate::state::ExecutionReport;
 use async_trait::async_trait;
 use balansir_common::{ActualState, DesiredState, ReconciliationPlan, Snapshot};
+use std::sync::Arc;
 
 /// Provides the desired (target) state of the system.
 ///
@@ -55,6 +56,39 @@ pub trait EventSink: Send + Sync {
     async fn emit(&self, event: &crate::events::ControlEvent) -> ControlResult<()>;
 }
 
+/// Fans `emit` out to a set of attached sinks. Lets the daemon bridge
+/// coordinator events into the API event bus after construction, without
+/// rebuilding the coordinator with a different sink (one coordinator, one
+/// event path — background loop and API-triggered reconciles both emit).
+#[derive(Default)]
+pub struct DynamicEventSink {
+    inner: std::sync::Mutex<Vec<Arc<dyn EventSink>>>,
+}
+
+impl DynamicEventSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Attach an additional sink (e.g. the API `EventBridge`).
+    pub fn attach(&self, sink: Arc<dyn EventSink>) {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).push(sink);
+    }
+}
+
+#[async_trait]
+impl EventSink for DynamicEventSink {
+    async fn emit(&self, event: &crate::events::ControlEvent) -> ControlResult<()> {
+        // Clone under the lock, emit outside it: a slow/failed sink must not
+        // block other attaches, and the lock is never held across an await.
+        let sinks = self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for sink in sinks {
+            sink.emit(event).await?;
+        }
+        Ok(())
+    }
+}
+
 /// No-op event sink for when no observability is wired in.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopEventSink;
@@ -84,5 +118,43 @@ pub struct NoopRollback;
 impl Rollback for NoopRollback {
     async fn rollback(&self, _snapshot: &Snapshot) -> ControlResult<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::ControlEvent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct CountingSink(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl EventSink for CountingSink {
+        async fn emit(&self, _event: &ControlEvent) -> ControlResult<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A dynamic sink fans every event out to all attached sinks, including
+    /// ones attached after construction (the daemon's API-bridge wiring).
+    #[tokio::test]
+    async fn dynamic_sink_fans_out_to_attached_sinks() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let sink = DynamicEventSink::new();
+        sink.attach(Arc::new(CountingSink(Arc::clone(&first))));
+
+        let event = ControlEvent::ReconciliationRequested(crate::ReconcileReason::Scheduled);
+        sink.emit(&event).await.unwrap();
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+
+        // Attach after construction; the next emit reaches both.
+        sink.attach(Arc::new(CountingSink(Arc::clone(&second))));
+        sink.emit(&event).await.unwrap();
+        assert_eq!(first.load(Ordering::SeqCst), 2);
+        assert_eq!(second.load(Ordering::SeqCst), 1);
     }
 }

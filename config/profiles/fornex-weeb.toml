@@ -1,0 +1,43 @@
+[device]
+name = "Fornex Weeb VPS (199.68.199.68)"
+arch = "x86_64"
+ram_mb = 961
+cpu_cores = 1
+
+[runtime]
+flavor = "multi_thread"
+blocking_threads = 2
+
+[memory]
+daemon_rss_max_mb = 64
+executor_rss_max_mb = 32
+data_plane_rss_max_mb = 256
+event_bus_capacity = 512
+state_cache_mb = 16
+
+[drivers]
+max_active = 4
+default = "awg3-userspace"
+enabled = [
+    "xray-server",
+    "awg3-userspace",
+    "awg2-userspace",
+    "adguardhome"
+]
+
+[state]
+backend = "file"
+journal_capacity = 1024
+
+[updates]
+ab_slots = false
+boot_counter_max = 3
+
+[network]
+max_firewall_rules = 2048
+max_routes = 1024
+nftables_batch_size = 64
+
+[resources]
+max_fwmarks = 128
+max_route_tables = 64

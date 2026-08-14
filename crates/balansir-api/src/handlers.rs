@@ -31,10 +31,7 @@ pub async fn health() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
         "version": "0.1.0",
-        "uptime_seconds": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
+        "uptime_seconds": crate::uptime_seconds(),
     }))
 }
 

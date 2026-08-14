@@ -1,38 +1,71 @@
 use axum::{
     extract::{Request, State},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
+    response::Response,
+    routing::{delete, get, post},
+    Router,
+};
+use balansir_common::subsystems::{
+    SharedSubsystemSnapshot, SubsystemControl, SubsystemEvent,
 };
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio::net::TcpListener;
+
+/// Process uptime in seconds, cached from the first call.
+pub fn uptime_seconds() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs()
+}
 
 pub mod auth;
 pub mod control;
 pub mod handlers;
-pub mod surface;
+pub mod subsystems;
+pub mod webui;
 
 /// API state
 pub struct ApiState {
     pub metrics: Arc<balansir_common::metrics::SharedMetrics>,
-    pub api: Option<Arc<dyn crate::surface::ApiSurface>>,
+    pub control: Option<Arc<crate::control::ControlPlane>>,
     pub api_token: Option<Arc<str>>,
+    /// Subsystem (QoS / interfaces / Tailscale) control seam.
+    pub subsystems: Option<Arc<dyn SubsystemControl>>,
+    /// Live unified snapshot shared with the daemon managers.
+    pub subsystem_snapshot: Option<SharedSubsystemSnapshot>,
+    /// Subsystem event stream for SSE.
+    pub subsystem_events: Option<tokio::sync::broadcast::Sender<SubsystemEvent>>,
 }
 
 impl ApiState {
     pub fn new(metrics: Arc<balansir_common::metrics::SharedMetrics>) -> Self {
         Self {
             metrics,
-            api: None,
+            control: None,
             api_token: auth::token_from_env(),
+            subsystems: None,
+            subsystem_snapshot: None,
+            subsystem_events: None,
         }
     }
 
-    /// Install the live control-plane surface (the daemon's ReconcilerApi).
-    pub fn with_api(mut self, api: Arc<dyn crate::surface::ApiSurface>) -> Self {
-        self.api = Some(api);
+    /// Attach the subsystem manager wiring (daemon-side).
+    pub fn with_subsystems(
+        mut self,
+        control: Arc<dyn SubsystemControl>,
+        snapshot: SharedSubsystemSnapshot,
+        events: tokio::sync::broadcast::Sender<SubsystemEvent>,
+    ) -> Self {
+        self.subsystems = Some(control);
+        self.subsystem_snapshot = Some(snapshot);
+        self.subsystem_events = Some(events);
+        self
+    }
+
+    /// Attach the shared control plane (the daemon's reconciler coordinator).
+    pub fn with_control(mut self, control: Arc<crate::control::ControlPlane>) -> Self {
+        self.control = Some(control);
         self
     }
 }
@@ -79,13 +112,10 @@ pub struct DriftItemInfo {
     pub details: String,
 }
 
-/// Create API router.
-///
-/// The API lives under `/api`; the root serves the WebUI static build when
-/// `BALANSIR_WEBUI_DIR` points at a build directory (SPA fallback to
-/// index.html), otherwise a small JSON index.
+/// Create API router
 pub fn create_router(state: Arc<ApiState>) -> Router {
-    let api = Router::new()
+    Router::new()
+        .route("/", get(webui::root))
         // Health & Status
         .route("/health", get(handlers::health))
         .route("/ready", get(handlers::ready))
@@ -98,10 +128,8 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/desired", get(handlers::get_desired))
         .route("/desired", post(handlers::set_desired))
         .route("/actual", get(handlers::get_actual))
+        .route("/state", get(handlers::get_state))
         .route("/drift", get(handlers::get_drift))
-        .route("/plan", get(handlers::get_plan))
-        .route("/explain", get(handlers::get_explain))
-        .route("/fingerprint", get(handlers::get_fingerprint))
         // Drivers
         .route("/drivers", get(handlers::list_drivers))
         .route("/drivers/:id", get(handlers::get_driver))
@@ -112,62 +140,57 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         // Events
         .route("/events", get(handlers::get_events))
         .route("/events/stream", get(handlers::events_stream))
-        // Tailscale
-        .route("/tailscale/status", get(handlers::tailscale_status))
-        .route("/tailscale/up", post(handlers::tailscale_up))
-        .route("/tailscale/down", post(handlers::tailscale_down))
-        // QoS / traffic shaping
-        .route("/qos/status", get(handlers::qos_status))
-        // Path health
-        .route("/health/paths", get(handlers::path_health))
-        // Xray
-        .route("/xray/status", get(handlers::xray_status))
+        // Subsystems: QoS, interfaces, Tailscale, B4 (unified snapshot + SSE)
+        .route("/subsystems", get(subsystems::get_snapshot))
+        .route("/subsystems/events", get(subsystems::events_stream))
+        .route("/b4", get(subsystems::get_b4))
+        .route("/b4/pause", post(subsystems::set_b4_paused))
+        .route("/xray", get(subsystems::get_xray))
+        .route("/xray/pause", post(subsystems::set_xray_paused))
+        .route("/xray/select", post(subsystems::select_xray))
+        .route("/xray/rotate", post(subsystems::rotate_xray))
+        .route("/qos", get(subsystems::get_qos))
+        .route("/qos", post(subsystems::set_qos))
+        .route("/qos/:interface", delete(subsystems::remove_qos))
+        .route("/interfaces", get(subsystems::get_interfaces))
+        .route(
+            "/interfaces/:interface/mac",
+            post(subsystems::set_mac),
+        )
+        .route(
+            "/interfaces/:interface/mac/restore",
+            post(subsystems::restore_mac),
+        )
+        .route("/tailscale", get(subsystems::get_tailscale))
+        .route("/tailscale/up", post(subsystems::tailscale_up))
+        .route("/tailscale/down", post(subsystems::tailscale_down))
+        .route(
+            "/tailscale/reconnect",
+            post(subsystems::tailscale_reconnect),
+        )
+        .route(
+            "/tailscale/routes",
+            post(subsystems::tailscale_set_routes),
+        )
         .with_state(state.clone())
         // Token auth is opt-in: only enforced when BALANSIR_API_TOKEN is set,
         // so it does not break health probes or local unauthenticated installs.
-        .layer(middleware::from_fn_with_state(state, auth_middleware));
-
-    let webui_dir = std::env::var("BALANSIR_WEBUI_DIR")
-        .ok()
-        .filter(|d| !d.is_empty());
-
-    match webui_dir {
-        Some(dir) => {
-            let svc =
-                tower_http::services::ServeDir::new(&dir).append_index_html_on_directories(true);
-            Router::new().nest("/api", api).fallback_service(svc)
-        }
-        None => Router::new().route("/", get(index)).nest("/api", api),
-    }
+        .layer(middleware::from_fn_with_state(state, auth_middleware))
+        // Serve the built WebUI (Svelte SPA) when available; otherwise 404.
+        .fallback(webui::fallback)
 }
 
-/// Index page
-async fn index() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "name": "BalanSir API",
-        "version": "0.1.0",
-        "endpoints": [
-            "/health",
-            "/metrics",
-            "/api/desired",
-            "/api/drift",
-            "/api/reconcile",
-            "/api/events"
-        ]
-    }))
-}
-
-/// Start API server
-pub async fn start_server(state: Arc<ApiState>, port: u16) -> Result<(), String> {
+/// Start API server. `bind` is a `host:port` string (default loopback).
+/// The management API is never exposed on all interfaces out of the box —
+/// callers must explicitly opt into a non-loopback bind.
+pub async fn start_server(state: Arc<ApiState>, bind: &str) -> Result<(), String> {
     let app = create_router(state);
 
-    // Bind loopback by default; never expose the unauthenticated management
-    // API on all interfaces out of the box.
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+    let listener = TcpListener::bind(bind)
         .await
-        .map_err(|e| format!("Failed to bind: {}", e))?;
+        .map_err(|e| format!("Failed to bind {bind}: {e}"))?;
 
-    tracing::info!("API server listening on 127.0.0.1:{}", port);
+    tracing::info!("API server listening on {bind}");
 
     axum::serve(listener, app)
         .await
@@ -191,6 +214,24 @@ mod tests {
     use super::*;
     use axum::http::StatusCode;
 
+    /// GET with retries: the in-test server is spawned right before the first
+    /// request and under heavy parallel CI load the connect can transiently
+    /// fail; retry instead of panicking on a spurious network error.
+    async fn retry_get(url: &str) -> reqwest::Response {
+        let mut last = None;
+        for attempt in 0..5 {
+            match reqwest::get(url).await {
+                Ok(resp) => return resp,
+                Err(e) => {
+                    last = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt + 1)))
+                        .await;
+                }
+            }
+        }
+        panic!("GET {url} failed after retries: {last:?}");
+    }
+
     #[tokio::test]
     async fn test_index() {
         let state = Arc::new(ApiState::new(Arc::new(
@@ -205,7 +246,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+        let resp = retry_get(&format!("http://{}/", addr)).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let body: serde_json::Value = resp.json().await.unwrap();
@@ -228,14 +269,14 @@ mod tests {
         let client = reqwest::Client::new();
 
         let no_auth = client
-            .get(format!("http://{}/api/desired", addr))
+            .get(format!("http://{}/", addr))
             .send()
             .await
             .unwrap();
         assert_eq!(no_auth.status(), StatusCode::UNAUTHORIZED);
 
         let bad = client
-            .get(format!("http://{}/api/desired", addr))
+            .get(format!("http://{}/", addr))
             .bearer_auth("wrong")
             .send()
             .await
@@ -243,7 +284,7 @@ mod tests {
         assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
 
         let ok = client
-            .get(format!("http://{}/api/desired", addr))
+            .get(format!("http://{}/", addr))
             .bearer_auth("sekret")
             .send()
             .await
@@ -272,7 +313,6 @@ mod tests {
                 id: balansir_common::DriverId::Hysteria,
                 action: DriverAction::Start,
             }],
-            qos: Vec::new(),
         };
 
         let plane = ControlPlane::assemble(
@@ -286,7 +326,7 @@ mod tests {
         );
 
         let mut state = ApiState::new(Arc::new(balansir_common::metrics::SharedMetrics::new()));
-        state.api = Some(plane);
+        state.control = Some(plane);
         let app = create_router(Arc::new(state));
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -299,7 +339,7 @@ mod tests {
 
         // Desired reflects the configured rule and drivers.
         let resp = client
-            .get(format!("http://{}/api/desired", addr))
+            .get(format!("http://{}/desired", addr))
             .send()
             .await
             .unwrap();
@@ -310,17 +350,17 @@ mod tests {
 
         // Drivers list comes from desired config.
         let resp = client
-            .get(format!("http://{}/api/drivers", addr))
+            .get(format!("http://{}/drivers", addr))
             .send()
             .await
             .unwrap();
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["count"], 1, "drivers: {body}");
-        assert_eq!(body["drivers"][0]["name"], "hysteria");
+        assert_eq!(body["drivers"][0]["name"], "Hysteria");
 
         // Reconcile actually converges: generation bumps and events are recorded.
         let resp = client
-            .post(format!("http://{}/api/reconcile", addr))
+            .post(format!("http://{}/reconcile", addr))
             .send()
             .await
             .unwrap();
@@ -328,14 +368,16 @@ mod tests {
         assert_eq!(body["ok"], true, "reconcile response: {body}");
 
         let resp = client
-            .get(format!("http://{}/api/events", addr))
+            .get(format!("http://{}/events", addr))
             .send()
             .await
             .unwrap();
         let body: serde_json::Value = resp.json().await.unwrap();
-        // Events endpoint is reachable (snapshot may be empty on the
-        // coordinator-backed plane; live events come via the daemon's bridge).
-        assert!(body["events"].is_array());
+        let events = body["events"].as_array().unwrap();
+        assert!(
+            events.iter().any(|e| e["event_type"] == "reconciled"),
+            "missing reconciled event in {events:?}"
+        );
     }
 
     #[tokio::test]
@@ -361,7 +403,7 @@ mod tests {
         );
 
         let mut state = ApiState::new(Arc::new(balansir_common::metrics::SharedMetrics::new()));
-        state.api = Some(plane);
+        state.control = Some(plane);
         let app = create_router(Arc::new(state));
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -379,7 +421,7 @@ mod tests {
         });
 
         let resp = client
-            .post(format!("http://{}/api/reload", addr))
+            .post(format!("http://{}/reload", addr))
             .json(&candidate)
             .send()
             .await
@@ -392,7 +434,7 @@ mod tests {
         );
 
         let resp = client
-            .get(format!("http://{}/api/desired", addr))
+            .get(format!("http://{}/desired", addr))
             .send()
             .await
             .unwrap();

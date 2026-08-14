@@ -46,37 +46,40 @@ impl Metrics {
     pub fn new() -> Self {
         let mut registry = Registry::default();
 
+        // Counter names are registered WITHOUT the `_total` suffix: the
+        // Prometheus text encoder appends it for counter metrics, so adding it
+        // here would emit `balansir_reconciliations_total_total`.
         let reconciliations_total = Counter::default();
         registry.register(
-            "balansir_reconciliations_total",
+            "balansir_reconciliations",
             "Total number of reconciliation cycles",
             reconciliations_total.clone(),
         );
 
         let reconciliation_failures_total = Counter::default();
         registry.register(
-            "balansir_reconciliation_failures_total",
+            "balansir_reconciliation_failures",
             "Total number of failed reconciliation cycles",
             reconciliation_failures_total.clone(),
         );
 
         let drift_items_total = Counter::default();
         registry.register(
-            "balansir_drift_items_total",
+            "balansir_drift_items",
             "Total number of drift items detected",
             drift_items_total.clone(),
         );
 
         let executor_operations_total = Counter::default();
         registry.register(
-            "balansir_executor_operations_total",
+            "balansir_executor_operations",
             "Total number of executor operations",
             executor_operations_total.clone(),
         );
 
         let policy_evaluations_total = Counter::default();
         registry.register(
-            "balansir_policy_evaluations_total",
+            "balansir_policy_evaluations",
             "Total number of policy evaluations",
             policy_evaluations_total.clone(),
         );
@@ -296,6 +299,10 @@ mod tests {
         let output = metrics.encode_metrics();
         assert!(output.contains("balansir_reconciliations_total"));
         assert!(output.contains("# TYPE"));
+        assert!(
+            !output.contains("_total_total"),
+            "counter names must not double-suffix: {output}"
+        );
     }
 
     #[test]

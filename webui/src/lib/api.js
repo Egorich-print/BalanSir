@@ -1,56 +1,115 @@
-// BalanSir API client (WebUI -> daemon REST/SSE).
-// All calls go through the vite proxy /api -> http://localhost:8080.
+// Thin client for the BalanSir REST API. All system logic lives in the Rust
+// daemon; this file only maps HTTP/SSE to JS-friendly shapes.
+//
+// `VITE_BALANSIR_API_BASE` lets the Tauri desktop console (embedded SPA)
+// point at a daemon without a same-origin webserver; the daemon-served build
+// keeps the default '' (same origin).
 
-const BASE = '/api';
+const BASE =
+  (typeof import.meta !== 'undefined' &&
+    import.meta.env &&
+    import.meta.env.VITE_BALANSIR_API_BASE) ||
+  '';
 
-async function get(path) {
-  const resp = await fetch(`${BASE}${path}`);
-  if (!resp.ok) throw new Error(`${path}: ${resp.status}`);
-  return resp.json();
+let token = (typeof localStorage !== 'undefined' && localStorage.getItem('balansir_token')) || '';
+
+export function setToken(value) {
+  token = value || '';
+  if (typeof localStorage !== 'undefined') {
+    if (token) localStorage.setItem('balansir_token', token);
+    else localStorage.removeItem('balansir_token');
+  }
 }
 
-async function post(path, body) {
-  const resp = await fetch(`${BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+export function getToken() {
+  return token;
+}
+
+async function req(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(BASE + path, { headers, ...options });
   if (!resp.ok) {
-    const data = await resp.json().catch(() => ({}));
-    throw new Error(data.error || `${path}: ${resp.status}`);
+    const text = await resp.text().catch(() => '');
+    throw new Error(`${resp.status} ${resp.statusText}: ${text.slice(0, 300)}`);
   }
-  return resp.json();
+  const ct = resp.headers.get('content-type') || '';
+  return ct.includes('application/json') ? resp.json() : resp.text();
 }
 
 export const api = {
-  health: () => get('/health'),
-  metrics: () => get('/metrics'),
-  desired: () => get('/desired'),
-  actual: () => get('/actual'),
-  drift: () => get('/drift'),
-  plan: () => get('/plan'),
-  explain: () => get('/explain'),
-  fingerprint: () => get('/fingerprint'),
-  drivers: () => get('/drivers'),
-  events: () => get('/events'),
-  reconcile: () => post('/reconcile'),
-  setDesired: (state) => post('/desired', state),
-  tailscaleStatus: () => get('/tailscale/status'),
-  tailscaleUp: () => post('/tailscale/up'),
-  tailscaleDown: () => post('/tailscale/down'),
-  qosStatus: () => get('/qos/status'),
-  pathHealth: () => get('/health/paths'),
-  xrayStatus: () => get('/xray/status'),
+  health: () => req('/health'),
+  desired: () => req('/desired'),
+  actual: () => req('/actual'),
+  state: () => req('/state'),
+  reconcile: () => req('/reconcile', { method: 'POST' }),
+  metrics: () => req('/metrics'),
+  events: () => req('/events'),
+
+  subsystems: () => req('/subsystems'),
+  b4: () => req('/b4'),
+  setB4Paused: (paused) =>
+    req('/b4/pause', { method: 'POST', body: JSON.stringify({ paused }) }),
+
+  xray: () => req('/xray'),
+  setXrayPaused: (paused) =>
+    req('/xray/pause', { method: 'POST', body: JSON.stringify({ paused }) }),
+  xraySelect: (profile) =>
+    req('/xray/select', {
+      method: 'POST',
+      body: JSON.stringify({ profile }),
+    }),
+  xrayRotate: () => req('/xray/rotate', { method: 'POST' }),
+
+  qos: () => req('/qos'),
+  setQos: (interfaces) =>
+    req('/qos', { method: 'POST', body: JSON.stringify({ interfaces }) }),
+  removeQos: (interfaceName) =>
+    req(`/qos/${encodeURIComponent(interfaceName)}`, { method: 'DELETE' }),
+
+  interfaces: () => req('/interfaces'),
+  restoreMac: (mac) =>
+    req(`/interfaces/${encodeURIComponent(mac)}/mac/restore`, {
+      method: 'POST',
+    }),
+  setMac: (mac, newMac) =>
+    req(`/interfaces/${encodeURIComponent(mac)}/mac`, {
+      method: 'POST',
+      body: JSON.stringify({ mac: newMac }),
+    }),
+
+  tailscale: () => req('/tailscale'),
+  tailscaleUp: (authKey) =>
+    req('/tailscale/up', {
+      method: 'POST',
+      body: JSON.stringify({ auth_key: authKey || null }),
+    }),
+  tailscaleDown: () => req('/tailscale/down', { method: 'POST' }),
+  tailscaleReconnect: () => req('/tailscale/reconnect', { method: 'POST' }),
+  tailscaleRoutes: (routes, exitNode) =>
+    req('/tailscale/routes', {
+      method: 'POST',
+      body: JSON.stringify({ routes, exit_node: exitNode }),
+    }),
 };
 
-export function eventsStream(onEvent, onStatus) {
-  const es = new EventSource(`${BASE}/events/stream`);
-  es.onmessage = (e) => {
-    try {
-      onEvent(JSON.parse(e.data));
-    } catch (_) { /* ignore malformed */ }
-  };
-  es.onopen = () => onStatus?.(true);
-  es.onerror = () => onStatus?.(false);
-  return es;
+export function subsystemEventUrl() {
+  return BASE + '/subsystems/events';
+}
+
+export function fmtBytes(n) {
+  if (n == null) return '—';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let i = 0;
+  let v = Number(n);
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+export function fmtRate(bytesPerSec) {
+  if (bytesPerSec == null) return '—';
+  return `${fmtBytes(bytesPerSec)}/s`;
 }

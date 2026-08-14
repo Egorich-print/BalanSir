@@ -1,448 +1,198 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { api, eventsStream } from './lib/api.js';
+  import { api, subsystemEventUrl, setToken, getToken } from './lib/api.js';
+  import { systemStatus } from './lib/status.js';
+  import StatusBadge from './components/StatusBadge.svelte';
+
+  import Dashboard from './views/Dashboard.svelte';
+  import Network from './views/Network.svelte';
+  import Qos from './views/Qos.svelte';
+  import B4 from './views/B4.svelte';
+  import Xray from './views/Xray.svelte';
+  import Tailscale from './views/Tailscale.svelte';
+  import Policy from './views/Policy.svelte';
+  import Events from './views/Events.svelte';
+  import Diagnostics from './views/Diagnostics.svelte';
+
+  export let view = 'dashboard';
 
   let health = null;
-  let desired = null;
-  let actual = null;
-  let drift = null;
-  let plan = null;
-  let explain = null;
-  let fingerprint = null;
-  let metricsText = '';
-  let events = [];
-  let connected = false;
-  let error = null;
-  let tab = 'overview';
-  let reloading = false;
-  let tailscale = null;
-  let tsBusy = false;
-  let tsError = null;
-  let qos = null;
-  let paths = [];
-  let xray = null;
-
-  let pollTimer = null;
+  let snapshot = null;
+  let healthError = null;
+  let sseState = 'connecting';
   let es = null;
+  let reconnectDelay = 1000;
+  let lastEventAt = null;
+  let refreshTimer = null;
+  let tokenInput = getToken();
+  $: unauthorized = (healthError || '').includes('401');
 
-  function statusClass() {
-    if (!health) return 'unknown';
-    if (health.status === 'ok') return 'healthy';
-    if (health.status === 'error') return 'error';
-    return 'degraded';
+  function saveToken() {
+    setToken(tokenInput);
+    refreshAll();
   }
 
-  function overallState() {
-    // Human-readable overall state: healthy / degraded / blocked.
-    const hasDrift = drift && drift.drift_count > 0;
-    const rulesOk = desired && actual && desired.rule_count > 0
-      && desired.rule_count >= actual.rule_count;
-    if (health?.status === 'error') return { label: 'Blocked', cls: 'error' };
-    if (hasDrift) return { label: 'Degraded', cls: 'degraded' };
-    if (rulesOk) return { label: 'Healthy', cls: 'healthy' };
-    return { label: 'Recovering', cls: 'degraded' };
-  }
+  const views = [
+    { id: 'dashboard', label: 'Dashboard', component: Dashboard },
+    { id: 'network', label: 'Network', component: Network },
+    { id: 'policy', label: 'Policy', component: Policy },
+    { id: 'qos', label: 'QoS', component: Qos },
+    { id: 'b4', label: 'B4', component: B4 },
+    { id: 'xray', label: 'Xray', component: Xray },
+    { id: 'tailscale', label: 'Tailscale', component: Tailscale },
+    { id: 'events', label: 'Events', component: Events },
+    { id: 'diagnostics', label: 'Diagnostics', component: Diagnostics },
+  ];
 
-  async function refresh() {
-    try {
-      const results = await Promise.allSettled([
-        api.health(), api.desired(), api.actual(), api.drift(),
-        api.plan(), api.explain(), api.fingerprint(),
-      ]);
-      [health, desired, actual, drift, plan, explain, fingerprint] = results.map(
-        (r) => (r.status === 'fulfilled' ? r.value : null)
-      );
-      error = null;
-    } catch (e) {
-      error = e.message;
-    }
-    try {
-      const ts = await api.tailscaleStatus();
-      tailscale = ts;
-      tsError = ts.error || null;
-    } catch (e) {
-      tailscale = null;
-      tsError = e.message;
-    }
-    try {
-      qos = await api.qosStatus();
-    } catch (e) {
-      qos = null;
-    }
-    try {
-      paths = await api.pathHealth();
-    } catch (e) {
-      paths = [];
-    }
-    try {
-      xray = await api.xrayStatus();
-    } catch (e) {
-      xray = null;
-    }
-    try {
-      const resp = await fetch('/api/metrics');
-      metricsText = await resp.text();
-    } catch (_) { /* metrics optional */ }
-  }
+  $: overall = systemStatus(snapshot, health);
+  $: activeView = views.find((v) => v.id === view);
 
-  async function doReconcile() {
-    reloading = true;
+  async function refreshAll() {
     try {
-      await api.reconcile();
-      await refresh();
+      health = await api.health();
+      healthError = null;
     } catch (e) {
-      error = e.message;
-    } finally {
-      reloading = false;
+      healthError = e.message;
+    }
+    try {
+      snapshot = await api.subsystems();
+    } catch (e) {
+      healthError = healthError || `subsystems: ${e.message}`;
     }
   }
 
-  async function tsUp() {
-    tsBusy = true;
-    try {
-      await api.tailscaleUp();
-      await refresh();
-    } catch (e) {
-      tsError = e.message;
-    } finally {
-      tsBusy = false;
-    }
-  }
-
-  async function tsDown() {
-    tsBusy = true;
-    try {
-      await api.tailscaleDown();
-      await refresh();
-    } catch (e) {
-      tsError = e.message;
-    } finally {
-      tsBusy = false;
-    }
+  function connectSSE() {
+    es = new EventSource(subsystemEventUrl());
+    es.onopen = () => {
+      sseState = 'connected';
+      reconnectDelay = 1000;
+    };
+    es.onmessage = () => {
+      lastEventAt = new Date();
+      refreshAll();
+    };
+    es.onerror = () => {
+      sseState = 'disconnected';
+      es.close();
+      setTimeout(connectSSE, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+    };
   }
 
   onMount(() => {
-    refresh();
-    pollTimer = setInterval(refresh, 5000);
-    es = eventsStream(
-      (ev) => { events = [ev, ...events].slice(0, 100); },
-      (ok) => { connected = ok; }
-    );
+    refreshAll();
+    connectSSE();
+    refreshTimer = setInterval(() => {
+      if (Date.now() - (lastEventAt ? lastEventAt.getTime() : 0) > 15000) {
+        refreshAll();
+      }
+    }, 10000);
   });
 
   onDestroy(() => {
-    if (pollTimer) clearInterval(pollTimer);
     if (es) es.close();
+    if (refreshTimer) clearInterval(refreshTimer);
   });
 </script>
 
 <main>
-  <h1>🛡️ BalanSir — Network Control</h1>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🛡️</span>
+      <div>
+        <h1>BalanSir</h1>
+        <p class="subtitle">
+          Network policy &amp; control platform
+          {#if health}
+            <span class="ver">v{health.version}</span>
+          {/if}
+        </p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="sse {sseState}">● SSE {sseState}</span>
+      <StatusBadge status={overall.status} title={overall.title} />
+    </div>
+  </header>
 
-  {#if error}
-    <div class="banner error">{error}</div>
+  {#if healthError}
+    <div class="banner banner-error">
+      ⚠ API unreachable — {healthError}
+      <button on:click={refreshAll}>Retry</button>
+    </div>
   {/if}
 
-  <div class="state-row">
-    <div class="state-card {overallState().cls}">
-      <div class="state-label">Network state</div>
-      <div class="state-value">{overallState().label}</div>
+  {#if unauthorized}
+    <div class="banner banner-error token-banner">
+      <label>API token
+        <input type="password" bind:value={tokenInput} placeholder="bearer token" />
+      </label>
+      <button on:click={saveToken}>Save</button>
+      <span class="hint">Stored in your browser only; used for API requests.</span>
     </div>
-    <div class="state-card">
-      <div class="state-label">Health</div>
-      <div class="state-value">{health ? health.status : '…'}</div>
-    </div>
-    <div class="state-card">
-      <div class="state-label">Drift</div>
-      <div class="state-value">{drift ? drift.drift_count : '…'}</div>
-    </div>
-    <div class="state-card">
-      <div class="state-label">Rules (desired/actual)</div>
-      <div class="state-value">
-        {desired ? desired.rule_count : '…'} / {actual ? actual.rule_count : '…'}
-      </div>
-    </div>
-    <div class="state-card">
-      <div class="state-label">Config fingerprint</div>
-      <div class="state-value mono">
-        {fingerprint ? Number(fingerprint.fingerprint ?? fingerprint).toString(16).slice(0, 10) : '…'}
-      </div>
-    </div>
-    <div class="state-card">
-      <div class="state-label">SSE</div>
-      <div class="state-value">{connected ? '🟢 live' : '🔴 offline'}</div>
-    </div>
-  </div>
+  {/if}
 
   <nav class="tabs">
-    <button class:active={tab === 'overview'} on:click={() => tab = 'overview'}>Overview</button>
-    <button class:active={tab === 'policy'} on:click={() => tab = 'policy'}>Policy</button>
-    <button class:active={tab === 'qos'} on:click={() => tab = 'qos'}>QoS</button>
-    <button class:active={tab === 'xray'} on:click={() => tab = 'xray'}>Xray</button>
-    <button class:active={tab === 'tailscale'} on:click={() => tab = 'tailscale'}>Tailscale</button>
-    <button class:active={tab === 'events'} on:click={() => tab = 'events'}>Events</button>
-    <button class:active={tab === 'metrics'} on:click={() => tab = 'metrics'}>Metrics</button>
+    {#each views as v}
+      <button class:active={view === v.id} on:click={() => (view = v.id)}>
+        {v.label}
+      </button>
+    {/each}
   </nav>
 
-  {#if tab === 'overview'}
-    <section>
-      <div class="grid">
-        <div class="card">
-          <h2>Path health</h2>
-          {#if paths.length === 0}
-            <p>No path telemetry yet (daemon probing).</p>
-          {:else}
-            {#each paths as p}
-              <div class="path-row {p.state}">
-                <span class="path-name">{p.path}</span>
-                <span class="path-state">{p.state}</span>
-                <span class="path-reason">{p.reason}</span>
-              </div>
-            {/each}
-          {/if}
-        </div>
-
-        <div class="card">
-          <h2>Desired state</h2>
-          {#if desired}
-            <p><strong>Rules:</strong> {desired.rule_count}</p>
-            <p><strong>Drivers:</strong> {desired.drivers}</p>
-            <ul>
-              {#each desired.rules as rule}
-                <li>#{rule.id} — {rule.action} <span class="prio">P{rule.priority}</span></li>
-              {/each}
-            </ul>
-          {:else}<p>Loading…</p>{/if}
-          <button on:click={doReconcile} disabled={reloading}>
-            {reloading ? 'Reconciling…' : '🔄 Reconcile now'}
-          </button>
-        </div>
-
-        <div class="card">
-          <h2>Actual (kernel)</h2>
-          {#if actual}
-            <p><strong>Active rules:</strong> {actual.rule_count}</p>
-            <ul>
-              {#each actual.active_rules as rule}
-                <li>#{rule.id} — {rule.action}</li>
-              {/each}
-            </ul>
-          {:else}<p>Loading…</p>{/if}
-        </div>
-
-        <div class="card">
-          <h2>Drift</h2>
-          {#if drift}
-            {#if drift.items.length === 0}
-              <p class="healthy">No drift — desired matches actual.</p>
-            {:else}
-              {#each drift.items as item}
-                <div class="drift-item">
-                  <strong>#{item.rule_id}</strong> {item.kind}: {item.details}
-                </div>
-              {/each}
-            {/if}
-          {:else}<p>Loading…</p>{/if}
-        </div>
-
-        <div class="card">
-          <h2>Reconciliation plan</h2>
-          <pre>{plan ? plan.plan : 'Loading…'}</pre>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>Explain</h2>
-        <pre>{explain ? explain.explain : 'Loading…'}</pre>
-      </div>
-    </section>
-  {/if}
-
-  {#if tab === 'policy'}
-    <section>
-      <div class="card">
-        <h2>Policy rules</h2>
-        {#if desired}
-          <table>
-            <thead><tr><th>ID</th><th>Action</th><th>Priority</th><th>Flow</th></tr></thead>
-            <tbody>
-              {#each desired.rules as rule}
-                <tr>
-                  <td>#{rule.id}</td>
-                  <td>{rule.action}</td>
-                  <td>{rule.priority}</td>
-                  <td class="mono">{JSON.stringify(rule.flow)}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {:else}<p>Loading…</p>{/if}
-      </div>
-      <div class="card">
-        <h2>Explain</h2>
-        <pre>{explain ? explain.explain : 'Loading…'}</pre>
-      </div>
-    </section>
-  {/if}
-
-  {#if tab === 'events'}
-    <section>
-      <div class="card">
-        <h2>Event stream {connected ? '🟢' : '🔴'}</h2>
-        {#if events.length === 0}<p>No events yet.</p>{/if}
-        {#each events as event}
-          <div class="event">
-            <span class="e-type">{event.event_type}</span>
-            <span class="e-details">{event.details}</span>
-            <span class="e-time">{new Date(event.timestamp * 1000).toLocaleTimeString()}</span>
-          </div>
-        {/each}
-      </div>
-    </section>
-  {/if}
-
-  {#if tab === 'qos'}
-    <section>
-      <div class="card">
-        <h2>QoS / Traffic shaping</h2>
-        {#if qos}
-          <h3>Desired plans</h3>
-          {#if (qos.desired || []).length === 0}
-            <p>No shaping desired.</p>
-          {:else}
-            {#each qos.desired as plan}
-              <div class="qos-plan">
-                <b>{plan.interface}</b>
-                <span>default {Math.round((plan.default_rate_bits || 0) / 1000)} kbit / ceil {Math.round((plan.default_ceil_bits || 0) / 1000)} kbit</span>
-                <span class="qos-classes">
-                  {#each plan.classes as c}
-                    <span class="qos-class">class {c.class_id}: {Math.round(c.rate_bits / 1000)} kbit ({Math.round(c.ceil_bits / 1000)} ceil)</span>
-                  {/each}
-                </span>
-              </div>
-            {/each}
-          {/if}
-          <h3>Applied on</h3>
-          {#if (qos.applied || []).length === 0}
-            <p>No interfaces currently shaped.</p>
-          {:else}
-            {#each qos.applied as iface}<span class="qos-applied">{iface}</span>{/each}
-          {/if}
-        {:else}
-          <p>QoS status unavailable.</p>
-        {/if}
-      </div>
-    </section>
-  {/if}
-
-  {#if tab === 'xray'}
-    <section>
-      <div class="card">
-        <h2>Xray (proxy path)</h2>
-        {#if xray}
-          <div class="ts-grid">
-            <div class="ts-item"><span>Installed</span><b>{xray.installed ? 'yes' : 'no'}</b></div>
-            <div class="ts-item"><span>Running</span><b>{xray.running ? 'yes' : 'no'}</b></div>
-          </div>
-          {#if !xray.installed}
-            <p class="error">xray binary not found. Install it to enable the proxy path.</p>
-          {/if}
-        {:else}
-          <p>Xray status unavailable.</p>
-        {/if}
-      </div>
-    </section>
-  {/if}
-
-  {#if tab === 'tailscale'}
-    <section>
-      <div class="card">
-        <h2>Tailscale</h2>
-        {#if tailscale}
-          <div class="ts-grid">
-            <div class="ts-item"><span>Installed</span><b>{tailscale.installed ? 'yes' : 'no'}</b></div>
-            <div class="ts-item"><span>Backend</span><b>{tailscale.backend_state || '—'}</b></div>
-            <div class="ts-item"><span>Node IP</span><b>{tailscale.self_ip || '—'}</b></div>
-            <div class="ts-item"><span>Hostname</span><b>{tailscale.hostname || '—'}</b></div>
-            <div class="ts-item"><span>Peers</span><b>{tailscale.peers ?? '—'}</b></div>
-            <div class="ts-item"><span>Version</span><b>{tailscale.version || '—'}</b></div>
-          </div>
-          {#if tsError}
-            <p class="error">{tsError}</p>
-          {/if}
-          <div class="ts-actions">
-            <button on:click={tsUp} disabled={tsBusy}>⬆ Up (login flow)</button>
-            <button on:click={tsDown} disabled={tsBusy}>⬇ Down</button>
-          </div>
-        {:else}
-          <p>Tailscale not available (daemon offline or not installed).</p>
-        {/if}
-      </div>
-    </section>
-  {/if}
-
-  {#if tab === 'metrics'}
-    <section>
-      <div class="card">
-        <h2>Metrics (Prometheus)</h2>
-        <pre class="metrics">{metricsText || 'Loading…'}</pre>
-      </div>
-    </section>
-  {/if}
-
-  <div class="footer">BalanSir v0.1.0 · operational console</div>
+  <section class="content">
+    <svelte:component this={activeView.component}
+      {health}
+      {snapshot}
+      {overall}
+      {healthError}
+      {sseState}
+    />
+  </section>
 </main>
 
 <style>
-  main { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    max-width: 1200px; margin: 0 auto; padding: 20px; background: #1a1a2e; color: #eee; min-height: 100vh; }
-  h1 { text-align: center; color: #4ecdc4; margin-bottom: 20px; }
-  .banner { padding: 10px; border-radius: 8px; margin-bottom: 10px; }
-  .banner.error { background: #5c2e2e; color: #ff6b6b; }
-  .state-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
-  .state-card { background: #16213e; border-radius: 12px; padding: 16px; border: 1px solid #0f3460; text-align: center; }
-  .state-label { font-size: 0.8em; color: #888; text-transform: uppercase; }
-  .state-value { font-size: 1.3em; font-weight: bold; margin-top: 4px; }
-  .mono { font-family: ui-monospace, Menlo, monospace; }
-  .healthy { color: #4ecdc4; }
-  .degraded { color: #f1c40f; }
-  .error { color: #ff6b6b; }
-  .unknown { color: #888; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
-  .tabs button { background: #16213e; border: 1px solid #0f3460; color: #aaa; padding: 8px 16px; border-radius: 8px; cursor: pointer; }
-  .tabs button.active { background: #4ecdc4; color: #1a1a2e; font-weight: bold; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 16px; }
-  .card { background: #16213e; border-radius: 12px; padding: 16px; border: 1px solid #0f3460; margin-bottom: 16px; }
-  .card h2 { color: #4ecdc4; margin-top: 0; font-size: 1.1em; }
-  .prio { background: #0f3460; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; margin-left: 8px; }
-  .drift-item { padding: 6px; border-bottom: 1px solid #0f3460; font-size: 0.9em; }
-  pre { background: #0f3460; padding: 10px; border-radius: 8px; overflow-x: auto; font-size: 0.8em; max-height: 300px; overflow-y: auto; }
-  pre.metrics { max-height: 400px; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #0f3460; font-size: 0.9em; }
-  th { color: #4ecdc4; }
-  button { background: #4ecdc4; color: #1a1a2e; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; margin-top: 8px; }
-  button:hover { background: #45b7d1; }
-  button:disabled { opacity: 0.6; cursor: default; }
-  .event { padding: 8px; border-bottom: 1px solid #0f3460; font-size: 0.9em; }
-  .e-type { font-weight: bold; color: #4ecdc4; margin-right: 8px; }
-  .e-time { float: right; color: #888; font-size: 0.8em; }
-  .ts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
-  .ts-item { background: #0f3460; border-radius: 8px; padding: 10px; }
-  .ts-item span { display: block; font-size: 0.8em; color: #888; }
-  .ts-item b { font-size: 1.1em; }
-  .ts-actions { display: flex; gap: 10px; }
-  .qos-plan { background: #0f3460; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
-  .qos-plan b { display: block; margin-bottom: 4px; }
-  .qos-classes { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
-  .qos-class, .qos-applied { background: #1a237e; border-radius: 6px; padding: 4px 8px; font-size: 0.85em; }
-  .qos-applied { background: #2e7d32; margin-right: 6px; }
-  .path-row { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid #0f3460; }
-  .path-name { font-weight: bold; min-width: 90px; }
-  .path-state { text-transform: capitalize; font-weight: bold; min-width: 90px; }
-  .path-row.healthy .path-state { color: #4ecdc4; }
-  .path-row.degraded .path-state, .path-row.degrading .path-state { color: #ffb74d; }
-  .path-row.unknown .path-state { color: #888; }
-  .path-reason { color: #aaa; font-size: 0.85em; }
-  .footer { text-align: center; margin-top: 30px; color: #666; font-size: 0.9em; }
+  :global(body) {
+    margin: 0;
+    background: #0f1524;
+    color: #e8ecf4;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 60px; }
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #1f2a44;
+  }
+  .brand { display: flex; gap: 12px; align-items: center; }
+  .logo { font-size: 28px; }
+  h1 { margin: 0; font-size: 1.4rem; color: #4ecdc4; }
+  .subtitle { margin: 0; color: #7a8aa5; font-size: 0.85rem; }
+  .ver { color: #4a5a75; margin-left: 6px; }
+  .topbar-right { display: flex; align-items: center; gap: 14px; }
+  .sse { font-size: 0.75rem; color: #7a8aa5; }
+  .sse.connected { color: #4cd07d; }
+  .sse.disconnected { color: #ff6b6b; }
+  .banner {
+    margin: 12px 0; padding: 10px 14px; border-radius: 8px; font-size: 0.9rem;
+  }
+  .banner-error { background: #3a1513; color: #ff9c9c; }
+  .token-banner { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .token-banner label { display: flex; gap: 8px; align-items: center; font-size: 0.85rem; }
+  .token-banner input { background: #0f1524; color: #e8ecf4; border: 1px solid #4a1210; border-radius: 6px; padding: 6px 10px; }
+  .token-banner .hint { color: #7a8aa5; font-size: 0.75rem; }
+  .tabs {
+    display: flex; gap: 4px; margin: 14px 0; flex-wrap: wrap;
+  }
+  .tabs button {
+    background: transparent; color: #9fb0cc; border: 1px solid #1f2a44;
+    padding: 7px 16px; border-radius: 8px; cursor: pointer; font-size: 0.9rem;
+  }
+  .tabs button:hover { border-color: #3a4a6a; }
+  .tabs button.active {
+    background: #123b2a; color: #4cd07d; border-color: #1e5c3d;
+  }
+  .content { margin-top: 8px; }
 </style>

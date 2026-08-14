@@ -123,6 +123,8 @@ pub struct B4Engine {
     flows: std::collections::HashMap<String, FlowContext>,
     /// Last emitted decision per flow (for `explain`-style introspection).
     last_decisions: std::collections::HashMap<String, B4Decision>,
+    /// Last host-stack observation per flow (for health introspection).
+    last_observations: std::collections::HashMap<String, B4Observation>,
 }
 
 impl B4Engine {
@@ -141,6 +143,7 @@ impl B4Engine {
             config,
             flows: std::collections::HashMap::new(),
             last_decisions: std::collections::HashMap::new(),
+            last_observations: std::collections::HashMap::new(),
         }
     }
 
@@ -155,6 +158,11 @@ impl B4Engine {
     /// The last decision for a flow (introspection / explain).
     pub fn last_decision(&self, flow: &str) -> Option<&B4Decision> {
         self.last_decisions.get(flow)
+    }
+
+    /// The last host-stack observation for a flow (health introspection).
+    pub fn last_observation(&self, flow: &str) -> Option<&B4Observation> {
+        self.last_observations.get(flow)
     }
 
     /// The number of distinct flows the engine is tracking.
@@ -232,6 +240,7 @@ impl B4Engine {
         events.append(&mut decision_events);
         self.last_decisions
             .insert(flow.to_string(), decision.clone());
+        self.last_observations.insert(flow.to_string(), obs);
         (decision, events)
     }
 

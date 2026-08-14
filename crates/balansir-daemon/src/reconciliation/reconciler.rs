@@ -8,14 +8,13 @@ use crate::reconciliation::{ReconciliationError, ReconciliationResult};
 use balansir_common::plan::ReconciliationPlan;
 use balansir_common::{
     ActionRequest, ActionResult, ActualRule, ActualState, DesiredRule, DesiredState, PathMtu,
-    QosPlan, QosState,
 };
 use balansir_control::planner::BasicPlanner;
 use balansir_control::snapshot_store::MemorySnapshotStore;
-use balansir_control::traits::{Executor, Planner};
+use balansir_control::traits::{DesiredProvider, DynamicEventSink, EventSink, Executor, Planner, StateProvider};
 use balansir_control::{Coordinator, CoordinatorConfig, ReconcileReason};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Reconciliation loop for maintaining desired state.
 ///
@@ -32,6 +31,13 @@ pub struct Reconciler {
     actual_state: Arc<tokio::sync::Mutex<ActualState>>,
     config: ReconcilerConfig,
     coordinator: Arc<Coordinator>,
+    /// Coordinator event fan-out; the API bridge (and any other observer) can
+    /// attach after construction without rebuilding the coordinator.
+    events: Arc<DynamicEventSink>,
+    /// Shared desired-state provider (the same handle the coordinator reads).
+    desired_provider: Arc<dyn DesiredProvider>,
+    /// Shared actual-state provider (the same handle the coordinator reads).
+    actual_provider: Arc<dyn StateProvider>,
     runner: Arc<DaemonExecutorAdapter>,
     /// Raw mechanism adapter, retained so the daemon can query the executor's
     /// kernel inventory (A2, non-authoritative) and reconcile orphans.
@@ -51,10 +57,6 @@ pub struct Reconciler {
     /// step and `Reconciler::build_plan` route through this same `Planner`
     /// port instance, so there is exactly one authoritative planning path.
     planner: Arc<dyn Planner>,
-    /// Per-path health trackers with hysteresis (mission: "is my network OK").
-    /// Paths: direct, b4, xray, tailscale. Non-authoritative telemetry; the
-    /// daemon feeds it and the WebUI reads it.
-    health: std::sync::Mutex<std::collections::HashMap<String, crate::health::PathHealthTracker>>,
 }
 
 /// Configuration for the reconciliation loop.
@@ -129,52 +131,14 @@ pub trait ExecutorAdapter: Send + Sync {
     async fn path_mtu_state(&self) -> Vec<PathMtu> {
         Vec::new()
     }
-    /// Apply a QoS shaping plan (HTB classes per interface).
-    async fn apply_qos(&self, plan: &QosPlan) -> balansir_common::Result<()> {
-        let _ = plan;
-        Err(balansir_common::error::Error::Unsupported(
-            "apply_qos not implemented by this adapter".into(),
-        ))
-    }
-    /// Clear shaping on an interface (rollback).
-    async fn clear_qos(&self, interface: &str) -> balansir_common::Result<()> {
-        let _ = interface;
-        Err(balansir_common::error::Error::Unsupported(
-            "clear_qos not implemented by this adapter".into(),
-        ))
-    }
-    /// The executor's currently applied QoS interfaces (non-authority).
-    async fn qos_state(&self, interfaces: &[String]) -> QosState {
-        let _ = interfaces;
-        QosState::default()
-    }
 }
 
 impl Reconciler {
-    /// Create a new reconciler (events only to tracing).
+    /// Create a new reconciler.
     pub fn new(
         desired_state: DesiredState,
         executor: Arc<dyn ExecutorAdapter>,
         config: ReconcilerConfig,
-    ) -> Self {
-        Self::new_inner(desired_state, executor, config, None)
-    }
-
-    /// Create a reconciler that also streams control events to a WebUI bridge.
-    pub fn new_with_api(
-        desired_state: DesiredState,
-        executor: Arc<dyn ExecutorAdapter>,
-        config: ReconcilerConfig,
-        api_bridge: Arc<balansir_api::surface::ApiEventBridge>,
-    ) -> Self {
-        Self::new_inner(desired_state, executor, config, Some(api_bridge))
-    }
-
-    fn new_inner(
-        desired_state: DesiredState,
-        executor: Arc<dyn ExecutorAdapter>,
-        config: ReconcilerConfig,
-        api_bridge: Option<Arc<balansir_api::surface::ApiEventBridge>>,
     ) -> Self {
         let desired = Arc::new(tokio::sync::Mutex::new(desired_state));
         let actual = Arc::new(tokio::sync::Mutex::new(ActualState::default()));
@@ -196,18 +160,29 @@ impl Reconciler {
         // shared by the coordinator and by `Reconciler::build_plan`.
         let planner: Arc<dyn Planner> = Arc::new(BasicPlanner);
 
+        // Coordinator events fan out to logging now and to the API event bus
+        // later (attached by the API server, one coordinator / one event path).
+        let events = Arc::new(DynamicEventSink::new());
+        events.attach(Arc::new(TracingEventSink));
+
+        let desired_provider: Arc<dyn DesiredProvider> =
+            Arc::new(DaemonDesiredProvider {
+                desired: desired.clone(),
+            });
+        let actual_provider: Arc<dyn StateProvider> = Arc::new(DaemonActualStore {
+            actual: actual.clone(),
+        });
+
         let coordinator = Arc::new(Coordinator::new(
             CoordinatorConfig::new(
-                Arc::new(DaemonDesiredProvider {
-                    desired: desired.clone(),
-                }),
+                desired_provider.clone(),
                 actual_store,
                 planner.clone(),
                 executor.clone(),
                 Arc::new(MemorySnapshotStore::new()),
             )
             .with_rollback(rollback)
-            .with_event_sink(Self::build_event_sink(api_bridge)),
+            .with_event_sink(events.clone()),
         ));
 
         Self {
@@ -216,27 +191,14 @@ impl Reconciler {
             actual_state: actual,
             config,
             coordinator,
+            events,
+            desired_provider,
+            actual_provider,
             runner: executor,
             executor: executor_inner,
             flow_compiler: tokio::sync::Mutex::new(None),
             config_fingerprint: tokio::sync::Mutex::new(None),
             planner,
-            health: std::sync::Mutex::new(Default::default()),
-        }
-    }
-
-    /// Build the coordinator's event sink: tracing always, plus the WebUI
-    /// bridge when the daemon provides one (fan-out, single authority).
-    fn build_event_sink(
-        api_bridge: Option<Arc<balansir_api::surface::ApiEventBridge>>,
-    ) -> Arc<dyn balansir_control::traits::EventSink> {
-        use crate::reconciliation::sinks::{ApiBridgeEventSink, FanoutEventSink};
-        match api_bridge {
-            Some(bridge) => Arc::new(FanoutEventSink::new(vec![
-                Arc::new(TracingEventSink),
-                Arc::new(ApiBridgeEventSink::new(bridge)),
-            ])),
-            None => Arc::new(TracingEventSink),
         }
     }
 
@@ -293,6 +255,32 @@ impl Reconciler {
         Arc::clone(&self.executor)
     }
 
+    /// The authoritative coordinator (shared with the API control plane so
+    /// there is exactly one reconciliation authority and one event path).
+    pub fn coordinator(&self) -> Arc<Coordinator> {
+        Arc::clone(&self.coordinator)
+    }
+
+    /// The coordinator's desired-state provider (same shared handle).
+    pub fn desired_provider(&self) -> Arc<dyn DesiredProvider> {
+        Arc::clone(&self.desired_provider)
+    }
+
+    /// The coordinator's actual-state provider (same shared handle).
+    pub fn actual_provider(&self) -> Arc<dyn StateProvider> {
+        Arc::clone(&self.actual_provider)
+    }
+
+    /// Attach an additional coordinator event sink (e.g. the API event bridge).
+    pub fn attach_event_sink(&self, sink: Arc<dyn EventSink>) {
+        self.events.attach(sink);
+    }
+
+    /// Current desired state (read snapshot).
+    pub async fn desired(&self) -> DesiredState {
+        self.desired_state.lock().await.clone()
+    }
+
     /// Get the fingerprint of the last accepted config (P4.8, ADR-021), or
     /// `None` if no config has been set yet.
     pub async fn config_fingerprint(&self) -> Option<u64> {
@@ -315,36 +303,6 @@ impl Reconciler {
     /// Get the raw (authored, pre-compilation) desired state, if set.
     pub async fn get_desired_raw(&self) -> Option<DesiredState> {
         self.desired_raw.lock().await.clone()
-    }
-
-    /// QoS status: desired plans plus executor-applied interfaces
-    /// (non-authoritative, the executor reports what is actually shaped).
-    pub async fn qos_status(&self) -> serde_json::Value {
-        let desired = self.desired_state.lock().await.qos.clone();
-        let interfaces: Vec<String> = desired.iter().map(|p| p.interface.clone()).collect();
-        let applied = self.executor.qos_state(&interfaces).await;
-        serde_json::json!({
-            "desired": desired,
-            "applied": applied.interfaces,
-        })
-    }
-
-    /// Feed one health sample for a path (ok = reachable). Creates the tracker
-    /// on first use. Used by the daemon's health loop (ping/MTU/Xray/tailscale
-    /// probes); the WebUI reads reports via `path_health`.
-    pub fn observe_path_health(&self, path: &str, ok: bool) {
-        let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
-        let tracker = health
-            .entry(path.to_string())
-            .or_insert_with(|| crate::health::PathHealthTracker::new(path, 16, 3, 3));
-        tracker.observe(ok);
-    }
-
-    /// Current per-path health reports (for the WebUI).
-    pub fn path_health(&self) -> serde_json::Value {
-        let health = self.health.lock().unwrap_or_else(|e| e.into_inner());
-        let reports: Vec<_> = health.values().map(|t| t.report()).collect();
-        serde_json::to_value(reports).unwrap_or_else(|_| serde_json::json!([]))
     }
 
     /// Transactional hot reload (ADR-010).
@@ -431,12 +389,6 @@ impl Reconciler {
         self.coordinator.generation()
     }
 
-    /// The reconciliation configuration (intervals, resync policy) — exposed
-    /// for the WebUI status page.
-    pub fn config(&self) -> ReconcilerConfig {
-        self.config.clone()
-    }
-
     /// Apply plan (delegates to the daemon's plan runner).
     pub async fn apply_plan(&self, plan: ReconciliationPlan) -> ReconciliationResult<()> {
         let report = self
@@ -495,57 +447,9 @@ impl Reconciler {
             .map_err(|e| ReconciliationError::Reconcile(e.to_string()))
     }
 
-    /// Trigger an atomic reconciliation (rollback handled by the coordinator),
-    /// then converge QoS shaping to the desired plan.
+    /// Trigger an atomic reconciliation (rollback handled by the coordinator).
     pub async fn reconcile_atomic(&self) -> ReconciliationResult<()> {
-        let rules_result = self.reconcile().await;
-        // QoS is a distinct mechanism (qdiscs, not nft rules); reconcile it
-        // independently so a shaping failure never blocks rule convergence.
-        if let Err(e) = self.reconcile_qos().await {
-            warn!("QoS reconcile failed: {e}");
-        }
-        rules_result
-    }
-
-    /// Converge desired QoS plans (HTB shaping per interface) against the
-    /// executor's applied state. Non-authoritative: the executor reports what
-    /// is applied; the daemon applies/clears to match desired.
-    async fn reconcile_qos(&self) -> ReconciliationResult<()> {
-        let desired = self.desired_state.lock().await.qos.clone();
-        let interfaces: Vec<String> = desired.iter().map(|p| p.interface.clone()).collect();
-        let applied = self.executor.qos_state(&interfaces).await;
-
-        for plan in &desired {
-            if !applied.interfaces.contains(&plan.interface) {
-                match self.executor.apply_qos(plan).await {
-                    Ok(()) => {
-                        info!(
-                            interface = plan.interface,
-                            classes = plan.classes.len(),
-                            "QoS shaping applied"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(interface = plan.interface, "QoS apply failed: {e}");
-                    }
-                }
-            }
-        }
-
-        // Clear shaping on interfaces no longer desired.
-        for iface in &applied.interfaces {
-            if !desired.iter().any(|p| &p.interface == iface) {
-                match self.executor.clear_qos(iface).await {
-                    Ok(()) => {
-                        info!(interface = iface, "QoS shaping cleared");
-                    }
-                    Err(e) => {
-                        warn!(interface = iface, "QoS clear failed: {e}");
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.reconcile().await
     }
 
     /// Run reconciliation loop forever.
@@ -576,6 +480,7 @@ impl Reconciler {
     /// followed by a reconcile. Split out so the loop logic is testable without
     /// real wall-clock intervals.
     async fn step(&self, cycle: u32) {
+        debug!(cycle, "Reconciliation loop step");
         // Periodic ownership re-seed: bring ActualState back to what the
         // kernel actually holds before diffing, so external edits or an
         // executor restart cannot hide behind stale accounting.
@@ -674,7 +579,6 @@ mod tests {
                 },
             ],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
 
         let executor = Arc::new(DummyExecutorAdapter::new());
@@ -703,7 +607,6 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
 
         let executor = Arc::new(DummyExecutorAdapter::new());
@@ -789,7 +692,6 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
 
         reconciler
@@ -824,7 +726,6 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         let fp_expected = balansir_common::config_fingerprint(&candidate);
         reconciler
@@ -842,7 +743,6 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         let fp_changed = balansir_common::config_fingerprint(&changed);
         reconciler
@@ -863,7 +763,6 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         let failing_reconciler = Reconciler::new(
             DesiredState::default(),
@@ -896,7 +795,6 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
 
         assert!(reconciler
@@ -956,7 +854,6 @@ mod tests {
                 },
             ],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         let executor = Arc::new(DummyExecutorAdapter::new());
         let reconciler = Reconciler::new(desired.clone(), executor, ReconcilerConfig::default());
@@ -1011,7 +908,6 @@ mod tests {
                 },
             ],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         let executor = Arc::new(DummyExecutorAdapter::new());
         let reconciler = Reconciler::new(desired.clone(), executor, ReconcilerConfig::default());
@@ -1058,7 +954,6 @@ mod tests {
                 flow: None,
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         let executor = Arc::new(DummyExecutorAdapter::new());
         let reconciler = Reconciler::new(desired, executor, ReconcilerConfig::default());
@@ -1177,7 +1072,6 @@ mod tests {
                     flow: None,
                 }],
                 drivers: Vec::new(),
-                qos: Vec::new(),
             },
             executor,
             config,
@@ -1265,7 +1159,6 @@ mod tests {
                 }),
             }],
             drivers: Vec::new(),
-            qos: Vec::new(),
         };
         reconciler.set_desired(raw).await;
         reconciler.reconcile_atomic().await.unwrap();

@@ -19,6 +19,34 @@ use std::sync::Mutex;
 
 use crate::executor::Executor;
 
+/// The full set of privileged mechanisms served by the executor.
+///
+/// Each subsystem is an allowlisted, typed mechanism; the daemon never sends
+/// free-form commands. `qos`/`interface`/`tailscale` are optional by design:
+/// `ExecutorServices::new` wires whatever backends are available at startup.
+pub struct ExecutorServices {
+    pub executor: Box<dyn Executor>,
+    pub qos: Box<dyn crate::qdisc::QosBackend>,
+    pub interface: Box<dyn crate::interface::InterfaceBackend>,
+    pub tailscale: Box<dyn crate::tailscale::TailscaleDriver>,
+}
+
+impl ExecutorServices {
+    pub fn new(
+        executor: Box<dyn Executor>,
+        qos: Box<dyn crate::qdisc::QosBackend>,
+        interface: Box<dyn crate::interface::InterfaceBackend>,
+        tailscale: Box<dyn crate::tailscale::TailscaleDriver>,
+    ) -> Self {
+        Self {
+            executor,
+            qos,
+            interface,
+            tailscale,
+        }
+    }
+}
+
 /// A concrete privileged mechanism: nftables-backed rule execution plus the
 /// policy-routing (`ip rule`) capability (M3.7, ADR-014).
 ///
@@ -41,9 +69,6 @@ pub struct NftablesExecutor {
     /// reports it so the daemon can reconcile; the daemon decides what *should*
     /// be applied.
     path_mtu: crate::path_mtu::PathMtuStore,
-    /// QoS/traffic-shaping backend (LibreQoS-inspired HTB). Non-authority: the
-    /// daemon decides the desired plan; the executor owns applied state.
-    qos: crate::tc::TcBackend,
 }
 
 impl NftablesExecutor {
@@ -52,9 +77,8 @@ impl NftablesExecutor {
             backend,
             installed: Mutex::new(HashMap::new()),
             path_mtu: crate::path_mtu::PathMtuStore::new(Box::new(
-                crate::path_mtu::RouteMtuApplier,
+                crate::path_mtu::RecordOnlyApplier,
             )),
-            qos: crate::tc::TcBackend,
         }
     }
 
@@ -190,7 +214,21 @@ impl Executor for NftablesExecutor {
         let fingerprint = rule_fingerprint(request);
 
         // Idempotency (A1, ADR-015): the exact same rule is already installed.
-        if self.fingerprint_of(policy_id) == Some(fingerprint) {
+        //
+        // The fingerprint cache alone is not ground truth (P4.1, ADR-020): an
+        // external kernel edit or a chain flush can remove the rule while the
+        // cache still lists it. Only short-circuit when the rule is *actually
+        // present in the kernel*; otherwise fall through to (re)apply so the
+        // daemon's ownership loop converges instead of being swallowed by
+        // stale accounting.
+        if self.fingerprint_of(policy_id) == Some(fingerprint)
+            && self
+                .backend
+                .find_handle_by_comment(&rule_comment(policy_id))
+                .ok()
+                .flatten()
+                .is_some()
+        {
             return ActionResult::AlreadyApplied;
         }
 
@@ -275,20 +313,6 @@ impl Executor for NftablesExecutor {
     async fn path_mtu_state(&self) -> Vec<PathMtu> {
         self.path_mtu.state()
     }
-
-    async fn apply_qos(&self, plan: &balansir_common::QosPlan) -> Result<()> {
-        self.qos.apply_plan(plan)
-    }
-
-    async fn clear_qos(&self, interface: &str) -> Result<()> {
-        self.qos.clear_plan(interface)
-    }
-
-    async fn qos_state(&self, interfaces: &[String]) -> balansir_common::QosState {
-        self.qos
-            .state(interfaces)
-            .unwrap_or_else(|_| balansir_common::QosState::default())
-    }
 }
 
 /// Allowed executor operations. Anything not in this set is rejected before
@@ -304,9 +328,11 @@ fn is_allowlisted(msg_type: MsgType) -> bool {
             | MsgType::SetPathMtu
             | MsgType::RestorePathMtu
             | MsgType::GetPathMtuState
-            | MsgType::ApplyQos
-            | MsgType::ClearQos
+            | MsgType::QosOp
             | MsgType::GetQosState
+            | MsgType::GetQosCapabilities
+            | MsgType::InterfaceOp
+            | MsgType::TailscaleOp
     )
 }
 
@@ -319,24 +345,33 @@ fn is_allowlisted(msg_type: MsgType) -> bool {
 /// control.
 pub async fn serve_connection(
     conn: &mut IpcServerConnection,
-    executor: &dyn Executor,
+    services: &ExecutorServices,
 ) -> Result<()> {
     loop {
         let msg = conn.recv().await?;
-        let response = dispatch(&msg, executor).await;
+        let response = dispatch(&msg, services).await;
         conn.send(&response).await?;
     }
 }
 
-/// Dispatch one allowlisted command to the mechanism and build a response.
+/// Encode a postcard payload into a `ResponseData`, or a clean error.
+fn data_response(correlation_id: balansir_common::types::CorrelationId, value: &impl serde::Serialize) -> IpcMessage {
+    match postcard::to_allocvec(value) {
+        Ok(payload) => IpcMessage::response_data(correlation_id, payload),
+        Err(_) => IpcMessage::response_error(correlation_id, "failed to encode result"),
+    }
+}
+
+/// Dispatch one allowlisted command to the mechanisms and build a response.
 ///
 /// Used both by the server loop and by tests.
-pub async fn dispatch(msg: &IpcMessage, executor: &dyn Executor) -> IpcMessage {
+pub async fn dispatch(msg: &IpcMessage, services: &ExecutorServices) -> IpcMessage {
     if !is_allowlisted(msg.msg_type) {
         tracing::warn!(?msg.msg_type, "executor rejected non-allowlisted operation");
         return IpcMessage::response_error(msg.correlation_id, "operation not allowed");
     }
 
+    let executor = services.executor.as_ref();
     match msg.msg_type {
         MsgType::HealthCheck => IpcMessage::response_ok(msg.correlation_id),
         MsgType::AddRule => {
@@ -418,33 +453,114 @@ pub async fn dispatch(msg: &IpcMessage, executor: &dyn Executor) -> IpcMessage {
                 ),
             }
         }
-        // QoS / traffic shaping: payload is a postcard `QosPlan` for apply,
-        // interface name for clear; state query takes the candidate interfaces.
-        MsgType::ApplyQos => {
-            let Ok(plan) = postcard::from_bytes::<balansir_common::QosPlan>(&msg.payload) else {
-                return IpcMessage::response_error(msg.correlation_id, "invalid ApplyQos payload");
+        // QoS: apply/remove shaping (`QosOp`), report applied state and kernel
+        // capabilities. The executor is the only component that touches tc.
+        MsgType::QosOp => {
+            let Ok(op) = postcard::from_bytes::<balansir_common::qos::QosOp>(&msg.payload) else {
+                return IpcMessage::response_error(msg.correlation_id, "invalid QosOp payload");
             };
-            match executor.apply_qos(&plan).await {
-                Ok(()) => IpcMessage::response_ok(msg.correlation_id),
-                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
-            }
-        }
-        MsgType::ClearQos => {
-            let Ok(interface) = postcard::from_bytes::<String>(&msg.payload) else {
-                return IpcMessage::response_error(msg.correlation_id, "invalid ClearQos payload");
+            let result = match op {
+                balansir_common::qos::QosOp::Apply(config) => {
+                    match services.qos.apply(&config).await {
+                        Ok(()) => balansir_common::qos::QosResult {
+                            op: "apply".into(),
+                            interface: config.interface.clone(),
+                            ok: true,
+                            detail: format!("{} applied", config.kind.as_str()),
+                        },
+                        Err(e) => balansir_common::qos::QosResult {
+                            op: "apply".into(),
+                            interface: config.interface.clone(),
+                            ok: false,
+                            detail: e,
+                        },
+                    }
+                }
+                balansir_common::qos::QosOp::Remove { interface } => {
+                    match services.qos.remove(&interface).await {
+                        Ok(()) => balansir_common::qos::QosResult {
+                            op: "remove".into(),
+                            interface: interface.clone(),
+                            ok: true,
+                            detail: "shaping removed".into(),
+                        },
+                        Err(e) => balansir_common::qos::QosResult {
+                            op: "remove".into(),
+                            interface: interface.clone(),
+                            ok: false,
+                            detail: e,
+                        },
+                    }
+                }
             };
-            match executor.clear_qos(&interface).await {
-                Ok(()) => IpcMessage::response_ok(msg.correlation_id),
-                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
-            }
+            data_response(msg.correlation_id, &result)
         }
         MsgType::GetQosState => {
-            let interfaces: Vec<String> = postcard::from_bytes(&msg.payload).unwrap_or_default();
-            let state = executor.qos_state(&interfaces).await;
-            match postcard::to_allocvec(&state) {
-                Ok(payload) => IpcMessage::response_data(msg.correlation_id, payload),
-                Err(_) => {
-                    IpcMessage::response_error(msg.correlation_id, "failed to encode qos state")
+            let interface = String::from_utf8(msg.payload.clone()).unwrap_or_default();
+            match services.qos.state(&interface).await {
+                Ok(state) => data_response(msg.correlation_id, &state),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e),
+            }
+        }
+        MsgType::GetQosCapabilities => {
+            match services.qos.capabilities().await {
+                Ok(caps) => data_response(msg.correlation_id, &caps),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e),
+            }
+        }
+        // Interface driver: link info + WAN MAC cloning (hardware MAC
+        // preserved; validated before any netlink change).
+        MsgType::InterfaceOp => {
+            let Ok(op) = postcard::from_bytes::<balansir_common::network::InterfaceOp>(&msg.payload)
+            else {
+                return IpcMessage::response_error(msg.correlation_id, "invalid InterfaceOp payload");
+            };
+            match op {
+                balansir_common::network::InterfaceOp::Get { interface } => {
+                    match services.interface.info(&interface).await {
+                        Ok(infos) => data_response(msg.correlation_id, &infos),
+                        Err(e) => IpcMessage::response_error(msg.correlation_id, &e),
+                    }
+                }
+                balansir_common::network::InterfaceOp::SetMac { interface, mac } => {
+                    match services.interface.set_mac(&interface, &mac).await {
+                        Ok(result) => data_response(msg.correlation_id, &result),
+                        Err(e) => IpcMessage::response_error(msg.correlation_id, &e),
+                    }
+                }
+                balansir_common::network::InterfaceOp::RestoreMac { interface } => {
+                    match services.interface.restore_mac(&interface).await {
+                        Ok(result) => data_response(msg.correlation_id, &result),
+                        Err(e) => IpcMessage::response_error(msg.correlation_id, &e),
+                    }
+                }
+            }
+        }
+        // Tailscale driver: status + controlled ops. Every argument is
+        // validated before any binary spawn (see tailscale.rs).
+        MsgType::TailscaleOp => {
+            let Ok(op) = postcard::from_bytes::<balansir_common::network::TailscaleOp>(&msg.payload)
+            else {
+                return IpcMessage::response_error(msg.correlation_id, "invalid TailscaleOp payload");
+            };
+            match op {
+                balansir_common::network::TailscaleOp::Status => {
+                    data_response(msg.correlation_id, &services.tailscale.status().await)
+                }
+                balansir_common::network::TailscaleOp::Up { auth_key } => {
+                    data_response(msg.correlation_id, &services.tailscale.up(auth_key.as_deref()).await)
+                }
+                balansir_common::network::TailscaleOp::Down => {
+                    data_response(msg.correlation_id, &services.tailscale.down().await)
+                }
+                balansir_common::network::TailscaleOp::Reconnect => {
+                    data_response(msg.correlation_id, &services.tailscale.reconnect().await)
+                }
+                balansir_common::network::TailscaleOp::SetRoutes { routes, exit_node } => {
+                    data_response(
+                        msg.correlation_id,
+                        &services.tailscale.set_routes(&routes, exit_node).await,
+                    )
                 }
             }
         }
@@ -456,9 +572,33 @@ pub async fn dispatch(msg: &IpcMessage, executor: &dyn Executor) -> IpcMessage {
 mod tests {
     use super::*;
     use balansir_common::ipc::IpcMessage;
+    use balansir_common::qos::{QosCapabilities, QosConfig, QosDirection, QdiscKind};
 
-    fn dummy_executor() -> impl Executor {
-        crate::executor::DummyExecutor::new()
+    /// A fully-wired service bundle for tests: DummyExecutor for rules,
+    /// InMemoryBackend for QoS, SysfsInterfaceBackend for interfaces and
+    /// MockTailscaleDriver for Tailscale.
+    fn dummy_services() -> ExecutorServices {
+        ExecutorServices::new(
+            Box::new(crate::executor::DummyExecutor::new()),
+            Box::new(crate::qdisc::InMemoryBackend::new(QosCapabilities {
+                cake: true,
+                fq_codel: true,
+                ingress: true,
+                htb: true,
+                netem: false,
+                egress_shaping: true,
+                ingress_shaping: true,
+            })),
+            Box::new(crate::interface::SysfsInterfaceBackend),
+            Box::new(crate::tailscale::MockTailscaleDriver::new(
+                balansir_common::network::TailscaleStatus {
+                    installed: true,
+                    backend_state: "Running".into(),
+                    summary: "mock".into(),
+                    ..Default::default()
+                },
+            )),
+        )
     }
 
     fn message(msg_type: MsgType, payload: Vec<u8>) -> IpcMessage {
@@ -467,7 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_check_is_allowlisted() {
-        let response = dispatch(&message(MsgType::HealthCheck, vec![]), &dummy_executor()).await;
+        let response = dispatch(&message(MsgType::HealthCheck, vec![]), &dummy_services()).await;
         assert_eq!(response.msg_type, MsgType::ResponseOk);
     }
 
@@ -475,7 +615,7 @@ mod tests {
     /// authoritative). DummyExecutor's inventory is empty.
     #[tokio::test]
     async fn get_actual_rules_returns_inventory() {
-        let response = dispatch(&message(MsgType::GetActualRules, vec![]), &dummy_executor()).await;
+        let response = dispatch(&message(MsgType::GetActualRules, vec![]), &dummy_services()).await;
         assert_eq!(response.msg_type, MsgType::ResponseData);
         let ids: Vec<u32> = postcard::from_bytes(&response.payload).unwrap();
         assert!(ids.is_empty());
@@ -494,14 +634,14 @@ mod tests {
         let set_payload = postcard::to_allocvec(&adj).unwrap();
         let resp = dispatch(
             &message(MsgType::SetPathMtu, set_payload),
-            &dummy_executor(),
+            &dummy_services(),
         )
         .await;
         assert_eq!(resp.msg_type, MsgType::ResponseError);
 
         let state = dispatch(
             &message(MsgType::GetPathMtuState, vec![]),
-            &dummy_executor(),
+            &dummy_services(),
         )
         .await;
         assert_eq!(state.msg_type, MsgType::ResponseData);
@@ -509,9 +649,100 @@ mod tests {
         assert!(mtu.is_empty());
     }
 
+    /// QoS: apply/remove via QosOp against the in-memory backend.
+    #[tokio::test]
+    async fn qos_op_apply_and_remove() {
+        let services = dummy_services();
+        let cfg = QosConfig {
+            interface: "eth0".into(),
+            direction: QosDirection::Egress,
+            kind: QdiscKind::Cake,
+            bandwidth_bps: Some(100_000_000),
+            latency_target_ms: None,
+            overhead_bytes: None,
+            ecn: true,
+            wash: false,
+            memory_limit_bytes: None,
+            classes: vec![],
+            comment: QosConfig::identity("eth0"),
+        };
+        let payload = postcard::to_allocvec(&balansir_common::qos::QosOp::Apply(cfg)).unwrap();
+        let resp = dispatch(&message(MsgType::QosOp, payload), &services).await;
+        assert_eq!(resp.msg_type, MsgType::ResponseData);
+        let result: balansir_common::qos::QosResult =
+            postcard::from_bytes(&resp.payload).unwrap();
+        assert!(result.ok);
+
+        // State reports the applied qdisc.
+        let state = dispatch(
+            &message(MsgType::GetQosState, b"eth0".to_vec()),
+            &services,
+        )
+        .await;
+        let qdiscs: Vec<balansir_common::qos::AppliedQdisc> =
+            postcard::from_bytes(&state.payload).unwrap();
+        assert_eq!(qdiscs.len(), 1);
+        assert!(qdiscs[0].our_identity);
+
+        // Remove.
+        let payload = postcard::to_allocvec(&balansir_common::qos::QosOp::Remove {
+            interface: "eth0".into(),
+        })
+        .unwrap();
+        let resp = dispatch(&message(MsgType::QosOp, payload), &services).await;
+        let result: balansir_common::qos::QosResult =
+            postcard::from_bytes(&resp.payload).unwrap();
+        assert!(result.ok);
+    }
+
+    /// QoS capabilities are reported through the boundary.
+    #[tokio::test]
+    async fn qos_capabilities_dispatch() {
+        let resp = dispatch(&message(MsgType::GetQosCapabilities, vec![]), &dummy_services()).await;
+        assert_eq!(resp.msg_type, MsgType::ResponseData);
+        let caps: QosCapabilities = postcard::from_bytes(&resp.payload).unwrap();
+        assert!(caps.cake);
+    }
+
+    /// Tailscale: status + a controlled op return typed results.
+    #[tokio::test]
+    async fn tailscale_ops_dispatch() {
+        let services = dummy_services();
+        let status_payload = postcard::to_allocvec(&balansir_common::network::TailscaleOp::Status)
+            .unwrap();
+        let status = dispatch(&message(MsgType::TailscaleOp, status_payload), &services).await;
+        assert_eq!(status.msg_type, MsgType::ResponseData);
+        // Status payload must be a TailscaleStatus.
+        let decoded: balansir_common::network::TailscaleStatus =
+            postcard::from_bytes(&status.payload).unwrap();
+        assert_eq!(decoded.backend_state, "Running");
+
+        let up = balansir_common::network::TailscaleOp::Up { auth_key: None };
+        let payload = postcard::to_allocvec(&up).unwrap();
+        let resp = dispatch(&message(MsgType::TailscaleOp, payload), &services).await;
+        let result: balansir_common::network::TailscaleResult =
+            postcard::from_bytes(&resp.payload).unwrap();
+        assert!(result.ok);
+    }
+
+    /// Interface driver: sysfs info for the loopback must be present.
+    #[tokio::test]
+    async fn interface_op_info_dispatch() {
+        let services = dummy_services();
+        let op = balansir_common::network::InterfaceOp::Get {
+            interface: "lo".into(),
+        };
+        let payload = postcard::to_allocvec(&op).unwrap();
+        let resp = dispatch(&message(MsgType::InterfaceOp, payload), &services).await;
+        assert_eq!(resp.msg_type, MsgType::ResponseData);
+        let infos: Vec<balansir_common::network::InterfaceInfo> =
+            postcard::from_bytes(&resp.payload).unwrap();
+        assert!(!infos.is_empty());
+    }
+
     #[tokio::test]
     async fn add_rule_with_invalid_payload_is_rejected() {
-        let response = dispatch(&message(MsgType::AddRule, vec![1, 2, 3]), &dummy_executor()).await;
+        let response = dispatch(&message(MsgType::AddRule, vec![1, 2, 3]), &dummy_services()).await;
         assert_eq!(response.msg_type, MsgType::ResponseError);
     }
 
@@ -534,7 +765,7 @@ mod tests {
             },
         };
         let payload = postcard::to_allocvec(&request).unwrap();
-        let response = dispatch(&message(MsgType::AddRule, payload), &dummy_executor()).await;
+        let response = dispatch(&message(MsgType::AddRule, payload), &dummy_services()).await;
         assert_eq!(response.msg_type, MsgType::ResponseData);
         let result: ActionResult = postcard::from_bytes(&response.payload).unwrap();
         assert!(matches!(result, ActionResult::Applied { .. }));
@@ -546,7 +777,7 @@ mod tests {
         // default not-implemented, so the daemon sees an explicit error rather
         // than a fabricated success.
         let payload = postcard::to_allocvec(&7u32).unwrap();
-        let response = dispatch(&message(MsgType::RemoveRule, payload), &dummy_executor()).await;
+        let response = dispatch(&message(MsgType::RemoveRule, payload), &dummy_services()).await;
         assert_eq!(response.msg_type, MsgType::ResponseError);
         let err = String::from_utf8(response.payload.clone()).unwrap();
         assert!(err.contains("not implemented"));
@@ -556,7 +787,7 @@ mod tests {
     async fn remove_rule_with_invalid_payload_is_rejected() {
         let response = dispatch(
             &message(MsgType::RemoveRule, vec![1, 2, 3]),
-            &dummy_executor(),
+            &dummy_services(),
         )
         .await;
         assert_eq!(response.msg_type, MsgType::ResponseError);
@@ -566,7 +797,7 @@ mod tests {
     async fn flush_rules_dispatches() {
         // DummyExecutor's flush is a no-op success; the point is the op is
         // allowlisted and dispatched (not rejected).
-        let response = dispatch(&message(MsgType::FlushRules, vec![]), &dummy_executor()).await;
+        let response = dispatch(&message(MsgType::FlushRules, vec![]), &dummy_services()).await;
         assert_eq!(response.msg_type, MsgType::ResponseOk);
     }
 

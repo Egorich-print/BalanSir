@@ -54,10 +54,12 @@ impl B4Controller {
     }
 
     /// Run one cycle for a flow: engine evaluates, controller executes the
-    /// decision within the daemon's authority.
-    pub async fn run_for(&mut self, flow: &str) {
-        let (decision, _events) = self.engine.evaluate(flow).await;
+    /// decision within the daemon's authority. Returns the observability
+    /// events produced by the cycle so callers can publish them.
+    pub async fn run_for(&mut self, flow: &str) -> Vec<crate::b4_engine::state::B4Event> {
+        let (decision, events) = self.engine.evaluate(flow).await;
         self.execute(flow, decision).await;
+        events
     }
 
     /// Execute a single B4 decision. Only `AdaptMtu`/`UseFallback`/`FailStrict`
@@ -110,6 +112,26 @@ impl B4Controller {
                 mtu: *mtu,
             })
             .collect()
+    }
+
+    /// Per-path MTU the executor currently reports (ownership actual-state).
+    pub async fn reported_path_mtu(&self) -> Vec<PathMtu> {
+        self.executor.path_mtu_state().await
+    }
+
+    /// The engine's lifecycle state for a flow (introspection / WebUI).
+    pub fn flow_state(&self, flow: &str) -> crate::b4_engine::state::B4State {
+        self.engine.state_of(flow)
+    }
+
+    /// The engine's last decision for a flow (introspection / WebUI).
+    pub fn flow_decision(&self, flow: &str) -> Option<B4Decision> {
+        self.engine.last_decision(flow).cloned()
+    }
+
+    /// The engine's last host-stack observation for a flow (health / WebUI).
+    pub fn flow_observation(&self, flow: &str) -> Option<crate::b4_engine::observe::B4Observation> {
+        self.engine.last_observation(flow).copied()
     }
 
     /// The flow keys the engine has observed (for driving the loop).
@@ -343,5 +365,49 @@ mod tests {
         let mut controller = controller;
         controller.run_for("unknown.example").await;
         assert!(executor.path_mtu_state().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn last_observation_is_retained_for_health_view() {
+        let executor = Arc::new(FakeExecutor::default());
+        let policy = B4Policy {
+            flows: vec![crate::b4_engine::policy::B4FlowRule {
+                domain: "bad.example".into(),
+                profile: B4Profile {
+                    capabilities: vec![B4Capability::Mtu],
+                    ..Default::default()
+                },
+            }],
+        };
+        let mut controller = B4Controller::new(
+            policy,
+            Arc::new(DegradedObserver),
+            Default::default(),
+            executor.clone(),
+        );
+        controller.run_for("bad.example").await;
+
+        let obs = controller.flow_observation("bad.example").expect("observation retained");
+        assert_eq!(obs.retransmissions, Some(50));
+        assert_eq!(obs.rtt, Some(Duration::from_millis(500)));
+
+        // The health view derives a classification from the retained signal.
+        let class = crate::b4_engine::classify::classify(&obs);
+        assert_eq!(format!("{class:?}"), "Degraded");
+    }
+
+    /// Fake observer: heavy retransmissions + high RTT → degraded path.
+    #[derive(Debug, Clone, Copy, Default)]
+    struct DegradedObserver;
+
+    #[async_trait::async_trait]
+    impl B4Observer for DegradedObserver {
+        async fn observe(&self, _flow: &str) -> B4Observation {
+            B4Observation {
+                rtt: Some(Duration::from_millis(500)),
+                retransmissions: Some(50),
+                ..Default::default()
+            }
+        }
     }
 }

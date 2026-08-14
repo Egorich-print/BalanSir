@@ -3,6 +3,8 @@ pub mod amneziawg;
 #[cfg(feature = "b4")]
 pub mod b4;
 pub mod b4_engine;
+pub mod b4_manager;
+pub mod capability;
 #[cfg(feature = "dns")]
 pub mod dns;
 pub mod driver;
@@ -12,12 +14,16 @@ pub mod hysteria;
 #[cfg(target_os = "linux")]
 pub mod netlink;
 pub mod policy;
-pub mod reconciler_api;
 pub mod reconciliation;
 pub mod secrets;
+pub mod server;
 pub mod startup;
-pub mod tailscale;
+pub mod subsystems;
+pub mod system_stats;
+pub mod wan_identity;
 #[cfg(feature = "wireguard")]
 pub mod wireguard;
 #[cfg(feature = "xray")]
 pub mod xray;
+#[cfg(feature = "xray")]
+pub mod xray_manager;

@@ -1,0 +1,175 @@
+//! Lightweight `/proc` readers for the live dashboard metrics.
+//!
+//! Deliberately small and allocation-light for low-memory targets: one file
+//! read per metric group per refresh, no external collectors, no retained
+//! history. CPU utilization is computed from deltas between the previous
+//! and current `/proc/stat` samples (the caller keeps the previous sample).
+
+use std::time::Duration;
+
+/// A CPU time sample (`/proc/stat` first line).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CpuSample {
+    pub idle: u64,
+    pub total: u64,
+}
+
+/// Read the aggregate CPU sample from `/proc/stat`.
+pub fn read_cpu_sample() -> Option<CpuSample> {
+    let raw = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = raw.lines().next()?;
+    let mut fields = line.split_whitespace();
+    if fields.next() != Some("cpu") {
+        return None;
+    }
+    let values: Vec<u64> = fields
+        .filter_map(|f| f.parse::<u64>().ok())
+        .take(8)
+        .collect();
+    if values.len() < 8 {
+        return None;
+    }
+    // idle = idle + iowait; total = sum of all 8 fields.
+    let idle = values[3] + values[4];
+    let total: u64 = values.iter().sum();
+    Some(CpuSample { idle, total })
+}
+
+/// CPU utilization percent between two samples, handling counter wrap.
+pub fn cpu_percent(prev: &CpuSample, cur: &CpuSample) -> f64 {
+    let total = cur.total.saturating_sub(prev.total);
+    if total == 0 {
+        return 0.0;
+    }
+    let idle = cur.idle.saturating_sub(prev.idle);
+    let used = total.saturating_sub(idle);
+    (used as f64 / total as f64) * 100.0
+}
+
+/// Memory in use (used = total - available, from `/proc/meminfo`).
+pub fn mem_used_mb() -> Option<(u64, u64)> {
+    let raw = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total = 0u64;
+    let mut available = 0u64;
+    for line in raw.lines() {
+        let mut parts = line.split_whitespace();
+        match parts.next() {
+            Some("MemTotal:") => total = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            Some("MemAvailable:") => {
+                available = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0)
+            }
+            _ => {}
+        }
+    }
+    if total == 0 {
+        return None;
+    }
+    let total_mb = total / 1024;
+    let available_mb = available / 1024;
+    Some((total_mb.saturating_sub(available_mb), total_mb))
+}
+
+/// Load averages from `/proc/loadavg` (first three fields).
+pub fn load_averages() -> Option<(f64, f64, f64)> {
+    let raw = std::fs::read_to_string("/proc/loadavg").ok()?;
+    let mut fields = raw.split_whitespace();
+    let l1 = fields.next()?.parse().ok()?;
+    let l5 = fields.next()?.parse().ok()?;
+    let l15 = fields.next()?.parse().ok()?;
+    Some((l1, l5, l15))
+}
+
+/// System uptime in seconds from `/proc/uptime`.
+pub fn uptime_secs() -> Option<u64> {
+    let raw = std::fs::read_to_string("/proc/uptime").ok()?;
+    let secs = raw.split_whitespace().next()?.parse::<f64>().ok()?;
+    Some(secs as u64)
+}
+
+/// A full system stats sample; `None` when `/proc` is not available (non-Linux
+/// or restricted sandbox).
+pub fn system_stats(prev_cpu: Option<&CpuSample>) -> Option<(balansir_common::subsystems::SystemStats, CpuSample)> {
+    let cur = read_cpu_sample()?;
+    let (mem_used, mem_total) = mem_used_mb()?;
+    let (l1, l5, l15) = load_averages()?;
+    let up = uptime_secs().unwrap_or(0);
+    let cpu = match prev_cpu {
+        Some(prev) => cpu_percent(prev, &cur),
+        None => 0.0,
+    };
+    let stats = balansir_common::subsystems::SystemStats {
+        cpu_percent: cpu.round(),
+        mem_used_mb: mem_used,
+        mem_total_mb: mem_total,
+        load1: l1,
+        load5: l5,
+        load15: l15,
+        uptime_secs: up,
+    };
+    Some((stats, cur))
+}
+
+/// Current unix epoch milliseconds.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Compute bits/sec between two counter samples separated by `elapsed`.
+pub fn rate_bps(prev: u64, cur: u64, elapsed: Duration) -> u64 {
+    let elapsed_ms = elapsed.as_millis();
+    if elapsed_ms == 0 {
+        return 0;
+    }
+    let delta = cur.saturating_sub(prev);
+    // bytes per second * 8 → bits/sec
+    ((delta as u128) * 8000 / elapsed_ms as u128) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_percent_is_reasonable() {
+        let prev = CpuSample { idle: 1000, total: 2000 };
+        let cur = CpuSample { idle: 1100, total: 2200 };
+        // used = 100, total delta = 200 → 50%
+        let pct = cpu_percent(&prev, &cur);
+        assert!((pct - 50.0).abs() < 0.01);
+
+        // No progress → 0% (not NaN).
+        assert_eq!(cpu_percent(&prev, &prev), 0.0);
+    }
+
+    #[test]
+    fn cpu_percent_handles_wrap() {
+        let prev = CpuSample { idle: u64::MAX - 10, total: u64::MAX };
+        let cur = CpuSample { idle: 5, total: 20 };
+        // saturating deltas keep the result finite.
+        let pct = cpu_percent(&prev, &cur);
+        assert!(pct.is_finite() && (0.0..=100.0).contains(&pct));
+    }
+
+    #[test]
+    fn rate_computation() {
+        let elapsed = Duration::from_secs(2);
+        // 125000 bytes in 2s → 500000 bits/s
+        assert_eq!(rate_bps(0, 125_000, elapsed), 500_000);
+        assert_eq!(rate_bps(100, 50, elapsed), 0); // counter reset → 0
+        assert_eq!(rate_bps(1000, 1000, Duration::ZERO), 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn proc_readers_work_on_linux() {
+        // These may fail in restricted sandboxes without /proc — probe gently.
+        if let (Some(mem), Some(load), Some(up)) = (mem_used_mb(), load_averages(), uptime_secs()) {
+            assert!(mem.0 <= mem.1);
+            assert!(up > 0);
+            assert!(load.0.is_finite());
+        }
+    }
+}

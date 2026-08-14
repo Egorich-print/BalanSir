@@ -174,6 +174,30 @@ impl ControlPlane {
         })
     }
 
+    /// Wrap an *existing* coordinator (the daemon's reconciler coordinator).
+    ///
+    /// The API then shares the daemon's single reconciliation authority: one
+    /// coordinator, one desired/actual store, and one event path (the bridge
+    /// is attached to the coordinator's dynamic sink by the caller). Prefer
+    /// this over `assemble` when the daemon already owns a reconciler — a
+    /// second coordinator would create a competing authority over the same
+    /// executor.
+    pub fn wrap(
+        coordinator: Arc<Coordinator>,
+        desired: Arc<dyn DesiredProvider>,
+        actual: Arc<dyn StateProvider>,
+        events: Arc<EventBridge>,
+        updater: Option<Arc<dyn DesiredUpdater>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            coordinator,
+            desired,
+            actual,
+            events,
+            desired_updater: updater,
+        })
+    }
+
     /// Read the current desired state (GET /desired).
     pub async fn desired(&self) -> ControlResult<DesiredState> {
         self.desired.desired().await
@@ -427,6 +451,57 @@ mod tests {
         let d = plane.desired().await.unwrap();
         assert_eq!(d.rules.len(), 1);
         assert_eq!(plane.actual().await.unwrap().active_rules.len(), 0);
+    }
+
+    /// The `wrap` path shares an *existing* coordinator (the daemon's single
+    /// reconciliation authority): reads see the same stores, a reconcile is
+    /// driven through the shared coordinator, and events emitted by that
+    /// coordinator arrive in the bridge (one event path).
+    #[tokio::test]
+    async fn wrap_shares_existing_coordinator() {
+        use balansir_control::traits::{DesiredProvider, EventSink, StateProvider};
+
+        let desired_store: Arc<dyn DesiredProvider> = Arc::new(MemoryDesiredProvider::new(
+            DesiredState {
+                rules: vec![DesiredRule {
+                    id: 9,
+                    action: Action::Block,
+                    priority: 50,
+                    flow: None,
+                }],
+                drivers: vec![],
+            },
+        ));
+        let actual_store: Arc<dyn StateProvider> = Arc::new(MemoryStateProvider::default());
+        let events = Arc::new(EventBridge::new(16));
+        let bridge_sink: Arc<dyn EventSink> = events.clone();
+
+        let coordinator = Arc::new(Coordinator::new(
+            CoordinatorConfig::new(
+                desired_store.clone(),
+                actual_store.clone(),
+                Arc::new(BasicPlanner),
+                Arc::new(MockExecutor::new()),
+                Arc::new(MemorySnapshotStore::new()),
+            )
+            .with_event_sink(bridge_sink),
+        ));
+
+        let plane = ControlPlane::wrap(coordinator, desired_store, actual_store, events, None);
+
+        let d = plane.desired().await.unwrap();
+        assert_eq!(d.rules[0].id, 9);
+        assert_eq!(plane.actual().await.unwrap().active_rules.len(), 0);
+
+        // Reconcile drives the shared coordinator and its events land in the
+        // bridge (proves the daemon wiring can observe background-loop events).
+        plane.reconcile_api().await.unwrap();
+        assert!(
+            plane.get_events().await.iter().any(|e| {
+                e.event_type == "reconciliation_requested" || e.event_type == "reconciled"
+            }),
+            "wrap plane must expose coordinator events"
+        );
     }
 
     #[tokio::test]
