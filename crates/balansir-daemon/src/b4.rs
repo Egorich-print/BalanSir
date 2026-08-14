@@ -248,8 +248,8 @@ mod tests {
             upstream: None,
         };
 
-        let driver = B4Driver::new(DriverId::Hysteria, config);
-        assert_eq!(driver.id(), DriverId::Hysteria);
+        let driver = B4Driver::new(DriverId::B4, config);
+        assert_eq!(driver.id(), DriverId::B4);
         assert_eq!(driver.name(), "B4");
         assert!(driver
             .capabilities()
@@ -270,7 +270,7 @@ mod tests {
             upstream: None,
         };
 
-        let driver = B4Driver::new(DriverId::Hysteria, config);
+        let driver = B4Driver::new(DriverId::B4, config);
         let config_str = driver.generate_config();
 
         assert!(config_str.contains("transparent"));

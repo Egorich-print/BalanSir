@@ -27,6 +27,11 @@ Group=balansir
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
+# CAP_NET_BIND_SERVICE: lets the unprivileged daemon bind the DNS forwarder
+# (BALANSIR_DNS_CONFIG, default 127.0.0.1:53) on a privileged port. Only ever
+# used by the DNS forwarder socket; no other daemon code path needs it.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 # /run/balansir is created by systemd-tmpfiles (tmpfiles.d/balansir.conf),
 # owned root:balansir so both daemon and executor can use it.
 ReadWritePaths=/var/lib/balansir /var/log/balansir /run/balansir

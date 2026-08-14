@@ -25,7 +25,7 @@ pub struct EventEntry {
 pub async fn health() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
-        "version": "0.1.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": crate::uptime_seconds(),
     }))
 }
@@ -414,12 +414,19 @@ pub async fn get_driver(
     }
 }
 
-/// Restart a driver by ID or name
+/// Restart a driver by ID or name.
+///
+/// This endpoint is **not wired** to the runtime driver lifecycle: the API
+/// control plane only drives policy reconciliation, while transport driver
+/// restart lives in the privileged lifecycle manager (IPC `RestartDriver`).
+/// Responding "Restart requested" while nothing restarts would be a lie, so
+/// the request is rejected honestly instead. The WebUI does not expose this
+/// control; operators use the CLI/lifecycle path.
 pub async fn restart_driver(
     State(state): State<Arc<ApiState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let Some(plane) = &state.control else {
+    let Some(_plane) = &state.control else {
         return Json(serde_json::json!({
             "ok": false,
             "driver_id": id,
@@ -427,7 +434,7 @@ pub async fn restart_driver(
         }));
     };
 
-    let driver_id = match driver_from_name(&id) {
+    let _driver_id = match driver_from_name(&id) {
         Some(d) => d,
         None => {
             return Json(serde_json::json!({
@@ -438,20 +445,9 @@ pub async fn restart_driver(
         }
     };
 
-    // Driver restart is expressed as desired state: ask for a restart action,
-    // then let the plan executor converge on it. If the driver isn't currently
-    // configured, still record intent and reconcile.
-    match plane.reconcile_api().await {
-        Ok(()) => Json(serde_json::json!({
-            "ok": true,
-            "driver_id": id,
-            "driver_u32": driver_id.as_u32(),
-            "message": "Restart requested",
-        })),
-        Err(e) => Json(serde_json::json!({
-            "ok": false,
-            "driver_id": id,
-            "message": e.to_string(),
-        })),
-    }
+    Json(serde_json::json!({
+        "ok": false,
+        "driver_id": id,
+        "message": "driver restart is not wired through the API control plane; use the operator CLI (IPC RestartDriver)",
+    }))
 }

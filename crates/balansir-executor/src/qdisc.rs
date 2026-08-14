@@ -352,6 +352,7 @@ fn cake_options(config: &QosConfig) -> Vec<TcOption> {
 /// - a lone BASE_RATE attribute: value == the 8-byte rate;
 /// - the whole TCA_OPTIONS payload: value == 8-byte rate followed by the
 ///   remaining sub-attributes (length/type headers included).
+///
 /// Both shapes are handled by first trying a nested-attribute walk (which
 /// bails out immediately on the lone-value shape because its leading two
 /// bytes never form a valid length), then reading the leading 8 bytes.
