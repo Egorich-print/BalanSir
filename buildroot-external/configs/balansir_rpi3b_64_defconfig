@@ -60,6 +60,9 @@ BR2_PACKAGE_BALANSIR=y
 BR2_PACKAGE_HOST_RUSTC=y
 BR2_PACKAGE_NFTABLES=y
 BR2_PACKAGE_IPROUTE2=y
+# iptables + ip6tables: tailscaled requires ip6tables for its firewall rules
+# (linuxfw: clear ip6tables). Without it the daemon exits at startup.
+BR2_PACKAGE_IPTABLES=y
 BR2_PACKAGE_OPENSSH=y
 
 # Operator tools
