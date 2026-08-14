@@ -14,6 +14,14 @@ pub struct InterfaceInfo {
     pub index: i32,
     pub kind: Option<String>,
     pub mac: Option<String>,
+    /// Factory (permanent) MAC from `IFLA_PERM_ADDRESS`, when the kernel
+    /// exposes one. Never overwritten by MAC cloning.
+    #[serde(default)]
+    pub hardware_mac: Option<String>,
+    /// The MAC that was in effect before the last clone (executor-side
+    /// remember/restore state), used for safe restore and WAN identity.
+    #[serde(default)]
+    pub previous_mac: Option<String>,
     /// Link is administratively UP and carrier present.
     pub link_up: bool,
     pub mtu: u32,
@@ -139,6 +147,10 @@ pub struct InterfaceResult {
     pub detail: String,
     pub hardware_mac: Option<String>,
     pub current_mac: Option<String>,
+    /// The MAC that was in effect before the last clone, when known (used for
+    /// safe restore on interfaces without a permanent hardware address).
+    #[serde(default)]
+    pub previous_mac: Option<String>,
 }
 
 #[cfg(test)]

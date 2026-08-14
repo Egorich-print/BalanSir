@@ -323,6 +323,10 @@ impl SubsystemEvent {
 pub struct SubsystemSnapshot {
     pub qos: QosSnapshot,
     pub interfaces: Vec<InterfaceInfo>,
+    /// WAN identity: how the device presents itself to the ISP (MAC identity,
+    /// DHCP/route observation). `None` when no WAN interface is detected.
+    #[serde(default)]
+    pub wan_identity: Option<crate::network::WanIdentity>,
     pub tailscale: TailscaleSnapshot,
     pub b4: B4Snapshot,
     pub xray: XraySnapshot,

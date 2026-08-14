@@ -119,6 +119,21 @@ impl NetlinkInterfaceBackend {
         }
         None
     }
+
+    /// The MAC currently in effect for an interface (for restore fallback).
+    async fn current_mac(&self, name: &str) -> Option<String> {
+        let links = self.dump_links(name).await.ok()?;
+        for (_, attrs) in links {
+            for attr in attrs {
+                if let LinkAttribute::Address(bytes) = attr {
+                    if let Some(mac) = format_mac(&bytes) {
+                        return Some(mac);
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 fn link_to_info(name: String, header: LinkHeader, attrs: Vec<LinkAttribute>) -> InterfaceInfo {
@@ -134,8 +149,12 @@ fn link_to_info(name: String, header: LinkHeader, attrs: Vec<LinkAttribute>) -> 
                     info.mac = format_mac(&bytes);
                 }
             }
+            // The permanent factory MAC is the WAN-identity anchor and is
+            // never overwritten by cloning. It is *not* the current MAC when
+            // cloning is active.
             LinkAttribute::PermAddress(bytes) => {
                 if let Some(mac) = format_mac(&bytes) {
+                    info.hardware_mac = Some(mac.clone());
                     if info.mac.is_none() {
                         info.mac = Some(mac);
                     }
@@ -216,7 +235,9 @@ impl InterfaceBackend for NetlinkInterfaceBackend {
                         _ => None,
                     })
                     .unwrap_or_else(|| format!("link{}", header.index));
-                link_to_info(name, header, attrs)
+                let mut info = link_to_info(name, header, attrs);
+                info.previous_mac = remembered_previous_mac(&info.name);
+                info
             })
             .collect())
     }
@@ -224,6 +245,10 @@ impl InterfaceBackend for NetlinkInterfaceBackend {
     async fn set_mac(&self, interface: &str, mac: &str) -> Result<InterfaceResult, String> {
         let mac = validate_mac(mac).ok_or_else(|| format!("invalid MAC address: {mac}"))?;
         let hardware = self.permanent_mac(interface).await;
+        // Capture the MAC in effect *before* the clone so restore can fall back
+        // to it when no permanent hardware address exists (virtual WAN
+        // interfaces). The factory MAC is never overwritten on-disk.
+        let previous = self.current_mac(interface).await;
         let index = self.find_index(interface).await?;
         let handle = self.handle.lock().await;
         let bytes: Vec<u8> = mac
@@ -237,24 +262,32 @@ impl InterfaceBackend for NetlinkInterfaceBackend {
             .execute()
             .await
             .map_err(|e| format!("set MAC {interface}: {e}"))?;
+        if let Some(prev) = &previous {
+            remember_previous_mac(interface, prev);
+        }
         Ok(InterfaceResult {
             ok: true,
             detail: format!("MAC cloned to {mac}"),
             hardware_mac: hardware.clone(),
             current_mac: Some(mac),
+            previous_mac: previous,
         })
     }
 
     async fn restore_mac(&self, interface: &str) -> Result<InterfaceResult, String> {
+        // Prefer the permanent factory MAC; fall back to the MAC remembered
+        // before the last clone (so restore works even when the kernel exposes
+        // no IFLA_PERM_ADDRESS). The factory MAC is authoritative when present.
+        // NB: capture `hardware` up front — the netlink handle mutex is not
+        // reentrant, so a second dump after locking it would deadlock.
         let hardware = self.permanent_mac(interface).await;
-        let Some(hardware) = hardware else {
-            return Err(format!(
-                "no permanent hardware MAC available for {interface}"
-            ));
-        };
+        let target = hardware
+            .clone()
+            .or_else(|| remembered_previous_mac(interface))
+            .ok_or_else(|| format!("no permanent hardware MAC available for {interface}"))?;
         let index = self.find_index(interface).await?;
         let handle = self.handle.lock().await;
-        let bytes: Vec<u8> = hardware
+        let bytes: Vec<u8> = target
             .split(':')
             .filter_map(|p| u8::from_str_radix(p, 16).ok())
             .collect();
@@ -265,12 +298,75 @@ impl InterfaceBackend for NetlinkInterfaceBackend {
             .execute()
             .await
             .map_err(|e| format!("restore MAC {interface}: {e}"))?;
+        drop(handle);
+        // Once restored to the factory MAC, the remembered clone source is no
+        // longer needed.
+        if hardware.is_some() {
+            forget_previous_mac(interface);
+        }
         Ok(InterfaceResult {
             ok: true,
-            detail: format!("MAC restored to factory {hardware}"),
-            hardware_mac: Some(hardware.clone()),
-            current_mac: Some(hardware),
+            detail: format!("MAC restored to factory {target}"),
+            hardware_mac: hardware,
+            current_mac: Some(target),
+            previous_mac: None,
         })
+    }
+}
+
+/// Root-owned state file mapping interface → the MAC that was in effect before
+/// the last clone. Written atomically, mode 0600; this is the *fallback* for
+/// restore when a permanent hardware MAC does not exist — never the factory MAC
+/// itself.
+const MAC_STATE_PATH: &str = "/run/balansir/mac-state.json";
+
+fn remember_previous_mac(interface: &str, mac: &str) {
+    remember_previous_mac_at(std::path::Path::new(MAC_STATE_PATH), interface, mac);
+}
+
+fn remembered_previous_mac(interface: &str) -> Option<String> {
+    remembered_previous_mac_at(std::path::Path::new(MAC_STATE_PATH), interface)
+}
+
+fn forget_previous_mac(interface: &str) {
+    forget_previous_mac_at(std::path::Path::new(MAC_STATE_PATH), interface);
+}
+
+fn remember_previous_mac_at(path: &std::path::Path, interface: &str, mac: &str) {
+    let mut map = read_mac_state_at(path).unwrap_or_default();
+    map.insert(interface.to_string(), mac.to_string());
+    write_mac_state_at(path, &map);
+}
+
+fn remembered_previous_mac_at(path: &std::path::Path, interface: &str) -> Option<String> {
+    read_mac_state_at(path)
+        .ok()
+        .and_then(|m| m.get(interface).cloned())
+}
+
+fn forget_previous_mac_at(path: &std::path::Path, interface: &str) {
+    let mut map = read_mac_state_at(path).unwrap_or_default();
+    if map.remove(interface).is_some() {
+        write_mac_state_at(path, &map);
+    }
+}
+
+fn read_mac_state_at(path: &std::path::Path) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    serde_json::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+fn write_mac_state_at(path: &std::path::Path, map: &std::collections::BTreeMap<String, String>) {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, serde_json::to_string(map).unwrap_or_default()) {
+        tracing::warn!(path = %tmp.display(), "write mac state: {e}");
+        return;
+    }
+    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        tracing::warn!(path = %path.display(), "commit mac state: {e}");
     }
 }
 
@@ -349,5 +445,37 @@ mod tests {
         assert_eq!(validate_mac("aa:bb:cc:dd:ee"), None);
         assert_eq!(validate_mac("01:bb:cc:dd:ee:ff"), None, "multicast rejected");
         assert_eq!(validate_mac("aa:bb:cc:dd:ee:ff:00"), None);
+    }
+
+    #[test]
+    fn previous_mac_state_round_trip() {
+        let dir = std::env::temp_dir().join(format!("balansir-mac-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mac-state.json");
+
+        // Unknown interfaces are not remembered.
+        assert_eq!(remembered_previous_mac_at(&path, "wan0"), None);
+
+        // Clone remembers the pre-clone MAC.
+        remember_previous_mac_at(&path, "wan0", "00:11:22:33:44:55");
+        assert_eq!(
+            remembered_previous_mac_at(&path, "wan0"),
+            Some("00:11:22:33:44:55".into())
+        );
+        // Different interfaces do not collide.
+        assert_eq!(remembered_previous_mac_at(&path, "lan0"), None);
+
+        // A second clone overwrites the remembered pre-clone MAC.
+        remember_previous_mac_at(&path, "wan0", "00:11:22:33:44:66");
+        assert_eq!(
+            remembered_previous_mac_at(&path, "wan0"),
+            Some("00:11:22:33:44:66".into())
+        );
+
+        // Restore to factory forgets the entry.
+        forget_previous_mac_at(&path, "wan0");
+        assert_eq!(remembered_previous_mac_at(&path, "wan0"), None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

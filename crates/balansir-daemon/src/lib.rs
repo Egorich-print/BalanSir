@@ -20,6 +20,7 @@ pub mod server;
 pub mod startup;
 pub mod subsystems;
 pub mod system_stats;
+pub mod wan_identity;
 #[cfg(feature = "wireguard")]
 pub mod wireguard;
 #[cfg(feature = "xray")]

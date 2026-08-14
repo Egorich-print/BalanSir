@@ -36,13 +36,60 @@
   }
 
   $: interfaces = snapshot ? snapshot.interfaces : [];
+  $: wan = snapshot ? snapshot.wan_identity : null;
 </script>
 
-<h2>Network Interfaces</h2>
+<h2>WAN Identity</h2>
 
 {#if healthError}
   <p class="err">Cannot reach the daemon: {healthError}</p>
 {/if}
+
+{#if wan}
+  <div class="wan-card">
+    <div class="wan-head">
+      <strong>{wan.interface}</strong>
+      <span class="wan-link {wan.link_up ? 'up' : 'down'}">{wan.link_up ? 'LINK UP' : 'LINK DOWN'}</span>
+      {#if wan.cloning_active}
+        <span class="tag clone-tag">MAC CLONING ACTIVE</span>
+      {/if}
+    </div>
+    <div class="wan-grid">
+      <div class="wan-item">
+        <span class="wan-label">Hardware MAC</span>
+        <code>{wan.hardware_mac || '—'}</code>
+        <span class="wan-hint">factory address, never overwritten</span>
+      </div>
+      <div class="wan-item">
+        <span class="wan-label">Current MAC</span>
+        <code>{wan.current_mac || '—'}</code>
+        <span class="wan-hint">{wan.cloning_active ? 'cloned — presents as the previous CPE' : 'matches hardware'}</span>
+      </div>
+      <div class="wan-item">
+        <span class="wan-label">Configured MAC</span>
+        <code>{wan.configured_mac || '—'}</code>
+        <span class="wan-hint">operator-requested clone target</span>
+      </div>
+      <div class="wan-item">
+        <span class="wan-label">MTU</span>
+        <code>{wan.mtu}</code>
+      </div>
+      <div class="wan-item">
+        <span class="wan-label">DHCP</span>
+        <code>{wan.dhcp.observed ? 'observed' : 'not observed'}</code>
+        <span class="wan-hint">
+          {#if wan.dhcp.ip}IP {wan.dhcp.ip}{/if}
+          {#if wan.dhcp.gateway} · gateway {wan.dhcp.gateway}{/if}
+          {#if !wan.dhcp.ip && !wan.dhcp.gateway}no lease observed yet{/if}
+        </span>
+      </div>
+    </div>
+  </div>
+{:else}
+  <div class="wan-card empty">No WAN interface detected (no default route and no WAN pinned).</div>
+{/if}
+
+<h2>Network Interfaces</h2>
 
 <div class="wrap">
   <table>
@@ -75,6 +122,12 @@
           </td>
           <td>
             {iface.mac || '—'}
+            {#if iface.hardware_mac && iface.hardware_mac !== iface.mac}
+              <span class="sub" title="factory MAC">hw {iface.hardware_mac}</span>
+            {/if}
+            {#if iface.previous_mac}
+              <span class="sub" title="MAC before last clone">prev {iface.previous_mac}</span>
+            {/if}
             {#if iface.mac}
               {#if action[iface.name] === 'working'}<span class="sub">working…</span>
               {:else if action[iface.name] === 'ok'}<span class="ok">ok</span>
@@ -132,5 +185,17 @@
     background: #0f1524; color: #e8ecf4; border: 1px solid #1f2a44;
     border-radius: 4px; padding: 3px 6px; font-size: 0.75rem; width: 150px;
   }
-  h2 { color: #4ecdc4; font-size: 1.05rem; }
+  h2 { color: #4ecdc4; font-size: 1.05rem; margin-top: 26px; }
+  .wan-card { background: #16213e; border: 1px solid #0f3460; border-radius: 12px; padding: 16px; }
+  .wan-card.empty { color: #5a6a85; }
+  .wan-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; font-size: 1.02rem; color: #e8ecf4; }
+  .wan-link { font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 8px; }
+  .wan-link.up { background: #1f3d2b; color: #5fdba7; }
+  .wan-link.down { background: #3d1f1f; color: #ff6b6b; }
+  .clone-tag { background: #3d331f; color: #f5c26b; font-weight: 700; }
+  .wan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+  .wan-item { display: flex; flex-direction: column; gap: 3px; }
+  .wan-label { color: #7a8aa5; font-size: 0.72rem; text-transform: uppercase; }
+  .wan-item code { color: #e8ecf4; font-size: 0.88rem; }
+  .wan-hint { color: #5a6a85; font-size: 0.75rem; }
 </style>

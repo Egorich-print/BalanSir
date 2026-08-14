@@ -196,9 +196,18 @@ impl SubsystemManager {
         let filter = self.interface_filter.read().await.clone();
         match exec.interface_info(&filter).await {
             Ok(list) => {
+                // WAN identity (factory/current MAC, DHCP/route observation).
+                let wan = crate::wan_identity::assemble(
+                    &list,
+                    std::env::var("BALANSIR_WAN_INTERFACE").ok().as_deref(),
+                );
                 self.update_interface_rates(&list).await;
                 self.snapshot
-                    .update(|s| s.interfaces = list).await;
+                    .update(|s| {
+                        s.interfaces = list;
+                        s.wan_identity = wan;
+                    })
+                    .await;
                 debug!("subsystems: interface refresh ok");
             }
             Err(e) => {
@@ -780,6 +789,7 @@ mod tests {
                 detail: "ok".into(),
                 hardware_mac: Some("aa:bb:cc:dd:ee:ff".into()),
                 current_mac: Some("00:11:22:33:44:55".into()),
+                previous_mac: None,
             })
         }
         async fn interface_restore_mac(
@@ -791,6 +801,7 @@ mod tests {
                 detail: "ok".into(),
                 hardware_mac: Some("aa:bb:cc:dd:ee:ff".into()),
                 current_mac: Some("aa:bb:cc:dd:ee:ff".into()),
+                previous_mac: None,
             })
         }
         async fn tailscale_status(&self) -> Result<TailscaleStatus, String> {
