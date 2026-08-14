@@ -15,6 +15,5 @@ define BALANSIR_TAILSCALED_FIX
 	rm -f $(TARGET_DIR)/usr/bin/tailscaled $(TARGET_DIR)/usr/sbin/tailscaled
 	cp -f $(TAILSCALE_DIR)/bin/tailscaled $(TARGET_DIR)/usr/bin/tailscaled
 	chmod 0755 $(TARGET_DIR)/usr/bin/tailscaled
-	ln -sf /usr/bin/tailscaled $(TARGET_DIR)/usr/sbin/tailscaled
 endef
 TAILSCALE_POST_INSTALL_TARGET_HOOKS += BALANSIR_TAILSCALED_FIX
