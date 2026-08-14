@@ -157,6 +157,13 @@
       {:else}
         <p class="meta">System stats unavailable (no /proc).</p>
       {/if}
+      {#if snapshot && snapshot.capabilities}
+        <p class="meta">
+          Resource profile: <span class="minibadge tier-{snapshot.capabilities.tier.toLowerCase()}">
+            {snapshot.capabilities.tier}
+          </span>
+        </p>
+      {/if}
     </div>
 
     <div class="card">

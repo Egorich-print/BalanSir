@@ -147,6 +147,58 @@ pub struct InterfaceRate {
     pub tx_bps: u64,
 }
 
+/// Availability of one BalanSir feature for the detected resource profile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureAvailability {
+    pub name: String,
+    pub available: bool,
+    /// Present but with reduced expectations (e.g. Xray on a Minimal box).
+    pub limited: bool,
+    /// Why (actionable, shown in the WebUI, never fake).
+    pub reason: Option<String>,
+}
+
+impl FeatureAvailability {
+    pub fn available(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            available: true,
+            limited: false,
+            reason: None,
+        }
+    }
+    pub fn limited(name: &str, reason: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            available: true,
+            limited: true,
+            reason: Some(reason.to_string()),
+        }
+    }
+    pub fn unavailable(name: &str, reason: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            available: false,
+            limited: false,
+            reason: Some(reason.to_string()),
+        }
+    }
+}
+
+/// Runtime-detected hardware capability tier. BalanSir treats devices as
+/// capability tiers, not separate products: `Minimal` (256–512 MB) through
+/// `Performance` (4 GB+). Feature availability below is derived at runtime.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CapabilityProfile {
+    /// Minimal / Standard / Performance / Unknown.
+    pub tier: String,
+    /// Detected total RAM in MB.
+    pub ram_mb: u64,
+    /// Detected CPU count.
+    pub cores: u32,
+    pub features: Vec<FeatureAvailability>,
+}
+
 /// Subsystem state-change events, emitted by the daemon managers and bridged
 /// to SSE for the WebUI (one event vocabulary, not one per subsystem).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +309,8 @@ pub struct SubsystemSnapshot {
     pub system: SystemStats,
     /// Per-interface throughput derived from counter deltas.
     pub interface_rates: Vec<InterfaceRate>,
+    /// Runtime-detected capability tier and feature availability.
+    pub capabilities: CapabilityProfile,
     /// Unix epoch millis of the last successful refresh.
     pub updated_at_ms: i64,
     /// True when the executor could not be reached for the last refresh.
@@ -278,6 +332,13 @@ impl SharedSubsystemSnapshot {
 
     pub async fn read(&self) -> SubsystemSnapshot {
         self.inner.read().await.clone()
+    }
+
+    /// Synchronous single-field update for startup paths (never call from an
+    /// async context that already holds the read lock on the same snapshot).
+    pub fn update_blocking(&self, f: impl FnOnce(&mut SubsystemSnapshot)) {
+        let mut guard = self.inner.blocking_write();
+        f(&mut guard);
     }
 
     /// Update a single field group under the write lock.

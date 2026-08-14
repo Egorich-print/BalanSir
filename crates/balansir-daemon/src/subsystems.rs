@@ -120,9 +120,14 @@ fn qos_result_to_result(result: balansir_common::qos::QosResult) -> Result<(), S
 impl SubsystemManager {
     pub fn new(exec: Arc<dyn SubsystemExec>) -> Self {
         let (events, _) = broadcast::channel(128);
+        let snapshot = SharedSubsystemSnapshot::new();
+        // Publish the detected capability profile once at startup (it is
+        // derived from hardware and does not change at runtime).
+        let capabilities = crate::capability::detect();
+        snapshot.update_blocking(move |s| s.capabilities = capabilities);
         Self {
             exec,
-            snapshot: SharedSubsystemSnapshot::new(),
+            snapshot,
             qos_intent: RwLock::new(Vec::new()),
             events,
             interface_filter: RwLock::new(String::new()),
