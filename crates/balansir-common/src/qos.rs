@@ -132,6 +132,9 @@ pub struct AppliedQdisc {
     pub kind: Option<String>,
     pub our_identity: bool,
     pub stats: Option<QdiscStats>,
+    /// Bandwidth the kernel actually enforced (CAKE BASE_RATE), when the
+    /// qdisc exposes it. `None` means "not a rate-capped kind" or "unknown".
+    pub bandwidth_bps: Option<u64>,
 }
 
 /// Kernel capabilities relevant to shaping, probed at runtime.

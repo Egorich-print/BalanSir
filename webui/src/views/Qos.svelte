@@ -172,12 +172,13 @@
         <thead>
           <tr>
             <th>Interface</th><th>Kind</th><th>Handle</th><th>BalanSir</th>
-            <th>Drops</th><th>Backlog</th><th>Throughput</th><th>Health</th>
+            <th>Kernel rate</th><th>Drops</th><th>Backlog</th><th>Throughput</th><th>Health</th>
           </tr>
         </thead>
         <tbody>
           {#each qos.applied as a}
             {@const hint = saturationHint(a)}
+            {@const want = configuredBandwidth(a.interface)}
             <tr>
               <td>{a.interface}</td>
               <td>{a.kind || '—'}</td>
@@ -185,6 +186,19 @@
               <td>{a.our_identity ? 'yes' : 'no'}
                 {#if a.our_identity}
                   <button class="link" on:click={() => removeOne(a.interface)} disabled={busy}>remove</button>
+                {/if}
+              </td>
+              <td>
+                {#if a.bandwidth_bps}
+                  {#if want && want !== a.bandwidth_bps}
+                    <span class="warn" title="Kernel rate differs from desired intent">
+                      {Math.round(a.bandwidth_bps / 1e6)} Mb/s ⚠
+                    </span>
+                  {:else}
+                    {Math.round(a.bandwidth_bps / 1e6)} Mb/s
+                  {/if}
+                {:else}
+                  —
                 {/if}
               </td>
               <td>{a.stats ? a.stats.drops : '—'}</td>

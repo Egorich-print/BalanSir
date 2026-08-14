@@ -119,6 +119,24 @@ fn qos_result_to_result(result: balansir_common::qos::QosResult) -> Result<(), S
         Err(format!("{}: {}", result.op, result.detail))
     }
 }
+/// Does an applied qdisc satisfy a desired config? Checks identity, kind
+/// and, for rate-capped kinds, the bandwidth the kernel reports. A missing
+/// kernel rate (stale executor, silently degraded qdisc) counts as drift so
+/// reconciliation re-applies instead of believing the old state.
+fn q_matches_config(q: &AppliedQdisc, config: &QosConfig) -> bool {
+    if !q.our_identity || q.interface != config.interface {
+        return false;
+    }
+    if q.kind.as_deref() != Some(config.kind.as_str()) {
+        return false;
+    }
+    match (config.bandwidth_bps, q.bandwidth_bps) {
+        (Some(want), Some(have)) => want == have,
+        (Some(_), None) => config.kind != balansir_common::qos::QdiscKind::Cake,
+        (None, _) => true,
+    }
+}
+
 impl SubsystemManager {
     pub fn new(exec: Arc<dyn SubsystemExec>) -> Self {
         let (events, _) = broadcast::channel(128);
@@ -423,11 +441,7 @@ impl SubsystemManager {
 
         // Apply or replace where desired and applied disagree.
         for config in &desired {
-            let match_found = applied.iter().any(|q| {
-                q.our_identity
-                    && q.interface == config.interface
-                    && q.kind.as_deref() == Some(config.kind.as_str())
-            });
+            let match_found = applied.iter().any(|q| q_matches_config(q, config));
             if !match_found {
                 info!(
                     "subsystems: applying {} on {}",
@@ -466,11 +480,7 @@ impl SubsystemManager {
         let drift_now = desired
             .iter()
             .any(|config| {
-                !applied_fresh.iter().any(|q| {
-                    q.our_identity
-                        && q.interface == config.interface
-                        && q.kind.as_deref() == Some(config.kind.as_str())
-                })
+                !applied_fresh.iter().any(|q| q_matches_config(q, config))
             })
             || applied_fresh.iter().any(|q| {
                 q.our_identity
@@ -742,6 +752,7 @@ mod tests {
                         kind: Some(config.kind.as_str().to_string()),
                         our_identity: true,
                         stats: None,
+                    bandwidth_bps: None,
                     });
                     Ok(QosResult {
                         op: "apply".into(),
@@ -1075,6 +1086,7 @@ mod tests {
             kind: Some("fq_codel".into()),
             our_identity: true,
             stats: None,
+                    bandwidth_bps: None,
         });
         let manager = Arc::new(SubsystemManager::new(exec.clone()));
         manager.refresh().await;
@@ -1085,6 +1097,59 @@ mod tests {
             "orphan qdisc must be removed: {:?}",
             snap.qos.applied
         );
+    }
+
+    #[test]
+    fn qos_bandwidth_drift_detected() {
+        let make_cfg = |bps: Option<u64>| QosConfig {
+            interface: "eth0".into(),
+            direction: QosDirection::Egress,
+            kind: QdiscKind::Cake,
+            bandwidth_bps: bps,
+            latency_target_ms: None,
+            overhead_bytes: None,
+            ecn: true,
+            wash: false,
+            memory_limit_bytes: None,
+            classes: vec![],
+            comment: QosConfig::identity("eth0"),
+        };
+        let make_applied = |bandwidth_bps: Option<u64>| AppliedQdisc {
+            interface: "eth0".into(),
+            index: 1,
+            handle: "b51:0".into(),
+            parent: "ffff:fff1".into(),
+            kind: Some("cake".into()),
+            our_identity: true,
+            stats: None,
+            bandwidth_bps,
+        };
+        // Exact match: no drift.
+        assert!(q_matches_config(&make_applied(Some(20_000_000)), &make_cfg(Some(20_000_000))));
+        // Kernel enforces a different rate than desired.
+        assert!(!q_matches_config(&make_applied(Some(10_000_000)), &make_cfg(Some(20_000_000))));
+        // Rate-cap requested but kernel reports none (stale executor): drift.
+        assert!(!q_matches_config(&make_applied(None), &make_cfg(Some(20_000_000))));
+        // No rate requested: kind/identity match is enough.
+        assert!(q_matches_config(&make_applied(None), &make_cfg(None)));
+        // Wrong interface/identity never matches.
+        let foreign = AppliedQdisc {
+            interface: "eth1".into(),
+            ..make_applied(Some(20_000_000))
+        };
+        assert!(!q_matches_config(&foreign, &make_cfg(Some(20_000_000))));
+        // fq_codel without a reported rate still matches (no rate requested).
+        let fq = AppliedQdisc {
+            kind: Some("fq_codel".into()),
+            ..make_applied(None)
+        };
+        assert!(q_matches_config(
+            &fq,
+            &QosConfig {
+                kind: QdiscKind::FqCodel,
+                ..make_cfg(None)
+            }
+        ));
     }
 
     #[test]

@@ -31,7 +31,7 @@ use netlink_packet_core::{
 };
 use netlink_packet_route::tc::{TcAttribute, TcHandle, TcMessage, TcOption, TcStats2};
 use netlink_packet_route::RouteNetlinkMessage;
-use netlink_packet_utils::nla::DefaultNla;
+use netlink_packet_utils::nla::{DefaultNla, Nla};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -276,6 +276,7 @@ impl QosBackend for TcNetlinkBackend {
                     kind,
                     our_identity,
                     stats,
+                    bandwidth_bps: cake_bandwidth_of(&msg.attributes),
                 });
             }
         }
@@ -329,6 +330,99 @@ fn cake_options(config: &QosConfig) -> Vec<TcOption> {
         opts.push(TcOption::Other(DefaultNla::new(10, bytes)));
     }
     opts
+}
+
+/// Extract the CAKE enforced bandwidth from a dumped qdisc message.
+///
+/// The kernel reports TCA_CAKE_BASE_RATE (attr 2) in *bytes/sec*; BalanSir's
+/// [`QosConfig::bandwidth_bps`] uses bits/sec, so the value is converted back
+/// on read. The netlink-packet-route crate has no native CAKE option parser,
+/// so an unknown-kind TCA_OPTIONS dump reaches us as a `TcOption::Other` in
+/// two shapes:
+/// - a lone BASE_RATE attribute: value == the 8-byte rate;
+/// - the whole TCA_OPTIONS payload: value == 8-byte rate followed by the
+///   remaining sub-attributes (length/type headers included).
+/// Both shapes are handled by first trying a nested-attribute walk (which
+/// bails out immediately on the lone-value shape because its leading two
+/// bytes never form a valid length), then reading the leading 8 bytes.
+fn cake_bandwidth_of(attributes: &[TcAttribute]) -> Option<u64> {
+    for attr in attributes {
+        if let TcAttribute::Options(options) = attr {
+            for option in options {
+                if let TcOption::Other(nla) = option {
+                    if nla.kind() != 2 {
+                        continue;
+                    }
+                    let mut raw = vec![0u8; nla.value_len()];
+                    nla.emit_value(&mut raw);
+                    match scan_cake_base_rate(&raw) {
+                        BlobScan::Rate(rate) => return Some(rate),
+                        // A well-formed attribute chain without a usable rate
+                        // (e.g. BASE_RATE is zero = unlimited): do not fall
+                        // through to the leading-8-bytes read.
+                        BlobScan::NoRate => continue,
+                        // Not an attribute chain: this nla is the lone value.
+                        BlobScan::NotABlob => {}
+                    }
+                    if raw.len() >= 8 {
+                        return rate_from_le(&raw[..8]);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Result of scanning a raw payload for a CAKE base rate.
+enum BlobScan {
+    /// TCA_CAKE_BASE_RATE found (bits/sec).
+    Rate(u64),
+    /// Payload is a well-formed attribute chain but has no usable rate.
+    NoRate,
+    /// Payload does not look like an attribute chain (a lone value).
+    NotABlob,
+}
+
+/// Scan a raw nested-attribute chain for TCA_CAKE_BASE_RATE (kind 2,
+/// u64 bytes/sec) and convert it to bits/sec.
+fn scan_cake_base_rate(raw: &[u8]) -> BlobScan {
+    let mut off = 0usize;
+    while off + 4 <= raw.len() {
+        let len = u16::from_ne_bytes([raw[off], raw[off + 1]]) as usize;
+        let kind = u16::from_ne_bytes([raw[off + 2], raw[off + 3]]);
+        if len < 12 || off + len > raw.len() {
+            return if off == 0 {
+                BlobScan::NotABlob
+            } else {
+                BlobScan::NoRate
+            };
+        }
+        let payload = &raw[off + 4..off + len];
+        if kind == 2 && payload.len() >= 8 {
+            return match rate_from_le(payload) {
+                Some(rate) => BlobScan::Rate(rate),
+                None => BlobScan::NoRate, // rate present but zero = unlimited
+            };
+        }
+        // Attributes are 4-byte aligned.
+        off += (len + 3) & !3;
+    }
+    if off == 0 {
+        BlobScan::NotABlob
+    } else {
+        BlobScan::NoRate
+    }
+}
+
+/// Decode a little-endian u64 rate and normalize bytes/sec → bits/sec.
+/// Zero means "unlimited" in the kernel; report None so drift detection does
+/// not treat it as a 0 bps cap.
+fn rate_from_le(bytes: &[u8]) -> Option<u64> {
+    let mut wide = [0u8; 8];
+    wide[..bytes.len().min(8)].copy_from_slice(&bytes[..bytes.len().min(8)]);
+    let bytes_per_sec = u64::from_le_bytes(wide);
+    (bytes_per_sec > 0).then_some(bytes_per_sec.saturating_mul(8))
 }
 
 /// Extract a unified [`QdiscStats`] from a parsed qdisc message.
@@ -455,6 +549,7 @@ impl QosBackend for RecordOnlyBackend {
                 kind: Some(kind.as_str().to_string()),
                 our_identity: true,
                 stats: None,
+                    bandwidth_bps: None,
             })
             .collect())
     }
@@ -499,6 +594,7 @@ impl InMemoryBackend {
                     kind: Some(kind.to_string()),
                     our_identity: false,
                     stats: None,
+                    bandwidth_bps: None,
                 },
             );
         self
@@ -545,6 +641,8 @@ impl QosBackend for InMemoryBackend {
                         drops: 1,
                         ..Default::default()
                     }),
+                    // The simulated kernel honours the requested rate.
+                    bandwidth_bps: config.bandwidth_bps,
                 },
             );
         Ok(())
@@ -591,11 +689,79 @@ mod tests {
     use balansir_common::qos::{QosDirection, QosConfig};
     use netlink_packet_utils::nla::Nla;
 
-    /// Regression test for the CAKE netlink ABI: attribute numbers and native
-    /// byte order were verified against `tc` messages on the running kernel
-    /// (BASE_RATE=2 u64, OVERHEAD=6 s32, TARGET=8 u32, WASH=13 u32, MEMORY=10
-    /// u32). Encoding drift here silently degrades CAKE to "bandwidth
-    /// unlimited" or garbles overhead/target.
+    #[test]
+    fn cake_bandwidth_reads_back_from_parsed_options() {
+        // Round-trip: options produced by cake_options() must yield the
+        // original bandwidth when scanned the way the kernel dump is scanned.
+        let config = QosConfig {
+            interface: "eth0".into(),
+            direction: QosDirection::Egress,
+            kind: QdiscKind::Cake,
+            bandwidth_bps: Some(50_000_000),
+            latency_target_ms: Some(10),
+            overhead_bytes: None,
+            ecn: true,
+            wash: false,
+            memory_limit_bytes: None,
+            classes: vec![],
+            comment: QosConfig::identity("eth0"),
+        };
+        let options = cake_options(&config);
+        let attributes = vec![TcAttribute::Options(options)];
+        assert_eq!(cake_bandwidth_of(&attributes), Some(50_000_000));
+        // No bandwidth configured → nothing to read back.
+        let cfg_none = QosConfig {
+            bandwidth_bps: None,
+            ..config
+        };
+        assert_eq!(
+            cake_bandwidth_of(&[TcAttribute::Options(cake_options(&cfg_none))]),
+            None
+        );
+        // Non-CAKE options (fq_codel) are ignored.
+        let fq_opts = vec![TcOption::FqCodel(
+            netlink_packet_route::tc::TcQdiscFqCodelOption::Target(5_000),
+        )];
+        assert_eq!(cake_bandwidth_of(&[TcAttribute::Options(fq_opts)]), None);
+    }
+
+    #[test]
+    fn cake_bandwidth_reads_from_kernel_style_blob() {
+        // A kernel dump of a CAKE qdisc arrives as one `Other` nla whose
+        // payload is the nested TCA_OPTIONS blob: BASE_RATE(2,u64 bytes/sec),
+        // RTT(7,u32), WASH(13,u32)...
+        let mut blob = Vec::new();
+        for (kind, value) in [
+            (2u16, 2_500_000u64.to_le_bytes().to_vec()), // 20 Mbit/s as B/s
+            (7u16, 100_000u32.to_le_bytes().to_vec()),
+            (13u16, 1u32.to_le_bytes().to_vec()),
+        ] {
+            let len = (4 + value.len()) as u16;
+            blob.extend_from_slice(&len.to_ne_bytes());
+            blob.extend_from_slice(&kind.to_ne_bytes());
+            blob.extend_from_slice(&value);
+            while blob.len() % 4 != 0 {
+                blob.push(0);
+            }
+        }
+        let opts = vec![TcOption::Other(DefaultNla::new(2, blob))];
+        assert_eq!(
+            cake_bandwidth_of(&[TcAttribute::Options(opts)]),
+            Some(20_000_000)
+        );
+        // Unlimited (zero rate) reports None, not 0.
+        let mut zero = 0u64.to_le_bytes().to_vec();
+        let len = (4 + zero.len()) as u16;
+        let mut zblob = vec![];
+        zblob.extend_from_slice(&len.to_ne_bytes());
+        zblob.extend_from_slice(&2u16.to_ne_bytes());
+        zblob.append(&mut zero);
+        assert_eq!(zblob.len(), 12);
+        assert_eq!(&zblob[..4], &[12, 0, 2, 0]);
+        let opts = vec![TcOption::Other(DefaultNla::new(2, zblob))];
+        assert_eq!(cake_bandwidth_of(&[TcAttribute::Options(opts)]), None);
+    }
+
     #[test]
     fn cake_options_abi_matches_tc() {
         let config = QosConfig {
