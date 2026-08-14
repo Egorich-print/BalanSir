@@ -25,8 +25,10 @@ Environment=BALANSIR_ALLOWED_UIDS=0,1500
 
 # Capabilities: minimal set for network control only.
 # CAP_SYS_ADMIN removed (not needed; reduces kernel attack surface).
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+# CAP_CHOWN is required to group-own the Unix socket so the unprivileged
+# daemon (UID 1500, group balansir) can connect (ADR-030).
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
 
 # Filesystem hardening: root fs read-only, exec-only tmp, private /tmp.
 ProtectSystem=strict
