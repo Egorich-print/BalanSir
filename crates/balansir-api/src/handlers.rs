@@ -375,3 +375,14 @@ pub async fn tailscale_down(State(state): State<Arc<ApiState>>) -> impl IntoResp
         ),
     }
 }
+
+/// QoS status: desired plans + applied interfaces.
+pub async fn qos_status(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let Some(api) = state.api.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Control plane not available" })),
+        );
+    };
+    (StatusCode::OK, Json(api.qos_status().await))
+}

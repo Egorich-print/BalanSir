@@ -18,6 +18,7 @@
   let tailscale = null;
   let tsBusy = false;
   let tsError = null;
+  let qos = null;
 
   let pollTimer = null;
   let es = null;
@@ -60,6 +61,11 @@
     } catch (e) {
       tailscale = null;
       tsError = e.message;
+    }
+    try {
+      qos = await api.qosStatus();
+    } catch (e) {
+      qos = null;
     }
     try {
       const resp = await fetch('/api/metrics');
@@ -159,6 +165,7 @@
   <nav class="tabs">
     <button class:active={tab === 'overview'} on:click={() => tab = 'overview'}>Overview</button>
     <button class:active={tab === 'policy'} on:click={() => tab = 'policy'}>Policy</button>
+    <button class:active={tab === 'qos'} on:click={() => tab = 'qos'}>QoS</button>
     <button class:active={tab === 'tailscale'} on:click={() => tab = 'tailscale'}>Tailscale</button>
     <button class:active={tab === 'events'} on:click={() => tab = 'events'}>Events</button>
     <button class:active={tab === 'metrics'} on:click={() => tab = 'metrics'}>Metrics</button>
@@ -266,6 +273,40 @@
     </section>
   {/if}
 
+  {#if tab === 'qos'}
+    <section>
+      <div class="card">
+        <h2>QoS / Traffic shaping</h2>
+        {#if qos}
+          <h3>Desired plans</h3>
+          {#if (qos.desired || []).length === 0}
+            <p>No shaping desired.</p>
+          {:else}
+            {#each qos.desired as plan}
+              <div class="qos-plan">
+                <b>{plan.interface}</b>
+                <span>default {Math.round((plan.default_rate_bits || 0) / 1000)} kbit / ceil {Math.round((plan.default_ceil_bits || 0) / 1000)} kbit</span>
+                <span class="qos-classes">
+                  {#each plan.classes as c}
+                    <span class="qos-class">class {c.class_id}: {Math.round(c.rate_bits / 1000)} kbit ({Math.round(c.ceil_bits / 1000)} ceil)</span>
+                  {/each}
+                </span>
+              </div>
+            {/each}
+          {/if}
+          <h3>Applied on</h3>
+          {#if (qos.applied || []).length === 0}
+            <p>No interfaces currently shaped.</p>
+          {:else}
+            {#each qos.applied as iface}<span class="qos-applied">{iface}</span>{/each}
+          {/if}
+        {:else}
+          <p>QoS status unavailable.</p>
+        {/if}
+      </div>
+    </section>
+  {/if}
+
   {#if tab === 'tailscale'}
     <section>
       <div class="card">
@@ -344,5 +385,10 @@
   .ts-item span { display: block; font-size: 0.8em; color: #888; }
   .ts-item b { font-size: 1.1em; }
   .ts-actions { display: flex; gap: 10px; }
+  .qos-plan { background: #0f3460; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+  .qos-plan b { display: block; margin-bottom: 4px; }
+  .qos-classes { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .qos-class, .qos-applied { background: #1a237e; border-radius: 6px; padding: 4px 8px; font-size: 0.85em; }
+  .qos-applied { background: #2e7d32; margin-right: 6px; }
   .footer { text-align: center; margin-top: 30px; color: #666; font-size: 0.9em; }
 </style>

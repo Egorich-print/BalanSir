@@ -80,4 +80,7 @@ pub trait ApiSurface: Send + Sync {
     async fn tailscale_up(&self) -> Result<(), String>;
     /// Bring Tailscale down.
     async fn tailscale_down(&self) -> Result<(), String>;
+
+    /// Desired QoS plans + applied interfaces (non-authoritative).
+    async fn qos_status(&self) -> serde_json::Value;
 }

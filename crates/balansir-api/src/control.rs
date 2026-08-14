@@ -306,6 +306,9 @@ impl crate::surface::ApiSurface for ControlPlane {
     async fn tailscale_down(&self) -> Result<(), String> {
         Err("not wired (daemon surface)".into())
     }
+    async fn qos_status(&self) -> serde_json::Value {
+        serde_json::json!({ "desired": [], "applied": [] })
+    }
 }
 
 /// A desired-state store that is both readable (`DesiredProvider`) and

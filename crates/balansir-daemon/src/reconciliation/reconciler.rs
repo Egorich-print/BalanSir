@@ -312,6 +312,18 @@ impl Reconciler {
         self.desired_raw.lock().await.clone()
     }
 
+    /// QoS status: desired plans plus executor-applied interfaces
+    /// (non-authoritative, the executor reports what is actually shaped).
+    pub async fn qos_status(&self) -> serde_json::Value {
+        let desired = self.desired_state.lock().await.qos.clone();
+        let interfaces: Vec<String> = desired.iter().map(|p| p.interface.clone()).collect();
+        let applied = self.executor.qos_state(&interfaces).await;
+        serde_json::json!({
+            "desired": desired,
+            "applied": applied.interfaces,
+        })
+    }
+
     /// Transactional hot reload (ADR-010).
     ///
     /// Compiles the candidate strictly (A3: domain rules expanded to concrete

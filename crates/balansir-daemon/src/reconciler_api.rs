@@ -99,6 +99,10 @@ impl ApiSurface for ReconcilerApi {
     async fn tailscale_down(&self) -> Result<(), String> {
         crate::tailscale::down().await
     }
+
+    async fn qos_status(&self) -> serde_json::Value {
+        self.reconciler.qos_status().await
+    }
 }
 
 #[cfg(test)]

@@ -38,6 +38,7 @@ export const api = {
   tailscaleStatus: () => get('/tailscale/status'),
   tailscaleUp: () => post('/tailscale/up'),
   tailscaleDown: () => post('/tailscale/down'),
+  qosStatus: () => get('/qos/status'),
 };
 
 export function eventsStream(onEvent, onStatus) {
