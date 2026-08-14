@@ -64,3 +64,14 @@ if [ -d "${TARGET_DIR}/etc/systemd" ]; then
         printf '[Journal]\nStorage=persistent\n' > \
             "${TARGET_DIR}/etc/systemd/journald.conf.d/00-boot-debug.conf"
 fi
+
+# --- Tailscale: fix broken self-referential tailscaled symlinks ------------
+# Buildroot's tailscale.mk creates /usr/sbin/tailscaled -> ../bin/tailscaled
+# and /bin/tailscaled -> ../bin/tailscaled (a loop). tailscale is a single
+# multi-call binary: argv[0]=tailscaled runs the daemon. Point both symlinks at
+# the real binary so the unit's ExecStart works (status 203/EXEC otherwise).
+if [ -e "${TARGET_DIR}/bin/tailscale" ]; then
+    ln -sf /bin/tailscale "${TARGET_DIR}/bin/tailscaled"
+    ln -sf /bin/tailscale "${TARGET_DIR}/usr/sbin/tailscaled"
+    ln -sf /bin/tailscale "${TARGET_DIR}/usr/bin/tailscaled"
+fi
