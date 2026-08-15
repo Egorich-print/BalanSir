@@ -127,12 +127,7 @@ impl NftablesExecutor {
             DpiOp::InstallQueue { queue_num, ports } => {
                 // Queue 0 is the standard NFQUEUE queue (libnetfilter_queue
                 // defaults to it); `bypass` in the rendered rule keeps the
-                // fail-open guarantee. Only reject out-of-range numbers.
-                if *queue_num > 65535 {
-                    return Err(balansir_common::Error::Misconfiguration(
-                        "DPI queue number out of range".into(),
-                    ));
-                }
+                // fail-open guarantee. The port list is validated below.
                 if ports.is_empty() {
                     return Err(balansir_common::Error::Misconfiguration(
                         "DPI InstallQueue requires at least one port".into(),
