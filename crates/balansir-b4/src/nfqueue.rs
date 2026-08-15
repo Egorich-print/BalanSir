@@ -61,14 +61,13 @@ impl NfQueue {
     }
 
     fn configure(&self) -> io::Result<()> {
-        // Match libnetfilter_queue's sequence: UNBIND_PF then PF_BIND (some
-        // kernels require the transition to (re)register the family), then
-        // BIND the specific queue, then copy-mode params.
-        let pf_unbind = self.config_msg(NFQNL_CFG_CMD_PF_UNBIND, Some(AF_INET));
+        // libnetfilter_queue: PF_UNBIND/PF_BIND use res_id=0, queue BIND and
+        // params use the queue number.
+        let pf_unbind = self.config_msg(NFQNL_CFG_CMD_PF_UNBIND, Some(AF_INET), 0);
         self.send_config(&pf_unbind)?;
-        let pf_bind = self.config_msg(NFQNL_CFG_CMD_PF_BIND, Some(AF_INET));
+        let pf_bind = self.config_msg(NFQNL_CFG_CMD_PF_BIND, Some(AF_INET), 0);
         self.send_config(&pf_bind)?;
-        let bind = self.config_msg(NFQNL_CFG_CMD_BIND, None);
+        let bind = self.config_msg(NFQNL_CFG_CMD_BIND, None, self.queue_num);
         self.send_config(&bind)?;
         let params = self.config_params();
         self.send_config(&params)?;
@@ -102,7 +101,7 @@ impl NfQueue {
     }
 
     /// Build an `NFQNL_MSG_CONFIG` message.
-    fn config_msg(&self, cmd: u8, pf: Option<u8>) -> Vec<u8> {
+    fn config_msg(&self, cmd: u8, pf: Option<u8>, res_id: u16) -> Vec<u8> {
         let mut attrs: Vec<u8> = Vec::new();
         // NFQA_CFG_CMD (nested): { NFQNL_CFG_CMD_CMD, NFQNL_CFG_CMD_PF }
         let mut cmd_attrs = Vec::new();
@@ -112,16 +111,18 @@ impl NfQueue {
         }
         push_nla(&mut attrs, NFQA_CFG_CMD, &cmd_attrs);
 
-        self.netlink_msg(NFQNL_MSG_CONFIG, attrs, self.queue_num)
+        self.netlink_msg(NFQNL_MSG_CONFIG, attrs, res_id)
     }
 
     fn config_params(&self) -> Vec<u8> {
-        // NFQA_CFG_PARAMS payload (nfqnl_msg_config_params):
-        //   copy_range: u32, copy_mode: u8 (packed, network order fields)
+        // NFQA_CFG_PARAMS payload (struct nfqnl_msg_config_params, 8 bytes):
+        //   copy_range: u32 (network order)
+        //   copy_mode: u8
+        //   _pad[3]: u8
         let mut params = Vec::with_capacity(8);
         params.extend_from_slice(&self.copy_range.to_be_bytes());
         params.push(NFQNL_COPY_PACKET);
-        params.push(0); // padding
+        params.extend_from_slice(&[0u8; 3]);
 
         let mut attrs = Vec::new();
         push_nla(&mut attrs, NFQA_CFG_PARAMS, &params);
@@ -288,7 +289,7 @@ impl Drop for NfQueue {
     fn drop(&mut self) {
         let _ = self
             .sock
-            .send(&self.config_msg(NFQNL_CFG_CMD_UNBIND, None), 0);
+            .send(&self.config_msg(NFQNL_CFG_CMD_UNBIND, None, self.queue_num), 0);
     }
 }
 
