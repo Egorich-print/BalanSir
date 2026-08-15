@@ -198,7 +198,14 @@ impl NfQueue {
         let msg = parse_netfilter_message(&buf[..n])?;
         match msg {
             NfMessage::Packet(p) => Ok(Some(p)),
-            NfMessage::Other => Ok(None),
+            NfMessage::Other => {
+                tracing::warn!(
+                    len = n,
+                    msg = %hex(&buf[..n.min(96)]),
+                    "NFQUEUE recv: unrecognized message (not packet), skipping"
+                );
+                Ok(None)
+            }
         }
     }
 
