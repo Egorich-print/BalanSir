@@ -27,12 +27,14 @@ RestartSec=5
 User=balansir
 Group=balansir
 NoNewPrivileges=yes
-# DNS gateway: the daemon binds UDP/53 on the LAN address to serve as a DNS
-# forwarder (BALANSIR_DNS_CONFIG). Port 53 is privileged; grant exactly
-# CAP_NET_BIND_SERVICE (no other capabilities, no root). Mirrors
-# deploy/systemd/balansir-daemon.service.
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# Network control from the unprivileged daemon:
+# - CAP_NET_BIND_SERVICE: DNS gateway binds UDP/53 on the LAN address
+#   (BALANSIR_DNS_CONFIG).
+# - CAP_NET_ADMIN: DPI-bypass engine binds NFQUEUE and installs the queue
+#   nft rule (BALANSIR_DPI_CONFIG).
+# No root; only these two capabilities. Mirrors deploy/systemd/balansir-daemon.service.
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 ProtectSystem=strict
 ProtectHome=yes
 # /run/balansir is created by systemd-tmpfiles (tmpfiles.d/balansir.conf),

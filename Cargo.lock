@@ -269,6 +269,7 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "balansir-api",
+ "balansir-b4",
  "balansir-common",
  "balansir-control",
  "futures",
