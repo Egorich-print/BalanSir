@@ -126,6 +126,7 @@ fn to_nft_verdict(action: &balansir_common::Action) -> Option<crate::nftables::N
         balansir_common::Action::Allow => Some(NftVerdict::Accept),
         balansir_common::Action::Block => Some(NftVerdict::Drop),
         balansir_common::Action::Reject => Some(NftVerdict::Reject),
+        balansir_common::Action::Queue { num } => Some(NftVerdict::Queue { num: *num }),
         _ => None,
     }
 }

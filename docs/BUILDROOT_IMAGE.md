@@ -188,3 +188,62 @@ logs queries, cache on.
 
 Then point LAN clients' DNS at 192.168.3.12 (router DHCP DNS option) to make
 the RPi the network's DNS gateway.
+
+## DPI-bypass (Rust-native NFQUEUE engine)
+
+BalanSir ships a pure-Rust DPI-bypass engine (`balansir-b4` crate): it binds a
+kernel NFQUEUE (netlink, no C dependency), inspects TCP TLS-SNI to identify
+the destination host, and applies per-domain bypass strategies before the
+packet is forwarded. Classic b4 ("Bye Bye Big Bro") techniques, implemented in
+Rust: MSS rewrite, TCP-option (SACK) stripping, TTL disorientation.
+
+Enable with a profile config:
+
+```toml
+# /etc/balansir/dpi.toml
+queue_num = 0
+ports = [443]
+
+[[profiles]]
+name = "youtube"
+domains = ["youtube.com", "googlevideo.com"]
+strategies = [
+  { kind = "mss", mss = 1200 },
+  { kind = "strip_sack" },
+]
+
+[[profiles]]
+name = "chatgpt"
+domains = ["openai.com", "chatgpt.com"]
+strategies = [ { kind = "ttl", ttl = 63 } ]
+```
+
+Daemon drop-in `balansir-daemon.service.d/dpi.conf`:
+
+```ini
+[Service]
+Environment=BALANSIR_DPI_CONFIG=/etc/balansir/dpi.toml
+```
+
+Kernel requirements (in `linux.fragment`): `CONFIG_NETFILTER_NETLINK_QUEUE=y`,
+`CONFIG_NFT_QUEUE=y`, `CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y`, `CONFIG_NF_QUEUE=y`.
+The daemon runs unprivileged with `CAP_NET_ADMIN` to bind the queue + install
+the nft `queue` rule. Status/counters: `GET /api/dpi` and the WebUI DPI view.
+
+**QEMU VERIFIED**: engine binds NFQUEUE, loads profiles, `/dpi` reports
+enabled/queue/ports/profiles/counters; kernel accepts `queue num` nft rules;
+live interception verified end-to-end: TCP data is received, TLS SNI
+extracted (`youtube.com`), profile strategies applied (MSS + TTL rewrite)
+and the mutated packet returned via payload-replace verdict — `/dpi` counters
+`packets_seen`/`tls_packets`/`mutated` increment and the queue drains (no
+stall), while the peer still receives the (re-written) ClientHello intact.
+Verified fixes against kernel 6.18: config message must not send
+`NFQA_CFG_FLAGS` without `NFQA_CFG_MASK` (kernel rejects with `-EINVAL`,
+leaving copy_mode=COPY_NONE which silently drops queued packets); verdict
+header is `nfqnl_msg_verdict_hdr` (verdict + packet id, 8 bytes); netlink
+recv buffers must be zero-length `Vec::with_capacity` (netlink_sys fills via
+`BufMut::chunk_mut()`, which points past a pre-filled vec).
+
+**PHYSICAL RPI MANUAL VERIFICATION REQUIRED**: real intercepted traffic against
+a blocked/DPI'd endpoint to confirm a chosen strategy actually restores
+connectivity (depends on the ISP's DPI behavior).

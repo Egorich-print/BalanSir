@@ -302,6 +302,9 @@ pub enum Action {
 
     /// Log packet (for debugging)
     Log,
+
+    /// Send to a userspace NFQUEUE (DPI-bypass interception).
+    Queue { num: u16 },
 }
 
 impl Action {
@@ -315,6 +318,7 @@ impl Action {
             Self::Allow => ActionType::Allow,
             Self::Shape { .. } => ActionType::Shape,
             Self::Log => ActionType::Log,
+            Self::Queue { .. } => ActionType::Queue,
         }
     }
 }
@@ -329,6 +333,7 @@ pub enum ActionType {
     Allow,
     Shape,
     Log,
+    Queue,
 }
 
 // --- Action Request (daemon -> executor) ---
