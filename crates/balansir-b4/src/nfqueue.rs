@@ -133,7 +133,8 @@ impl NfQueue {
         let mut cmd_struct = Vec::with_capacity(4);
         cmd_struct.push(cmd);
         cmd_struct.push(0);
-        cmd_struct.extend_from_slice(&pf.unwrap_or(0).to_be_bytes());
+        // pf is __be16 (AF_*), not a single byte.
+        cmd_struct.extend_from_slice(&(pf.unwrap_or(0) as u16).to_be_bytes());
         push_nla(&mut attrs, NFQA_CFG_CMD, &cmd_struct);
 
         self.netlink_msg(NFQNL_MSG_CONFIG, attrs, res_id)
