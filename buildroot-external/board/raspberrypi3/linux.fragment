@@ -41,6 +41,20 @@ CONFIG_NFT_REJECT=y
 CONFIG_NFT_LOG=y
 CONFIG_NFT_LIMIT=y
 CONFIG_NFT_COUNTER=y
+# nftables NAT/masquerade dependencies. bcm2711_defconfig does not enable
+# NF_NAT/NF_CONNTRACK by default; without them CONFIG_NFT_NAT/MASQ above are
+# silently dropped by kconfig and the RPi cannot act as a NAT gateway
+# (modprobe nft_masq → "Function not implemented"). Enable the full set so
+# the router role (ip_forward + masquerade) works.
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_CONNTRACK_IPV4=y
+CONFIG_NF_CONNTRACK_IPV6=y
+CONFIG_NF_NAT=y
+CONFIG_NF_NAT_IPV4=y
+CONFIG_NF_NAT_IPV6=y
+CONFIG_NF_NAT_MASQUERADE=y
+CONFIG_NF_NAT_MASQUERADE_IPV4=y
+CONFIG_NF_NAT_MASQUERADE_IPV6=y
 # NFQUEUE: DPI-bypass engine intercepts TCP via `nft ... queue` → NFQUEUE.
 # Built-in so the engine can bind at boot without module load.
 CONFIG_NETFILTER_NETLINK_QUEUE=y
