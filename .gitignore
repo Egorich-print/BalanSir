@@ -1,6 +1,11 @@
 target/
 node_modules/
 dist/
+# The WebUI SPA is built at repo time and MUST ship in-tree so the Buildroot
+# image (built from `git archive HEAD`, tracked files only) serves a
+# self-consistent index.html + hashed assets. Never re-ignore these.
+!webui/dist/
+!webui/dist/**
 build/
 .DS_Store
 *.log
