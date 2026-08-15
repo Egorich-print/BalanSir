@@ -50,7 +50,7 @@ scp -q -o StrictHostKeyChecking=no -P "$PORT" "$TMP.tgz" \
 ssh -o StrictHostKeyChecking=no -p "$PORT" builder@localhost '
     set -eu
     cd /home/builder/balansir
-    rm -rf buildroot-external Cargo.toml Cargo.lock crates config deploy docs tools Makefile *.md *.sh
+    rm -rf buildroot-external Cargo.toml Cargo.lock crates config deploy docs tools Makefile *.md *.sh webui
     COPYFILE_DISABLE=1 tar xzf snapshot.tgz
     rm -f snapshot.tgz
     echo ">> synced: $(ls buildroot-external/configs/)"
