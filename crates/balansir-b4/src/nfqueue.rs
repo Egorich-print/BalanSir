@@ -152,12 +152,10 @@ impl NfQueue {
 
         let mut attrs = Vec::new();
         push_nla(&mut attrs, NFQA_CFG_PARAMS, &params);
-        // flags: NFQNL_CFG_F_SEQ | NFQNL_CFG_F_GSO (helps id/payload handling)
-        push_nla(
-            &mut attrs,
-            NFQA_CFG_FLAGS,
-            &(NFQNL_CFG_F_SEQ | NFQNL_CFG_F_GSO).to_be_bytes(),
-        );
+        // NOTE: the kernel rejects NFQA_CFG_FLAGS unless NFQA_CFG_MASK is
+        // also present (nfnetlink_queue.c nfqnl_recv_config). We don't need
+        // the optional SEQ/GSO flags for basic COPY_PACKET interception, so
+        // we omit them entirely.
         // generous queue maxlen to avoid drops under load
         push_nla(&mut attrs, NFQA_CFG_QUEUE_MAXLEN, &4096u32.to_be_bytes());
 
@@ -210,9 +208,13 @@ impl NfQueue {
     /// When `payload` is `Some`, the packet is replaced with it (DPI mutation).
     pub fn verdict(&self, packet_id: u32, verdict: u8, payload: Option<&[u8]>) -> io::Result<()> {
         let mut attrs: Vec<u8> = Vec::new();
-        // NFQA_VERDICT_HDR: u32 verdict (network order).
-        let verdict_bytes = (verdict as u32).to_be_bytes();
-        push_nla(&mut attrs, NFQA_VERDICT_HDR, &verdict_bytes);
+        // NFQA_VERDICT_HDR: struct nfqnl_msg_verdict_hdr (8 bytes):
+        //   verdict: __be32
+        //   id: __be32 (packet id echoed from NFQA_PACKET_HDR)
+        let mut vhdr = Vec::with_capacity(8);
+        vhdr.extend_from_slice(&(verdict as u32).to_be_bytes());
+        vhdr.extend_from_slice(&packet_id.to_be_bytes());
+        push_nla(&mut attrs, NFQA_VERDICT_HDR, &vhdr);
         if let Some(p) = payload {
             push_nla(&mut attrs, NFQA_PAYLOAD, p);
         }
