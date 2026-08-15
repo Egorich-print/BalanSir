@@ -89,9 +89,12 @@ impl DpiManager {
     pub async fn start(&self) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {
+            tracing::info!("dpi: start called, inner={}", self.inner.is_some());
             if let Some(inner) = &self.inner {
+                tracing::info!("dpi: calling engine.run");
                 inner.engine.run().await?;
                 self.running.store(true, Ordering::SeqCst);
+                tracing::info!("dpi: engine.run returned Ok");
             }
         }
         Ok(())
