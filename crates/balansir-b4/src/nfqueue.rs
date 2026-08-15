@@ -119,16 +119,15 @@ impl NfQueue {
         payload.extend_from_slice(&attrs);
 
         let inner_type = nfgenmsg_type(NFNL_SUBSYS_QUEUE, msg_type);
-        // Emit the netlink header manually (16 bytes): length, type, flags,
-        // seq, port. (NetlinkHeader is #[non_exhaustive]; manual emit avoids
-        // cross-version struct-literal friction.)
+        // Netlink header fields are in *host* byte order (native endianness);
+        // only netfilter payload attributes use network order.
         let total_len = (16 + payload.len()) as u32;
         let mut msg = Vec::with_capacity(total_len as usize);
-        msg.extend_from_slice(&total_len.to_be_bytes());
-        msg.extend_from_slice(&inner_type.to_be_bytes());
-        msg.extend_from_slice(&(netlink_packet_core::NLM_F_REQUEST as u16).to_be_bytes());
-        msg.extend_from_slice(&0u32.to_be_bytes()); // sequence
-        msg.extend_from_slice(&0u32.to_be_bytes()); // port
+        msg.extend_from_slice(&total_len.to_ne_bytes());
+        msg.extend_from_slice(&inner_type.to_ne_bytes());
+        msg.extend_from_slice(&(netlink_packet_core::NLM_F_REQUEST as u16).to_ne_bytes());
+        msg.extend_from_slice(&0u32.to_ne_bytes()); // sequence
+        msg.extend_from_slice(&0u32.to_ne_bytes()); // port
         msg.extend_from_slice(&payload);
         msg
     }
