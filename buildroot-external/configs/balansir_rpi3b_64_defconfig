@@ -84,3 +84,7 @@ BR2_PACKAGE_HOST_MTOOLS=y
 
 # Reproducible builds (ADR-029 principle; timestamps pinned)
 BR2_REPRODUCIBLE=y
+
+
+# Busybox: enable nc for network testing
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_BALANSIR_PATH)/board/raspberrypi3/busybox.fragment"

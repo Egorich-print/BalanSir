@@ -69,3 +69,7 @@ BR2_TARGET_ROOTFS_EXT2_SIZE="256M"
 
 # Reproducible
 BR2_REPRODUCIBLE=y
+
+
+# Busybox: enable nc for network testing
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_BALANSIR_PATH)/board/raspberrypi3/busybox.fragment"
