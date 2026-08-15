@@ -4,7 +4,6 @@ pub mod event_bus;
 pub mod ipc;
 pub mod metrics;
 pub mod network;
-pub mod path_health;
 pub mod paths;
 pub mod plan;
 pub mod profile;
@@ -29,3 +28,6 @@ pub use snapshot::Snapshot;
 pub use types::*;
 pub use validation::*;
 pub use version::*;
+/// Unified path-health model lives in `balansir-health`; re-exported here so
+/// the existing `balansir_common::path_health::*` imports keep working.
+pub use balansir_health as path_health;

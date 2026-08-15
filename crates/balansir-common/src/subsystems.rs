@@ -179,6 +179,29 @@ pub struct XraySnapshot {
     pub last_switch_ms: i64,
 }
 
+/// VPN pool view: aggregate pool state + per-profile health (mission §16).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VpnSnapshot {
+    /// Pool enabled (not paused).
+    pub enabled: bool,
+    /// Operator pause (traffic stays direct).
+    pub paused: bool,
+    /// Per-profile health/load view (no credentials).
+    pub profiles: Vec<balansir_vpn::profile::ProfileHealth>,
+    /// Active profile_id selected by the pool (drives the Xray manager).
+    pub active: Option<String>,
+    /// Why the last rotation happened.
+    pub last_rotation_reason: Option<String>,
+    /// Unix epoch millis of the last rotation.
+    pub last_rotation_ms: i64,
+    /// Last subscription refresh result (human readable).
+    pub last_refresh_reason: Option<String>,
+    /// Last pool error (actionable).
+    pub last_error: Option<String>,
+    /// Unix epoch millis of the last pool refresh.
+    pub updated_ms: i64,
+}
+
 /// Lightweight system resource view (read from `/proc`, no extra collectors).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SystemStats {
@@ -320,6 +343,19 @@ pub enum SubsystemEvent {
     XrayError {
         detail: String,
     },
+    /// VPN pool replaced after a successful subscription refresh.
+    VpnPoolUpdated {
+        profiles: u32,
+        source: String,
+    },
+    /// The pool switched the active profile (failure/planned/manual).
+    VpnActiveChanged {
+        profile_id: String,
+        reason: String,
+    },
+    VpnPoolError {
+        detail: String,
+    },
 }
 
 impl SubsystemEvent {
@@ -346,6 +382,9 @@ impl SubsystemEvent {
             Self::XraySwitched { .. } => "xray_switched",
             Self::XrayHealthChanged { .. } => "xray_health_changed",
             Self::XrayError { .. } => "xray_error",
+            Self::VpnPoolUpdated { .. } => "vpn_pool_updated",
+            Self::VpnActiveChanged { .. } => "vpn_active_changed",
+            Self::VpnPoolError { .. } => "vpn_pool_error",
         }
     }
 }
@@ -365,6 +404,9 @@ pub struct SubsystemSnapshot {
     #[serde(default)]
     pub dpi: DpiSnapshot,
     pub xray: XraySnapshot,
+    /// VPN alternative-path pool (health-aware selection, rotation, LB).
+    #[serde(default)]
+    pub vpn_pool: VpnSnapshot,
     /// Live system resources (CPU/RAM/load/uptime), refreshed by the daemon.
     pub system: SystemStats,
     /// Per-interface throughput derived from counter deltas.
@@ -448,4 +490,14 @@ pub trait SubsystemControl: Send + Sync {
     async fn xray_select(&self, profile: &str) -> Result<(), String>;
     /// Rotate to the next enabled endpoint (manual rotation).
     async fn xray_rotate(&self) -> Result<(), String>;
+    /// Pause/resume the VPN pool (traffic stays direct while paused).
+    async fn vpn_set_paused(&self, paused: bool) -> Result<(), String>;
+    /// Whether the VPN pool is currently paused.
+    async fn vpn_is_paused(&self) -> bool;
+    /// Trigger a subscription refresh (keeps the known-good pool on failure).
+    async fn vpn_refresh(&self) -> Result<(), String>;
+    /// Manual rotation to the next eligible profile.
+    async fn vpn_rotate(&self) -> Result<(), String>;
+    /// Pin a profile (by profile_id) for the pool's active selection.
+    async fn vpn_set_pin(&self, profile_id: Option<String>) -> Result<(), String>;
 }

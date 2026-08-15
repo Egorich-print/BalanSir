@@ -118,6 +118,8 @@ pub struct SubsystemManager {
     dpi: RwLock<Option<std::sync::Arc<crate::b4_dpi::DpiManager>>>,
     #[cfg(feature = "xray")]
     xray: RwLock<Option<crate::xray_manager::XrayManagerHandle>>,
+    /// VPN pool control handle (pause/refresh/rotate/pin for the API seam).
+    vpn: RwLock<Option<crate::vpn_manager::VpnManagerHandle>>,
     /// Previous CPU sample for utilization deltas.
     cpu_prev: RwLock<Option<crate::system_stats::CpuSample>>,
     /// Previous interface counters for throughput deltas: name → (rx, tx, ms).
@@ -166,6 +168,7 @@ impl SubsystemManager {
             dpi: RwLock::new(None),
             #[cfg(feature = "xray")]
             xray: RwLock::new(None),
+            vpn: RwLock::new(None),
             cpu_prev: RwLock::new(None),
             last_counters: RwLock::new(std::collections::HashMap::new()),
             capabilities: RwLock::new(None),
@@ -196,6 +199,11 @@ impl SubsystemManager {
     #[cfg(feature = "xray")]
     pub async fn set_xray_handle(&self, handle: crate::xray_manager::XrayManagerHandle) {
         *self.xray.write().await = Some(handle);
+    }
+
+    /// Attach the VPN pool control handle (pause/refresh/rotate/pin).
+    pub async fn set_vpn_handle(&self, handle: crate::vpn_manager::VpnManagerHandle) {
+        *self.vpn.write().await = Some(handle);
     }
 
     pub fn snapshot(&self) -> SharedSubsystemSnapshot {
@@ -737,6 +745,62 @@ impl balansir_common::subsystems::SubsystemControl for ControlImpl {
     #[cfg(not(feature = "xray"))]
     async fn xray_rotate(&self) -> Result<(), String> {
         Err("Xray support not compiled into this daemon".to_string())
+    }
+
+    // --- VPN pool control (pool is authoritative; these drive intent) ---
+
+    async fn vpn_set_paused(&self, paused: bool) -> Result<(), String> {
+        let handle = self.manager.vpn.read().await;
+        match handle.as_ref() {
+            Some(handle) => {
+                handle.set_paused(paused).await;
+                Ok(())
+            }
+            None => Err("VPN pool not configured (set BALANSIR_VPN_CONFIG)".to_string()),
+        }
+    }
+
+    async fn vpn_is_paused(&self) -> bool {
+        self.manager
+            .vpn
+            .read()
+            .await
+            .as_ref()
+            .map(|h| h.is_paused())
+            .unwrap_or(false)
+    }
+
+    async fn vpn_refresh(&self) -> Result<(), String> {
+        let handle = self.manager.vpn.read().await;
+        match handle.as_ref() {
+            Some(handle) => {
+                handle.request_refresh().await;
+                Ok(())
+            }
+            None => Err("VPN pool not configured (set BALANSIR_VPN_CONFIG)".to_string()),
+        }
+    }
+
+    async fn vpn_rotate(&self) -> Result<(), String> {
+        let handle = self.manager.vpn.read().await;
+        match handle.as_ref() {
+            Some(handle) => {
+                handle.request_rotation().await;
+                Ok(())
+            }
+            None => Err("VPN pool not configured (set BALANSIR_VPN_CONFIG)".to_string()),
+        }
+    }
+
+    async fn vpn_set_pin(&self, profile_id: Option<String>) -> Result<(), String> {
+        let handle = self.manager.vpn.read().await;
+        match handle.as_ref() {
+            Some(handle) => {
+                handle.set_pin(profile_id).await;
+                Ok(())
+            }
+            None => Err("VPN pool not configured (set BALANSIR_VPN_CONFIG)".to_string()),
+        }
     }
 }
 

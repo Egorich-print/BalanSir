@@ -133,6 +133,10 @@ pub struct XrayManagerHandle {
     paused: Arc<AtomicBool>,
     pinned: Arc<RwLock<Option<String>>>,
     wake: Arc<Notify>,
+    /// External selection from the VPN pool (server:port). When set and not
+    /// paused, the manager converges to this endpoint and stops its own
+    /// priority-based selection — the pool is the authoritative decision.
+    pool_selected: Arc<RwLock<Option<String>>>,
 }
 
 impl XrayManagerHandle {
@@ -156,6 +160,22 @@ impl XrayManagerHandle {
             self.wake.notify_one();
         }
     }
+    /// Apply the VPN pool's selection. `server_port` is `host:port` (the pool
+    /// profile endpoint); `None` tells the manager to stop the proxy (no
+    /// eligible profile). The pool is authoritative when set.
+    pub async fn apply_pool_selection(&self, server_port: Option<String>) {
+        *self.pool_selected.write().await = server_port;
+        self.wake.notify_one();
+    }
+}
+
+/// Find the endpoint index matching `server:port` (pool selection target).
+fn index_of_server_port(endpoints: &[XrayEndpoint], server_port: &str) -> Option<usize> {
+    let needle = server_port.trim().to_ascii_lowercase();
+    endpoints.iter().position(|e| {
+        let ep = format!("{}:{}", e.server, e.port).to_ascii_lowercase();
+        ep == needle
+    })
 }
 
 /// Next enabled profile after `current` (wraps; used for manual rotation).
@@ -190,6 +210,12 @@ pub struct XrayManager {
     pinned: Arc<RwLock<Option<String>>>,
     wake: Arc<Notify>,
     active: RwLock<Option<usize>>,
+    /// External (VPN pool) selection: `host:port` of the endpoint to run.
+    /// Overrides priority selection; the manager is a consumer of the pool.
+    pool_selected: Arc<RwLock<Option<String>>>,
+    /// Whether the pool has taken over selection at least once. When true and
+    /// the pool later selects `None`, the proxy is stopped (pool = authority).
+    pool_driven: Arc<RwLock<bool>>,
     /// Unified hysteresis-aware health tracker per endpoint (mission §9).
     /// This is the source of truth for `health` / `failure_count` projections
     /// and for failover: a tracker reaching `Failing` triggers the switch.
@@ -240,6 +266,8 @@ impl XrayManager {
             pinned: Arc::new(RwLock::new(None)),
             wake: Arc::new(Notify::new()),
             active: RwLock::new(None),
+            pool_selected: Arc::new(RwLock::new(None)),
+            pool_driven: Arc::new(RwLock::new(false)),
             paths: RwLock::new(
                 xray_cfg
                     .profiles
@@ -261,9 +289,9 @@ impl XrayManager {
             paused: Arc::clone(&self.paused),
             pinned: Arc::clone(&self.pinned),
             wake: Arc::clone(&self.wake),
+            pool_selected: Arc::clone(&self.pool_selected),
         }
     }
-
     fn endpoint_config(&self, idx: usize) -> XrayConfig {
         self.endpoints[idx].into_config(self.socks_port, self.http_port)
     }
@@ -338,12 +366,56 @@ impl XrayManager {
         self.endpoints.iter().position(|e| e.name == name)
     }
 
-    /// Ensure an endpoint is running. When the operator pinned a profile the
-    /// loop converges to it (manual override / rotation); otherwise the
-    /// preferred (priority-ordered) endpoint starts.
+    /// Ensure an endpoint is running. Priority: VPN pool selection (if set —
+    /// the pool is authoritative), then operator pin, then preferred
+    /// (priority-ordered) endpoint. When the pool is driving and selects "no
+    /// profile", the proxy is stopped (traffic stays direct).
     async fn ensure_running(&self) -> Result<(), String> {
+        let pool_selected = self.pool_selected.read().await.clone();
+        let pool_driven = *self.pool_driven.read().await;
         let pinned_name = self.pinned.read().await.clone();
         let active = *self.active.read().await;
+
+        // Pool says "stop": no eligible profile.
+        if let Some(sp) = &pool_selected {
+            *self.pool_driven.write().await = true;
+            let target = index_of_server_port(&self.endpoints, sp);
+            match target {
+                Some(idx) => {
+                    if active != Some(idx) || self.driver.read().await.is_none() {
+                        // stop current (if any) then start the pool-selected endpoint
+                        if let Some(cur) = active {
+                            if cur != idx {
+                                self.switch_to_index(idx, format!("vpn pool selected {sp}")).await?;
+                                return Ok(());
+                            }
+                        } else {
+                            return self.start_endpoint(idx).await;
+                        }
+                        if self.driver.read().await.is_none() {
+                            return self.start_endpoint(idx).await;
+                        }
+                    }
+                    return Ok(());
+                }
+                None => {
+                    // Pool selected an endpoint not in this xray config: stop
+                    // rather than run the wrong thing.
+                    if self.driver.read().await.is_some() {
+                        self.stop_driver().await;
+                    }
+                    return Err(format!("vpn pool selected endpoint {sp} not in xray config"));
+                }
+            }
+        }
+
+        // The pool took over selection and cleared it: stop (no eligible path).
+        if pool_driven {
+            if self.driver.read().await.is_some() {
+                self.stop_driver().await;
+            }
+            return Ok(());
+        }
 
         if active.is_some() && self.driver.read().await.is_some() {
             if let Some(pinned) = &pinned_name {
@@ -926,5 +998,59 @@ priority = 20
             "untouched endpoint stays Unknown"
         );
         assert_eq!(snap.profiles[1].failure_count, 0);
+    }
+    /// The VPN pool is the authoritative path decision: when the pool selects
+    /// an endpoint (by server:port), the Xray manager converges to it even if
+    /// it is not the priority-preferred endpoint. `None` stops the proxy.
+    #[tokio::test]
+    async fn pool_selection_overrides_priority() {
+        let cfg = sample_toml(); // jp-1 priority 10, us-2 priority 20
+        let health = FakeDriverHealth(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            FAKE_HEALTHY,
+        )));
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = manager_with_fakes(&cfg, health.clone(), started);
+
+        // Without pool selection: jp-1 (priority 10) starts.
+        manager.ensure_running().await.expect("start preferred");
+        assert_eq!(manager.active_name().await.as_deref(), Some("jp-1"));
+
+        // Pool selects us-2 (server us2.example.com:8443). The manager must
+        // converge to it even though it is lower priority.
+        manager
+            .handle()
+            .apply_pool_selection(Some("us2.example.com:8443".into()))
+            .await;
+        manager.ensure_running().await.expect("converge to pool");
+        assert_eq!(
+            manager.active_name().await.as_deref(),
+            Some("us-2"),
+            "pool selection is authoritative over priority"
+        );
+
+        // Pool clears selection (no eligible profile) → stop the proxy.
+        manager.handle().apply_pool_selection(None).await;
+        manager.ensure_running().await.expect("stop for pool");
+        assert!(manager.driver.read().await.is_none(), "proxy stopped");
+    }
+
+    /// Pool selecting an endpoint not in the xray config must not run the
+    /// wrong thing — it stops and reports the mismatch.
+    #[tokio::test]
+    async fn pool_selection_of_unknown_endpoint_stops_and_errors() {
+        let cfg = sample_toml();
+        let health = FakeDriverHealth(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            FAKE_HEALTHY,
+        )));
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = manager_with_fakes(&cfg, health.clone(), started);
+
+        manager
+            .handle()
+            .apply_pool_selection(Some("not-in-config.example:443".into()))
+            .await;
+        let err = manager.ensure_running().await.expect_err("must fail");
+        assert!(err.contains("not in xray config"), "err: {err}");
+        assert!(manager.driver.read().await.is_none(), "nothing running");
     }
 }

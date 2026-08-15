@@ -299,6 +299,64 @@ async fn main() -> Result<()> {
         #[cfg(not(feature = "xray"))]
         let xray_control: Option<()> = None;
 
+        // VPN alternative-path pool (BALANSIR_VPN_CONFIG). The pool is the
+        // authoritative path decision; it drives the Xray manager as a
+        // consumer. When Xray is not configured, the pool still runs and
+        // tracks health/selection with a no-op consumer (observability only).
+        #[cfg(feature = "xray")]
+        {
+            if let Ok(vpn_path) = std::env::var("BALANSIR_VPN_CONFIG") {
+                match balansir_daemon::vpn_manager::VpnToml::from_file(&vpn_path) {
+                    Ok(vpn_cfg) => {
+                        let consumer: std::sync::Arc<
+                            dyn balansir_daemon::vpn_manager::XrayConsumer,
+                        > = match &xray_control {
+                            Some(handle) => {
+                                let h = handle.clone();
+                                std::sync::Arc::new(
+                                    balansir_daemon::vpn_manager::PoolXrayConsumer::new(
+                                        move |profile: Option<&str>| {
+                                            let h = h.clone();
+                                            let sp = profile.map(|p| p.to_string());
+                                            tokio::spawn(async move {
+                                                h.apply_pool_selection(sp).await;
+                                            });
+                                        },
+                                    ),
+                                )
+                            }
+                            None => std::sync::Arc::new(
+                                balansir_daemon::vpn_manager::NoopXrayConsumer,
+                            ),
+                        };
+                        match balansir_daemon::vpn_manager::VpnManager::new(
+                            vpn_cfg,
+                            manager.snapshot(),
+                            manager.event_sender(),
+                            consumer,
+                        ) {
+                            Ok(vpn) => {
+                                let vpn = std::sync::Arc::new(vpn);
+                                let handle = vpn.handle();
+                                manager.set_vpn_handle(handle).await;
+                                let loop_vpn = std::sync::Arc::clone(&vpn);
+                                tokio::spawn(async move {
+                                    loop_vpn.run_loop().await;
+                                });
+                                info!("VPN pool started from {vpn_path}");
+                            }
+                            Err(e) => warn!("VPN pool config {vpn_path} rejected: {e}"),
+                        }
+                    }
+                    Err(e) => warn!("VPN pool config {vpn_path} rejected: {e}"),
+                }
+            }
+        }
+        #[cfg(not(feature = "xray"))]
+        {
+            let _ = xray_control;
+        }
+
         let api_bind_clone = api_bind.clone();
         let api_reconciler = Arc::clone(&reconciler);
         let api_metrics = Arc::clone(&metrics);

@@ -30,7 +30,7 @@ fn ipv4_tcp(payload: &[u8], opts: &[u8], flags: u8, dst_port: u16, fix_csum: boo
     // TCP options must be 4-byte aligned (the data-offset field is in 32-bit
     // words); pad with NOPs so the parser reads the exact option bytes.
     let mut padded = opts.to_vec();
-    while (20 + padded.len()) % 4 != 0 {
+    while !(20 + padded.len()).is_multiple_of(4) {
         padded.push(1);
     }
     let tcp_hdr_len = 20 + padded.len();

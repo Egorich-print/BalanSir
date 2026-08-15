@@ -62,6 +62,17 @@ export const api = {
     }),
   xrayRotate: () => req('/xray/rotate', { method: 'POST' }),
 
+  vpnPool: () => req('/vpn/pool'),
+  setVpnPaused: (paused) =>
+    req('/vpn/pause', { method: 'POST', body: JSON.stringify({ paused }) }),
+  vpnRefresh: () => req('/vpn/refresh', { method: 'POST' }),
+  vpnRotate: () => req('/vpn/rotate', { method: 'POST' }),
+  vpnPin: (profileId) =>
+    req('/vpn/pin', {
+      method: 'POST',
+      body: JSON.stringify({ profile_id: profileId }),
+    }),
+
   qos: () => req('/qos'),
   setQos: (interfaces) =>
     req('/qos', { method: 'POST', body: JSON.stringify({ interfaces }) }),

@@ -8,6 +8,7 @@ members = [
     "crates/balansir-tests",
     "crates/balansir-b4",
     "crates/balansir-vpn",
+    "crates/balansir-health",
     "tools/balansir-image",
 ]
 # The Tauri desktop shell is a standalone app (its own huge dependency tree);

@@ -135,6 +135,12 @@ impl VpnProfile {
 /// Health/load runtime state of one profile. Never carries credentials.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProfileHealth {
+    /// Stable profile identity (filled by the pool snapshot).
+    #[serde(default)]
+    pub profile_id: String,
+    /// Human label from the source config (filled by the pool snapshot).
+    #[serde(default)]
+    pub label: String,
     pub state: ProfileState,
     /// EMA latency in ms (None until sampled).
     pub latency_ms: Option<f64>,
@@ -152,6 +158,9 @@ pub struct ProfileHealth {
     pub sample_count: u64,
     /// Ramp-up weight step for recovery (see `VpnPool::recovery_ramp`).
     pub weight: u32,
+    /// Active flows currently pinned to this profile (capacity view).
+    #[serde(default)]
+    pub active_flows: u32,
     /// Human-readable reasons behind the current state.
     pub reasons: Vec<String>,
 }

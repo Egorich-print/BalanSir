@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use balansir_common::path_health::{PathHealth, PathHealthConfig, PathSample, PathState};
+use balansir_health::{PathHealth, PathHealthConfig, PathSample, PathState};
 
 use crate::profile::{ProfileHealth, ProfileLoad, ProfileState, VpnProfile};
 
@@ -241,6 +241,9 @@ impl VpnPool {
             let p = &mut self.profiles[idx];
             p.health.state = next;
             p.health.reasons = p.tracker.view().reasons;
+            p.health.profile_id = p.profile.profile_id.clone();
+            p.health.label = p.profile.label.clone();
+            p.health.active_flows = p.load.active_flows;
         }
         // Weight depends on state + recovery; compute against the immutable
         // view to avoid a second mutable borrow.
@@ -509,7 +512,17 @@ impl VpnPool {
     /// Snapshot the pool for the daemon/WebUI (no credentials).
     pub fn snapshot(&self, now_ms: i64) -> PoolSnapshot {
         PoolSnapshot {
-            profiles: self.profiles.iter().map(|p| p.health.clone()).collect(),
+            profiles: self
+                .profiles
+                .iter()
+                .map(|p| {
+                    let mut h = p.health.clone();
+                    h.profile_id = p.profile.profile_id.clone();
+                    h.label = p.profile.label.clone();
+                    h.active_flows = p.load.active_flows;
+                    h
+                })
+                .collect(),
             active: self.active.clone(),
             excluded: Vec::new(),
             last_rotation_ms: self.last_rotation_ms,
@@ -537,7 +550,7 @@ fn explain_score(state: ProfileState, health: &ProfileHealth, score: f64) -> Str
 mod tests {
     use super::*;
     use crate::importer;
-    use balansir_common::path_health::PathSample;
+    use balansir_health::PathSample;
     use std::time::Duration;
 
     const TS: i64 = 1_700_000_000_000;

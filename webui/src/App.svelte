@@ -10,6 +10,7 @@
   import B4 from './views/B4.svelte';
   import Dpi from './views/Dpi.svelte';
   import Xray from './views/Xray.svelte';
+  import VpnPool from './views/VpnPool.svelte';
   import Tailscale from './views/Tailscale.svelte';
   import Policy from './views/Policy.svelte';
   import Events from './views/Events.svelte';
@@ -41,6 +42,7 @@
     { id: 'b4', label: 'B4', component: B4 },
     { id: 'dpi', label: 'DPI', component: Dpi },
     { id: 'xray', label: 'Xray', component: Xray },
+    { id: 'vpn', label: 'VPN Pool', component: VpnPool },
     { id: 'tailscale', label: 'Tailscale', component: Tailscale },
     { id: 'events', label: 'Events', component: Events },
     { id: 'diagnostics', label: 'Diagnostics', component: Diagnostics },

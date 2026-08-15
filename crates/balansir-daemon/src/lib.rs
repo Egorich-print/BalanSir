@@ -28,3 +28,4 @@ pub mod wireguard;
 pub mod xray;
 #[cfg(feature = "xray")]
 pub mod xray_manager;
+pub mod vpn_manager;

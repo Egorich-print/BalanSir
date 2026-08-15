@@ -9,7 +9,7 @@ license.workspace = true
 name = "balansir_vpn"
 
 [dependencies]
-balansir-common = { path = "../balansir-common" }
+balansir-health = { path = "../balansir-health" }
 serde = { workspace = true }
 tracing = { workspace = true }
 

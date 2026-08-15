@@ -175,6 +175,79 @@ pub async fn rotate_xray(State(state): State<Arc<ApiState>>) -> Response {
     }
 }
 
+/// `GET /vpn/pool` — VPN alternative-path pool state (health, selection,
+/// load, rotation diagnostics). No credentials exposed.
+pub async fn get_vpn_pool(State(state): State<Arc<ApiState>>) -> Response {
+    let snapshot = match snapshot_or_unavailable(&state).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    Json(snapshot.vpn_pool).into_response()
+}
+
+/// `POST /vpn/pause` — pause/resume the VPN pool.
+pub async fn set_vpn_paused(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let paused = match body.get("paused").and_then(|v| v.as_bool()) {
+        Some(p) => p,
+        None => return error_response("body requires \"paused\": true|false"),
+    };
+    match control.vpn_set_paused(paused).await {
+        Ok(()) => Json(serde_json::json!({ "paused": paused })).into_response(),
+        Err(detail) => error_response(&detail),
+    }
+}
+
+/// `POST /vpn/refresh` — trigger a subscription refresh (keeps the known-good
+/// pool on failure).
+pub async fn refresh_vpn_pool(State(state): State<Arc<ApiState>>) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match control.vpn_refresh().await {
+        Ok(()) => Json(serde_json::json!({ "refreshed": true })).into_response(),
+        Err(detail) => error_response(&detail),
+    }
+}
+
+/// `POST /vpn/rotate` — manual rotation to the next eligible profile.
+pub async fn rotate_vpn_pool(State(state): State<Arc<ApiState>>) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match control.vpn_rotate().await {
+        Ok(()) => Json(serde_json::json!({ "rotated": true })).into_response(),
+        Err(detail) => error_response(&detail),
+    }
+}
+
+/// `POST /vpn/pin` — pin a profile (by profile_id) or clear with `null`.
+pub async fn pin_vpn_pool(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let profile_id = body
+        .get("profile_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    match control.vpn_set_pin(profile_id.clone()).await {
+        Ok(()) => Json(serde_json::json!({ "pinned": profile_id })).into_response(),
+        Err(detail) => error_response(&detail),
+    }
+}
+
 /// `GET /qos` — shaping intent, applied qdiscs, capabilities and drift.
 pub async fn get_qos(State(state): State<Arc<ApiState>>) -> Response {
     let snapshot = match snapshot_or_unavailable(&state).await {
