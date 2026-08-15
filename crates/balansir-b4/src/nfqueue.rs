@@ -71,6 +71,22 @@ impl NfQueue {
         self.send_config(&bind)?;
         let params = self.config_params();
         self.send_config(&params)?;
+
+        // Diagnostic: confirm the kernel registered the queue.
+        if let Ok(proc) = std::fs::read_to_string("/proc/net/netfilter/nfnetlink_queue") {
+            if proc.trim().is_empty() {
+                tracing::warn!(
+                    queue = self.queue_num,
+                    "NFQUEUE bind: /proc/net/netfilter/nfnetlink_queue is empty after configure"
+                );
+            } else {
+                tracing::info!(
+                    queue = self.queue_num,
+                    "NFQUEUE registered: {}",
+                    proc.lines().next().unwrap_or("")
+                );
+            }
+        }
         Ok(())
     }
 
@@ -287,9 +303,10 @@ fn align4(n: usize) -> usize {
 /// Drop impl: kernel auto-unbinds when the socket closes.
 impl Drop for NfQueue {
     fn drop(&mut self) {
-        let _ = self
-            .sock
-            .send(&self.config_msg(NFQNL_CFG_CMD_UNBIND, None, self.queue_num), 0);
+        let _ = self.sock.send(
+            &self.config_msg(NFQNL_CFG_CMD_UNBIND, None, self.queue_num),
+            0,
+        );
     }
 }
 
