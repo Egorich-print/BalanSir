@@ -247,3 +247,60 @@ recv buffers must be zero-length `Vec::with_capacity` (netlink_sys fills via
 **PHYSICAL RPI MANUAL VERIFICATION REQUIRED**: real intercepted traffic against
 a blocked/DPI'd endpoint to confirm a chosen strategy actually restores
 connectivity (depends on the ISP's DPI behavior).
+
+## VPN alternative-path pool
+
+BalanSir selects the transport path through a single authoritative decision
+engine (`path_decision`): Direct → B4 → VPN pool. The VPN pool
+(`balansir-vpn` crate) manages a set of validated VLESS endpoint profiles
+from an external subscription:
+
+- **Importer**: parses `vless://` config URIs (percent-decoded, bounded),
+  validates host/port/transport/security/credential, normalizes, dedupes by a
+  stable content-hash identity, and rejects unsupported schemes with reasons
+  (no fake protocol support). Only protocols the current Xray runtime speaks
+  are accepted (VLESS + TCP/WS/gRPC/HTTPUpgrade + none/tls/reality).
+- **Health**: each profile uses the unified `PathHealth` model (no second
+  health system). States: Unknown / Healthy / Degraded / Cooldown / Failed /
+  Recovering.
+- **Selection**: deterministic weighted selection (state + latency +
+  availability + load headroom), flow stickiness, capacity-aware load
+  distribution, failure rotation + optional planned rotation (dwell +
+  hysteresis + "don't break a significantly-better path"), recovery with
+  ramp-up weights [10,25,50,100].
+- **Atomic update**: a subscription refresh validates + dedupes, then replaces
+  the pool only if non-empty; a failed/empty import keeps the known-good pool
+  (mission §15 — never "download failed → empty pool").
+- **Xray as consumer**: the Xray manager runs exactly the profile the pool
+  selects (`apply_pool_selection(host:port)`); the pool is authoritative.
+  `None` stops the proxy (traffic direct).
+
+Enable with `BALANSIR_VPN_CONFIG`:
+
+```toml
+source_url = "https://example.com/sub.txt"   # external subscription (vless://)
+# local_source = "/etc/balansir/local-sub.txt"  # offline alternative
+refresh_interval_secs = 3600
+health_interval_secs = 30
+selection_interval_secs = 10
+
+[pool]
+min_dwell_secs = 120
+failure_cooldown_secs = 60
+rotation_interval_secs = 0   # 0 = planned rotation disabled
+better_threshold = 25.0
+capacity_per_profile = 64
+```
+
+Fetches run **unprivileged** in the daemon via bounded `curl` (no shell
+interpolation, no executor involvement, `--max-filesize 1MiB`). API:
+`GET /vpn/pool`, `POST /vpn/{pause,refresh,rotate,pin}`; unified decision:
+`GET /path/decision`. WebUI: VPN Pool view + Dashboard path banner.
+
+**QEMU VERIFIED**: pool crate unit tests (31) + vpn_manager integration tests
++ Xray pool-consumer tests + path-decision tests all green; aarch64 daemon
+builds with the pool wired in.
+
+**PHYSICAL RPI MANUAL VERIFICATION REQUIRED**: a real subscription fetch and
+live Xray rotation on the RPi (depends on network availability of the external
+source and of the endpoints).
