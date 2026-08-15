@@ -72,6 +72,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ profile_id: profileId }),
     }),
+  pathDecision: () => req('/path/decision'),
 
   qos: () => req('/qos'),
   setQos: (interfaces) =>

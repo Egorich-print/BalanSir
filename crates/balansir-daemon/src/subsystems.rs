@@ -369,6 +369,30 @@ impl SubsystemManager {
         if let Some(err) = qos_err {
             warn!("subsystems: QoS convergence failed: {err}");
         }
+
+        // Unified path decision (mission §17): one authoritative answer over
+        // Direct / B4 / VPN pool, derived from the already-health-tracked
+        // state above. Pure projection — no second health loop.
+        {
+            let snap = self.snapshot.read().await;
+            let b4 = snap.b4.clone();
+            let vpn = snap.vpn_pool.clone();
+            let dpi_active = snap.dpi.enabled && !snap.dpi.engine_dead;
+            let decision = crate::path_decision::decide(&b4, &vpn, dpi_active);
+            drop(snap);
+            let dec = balansir_common::subsystems::PathDecision {
+                overall: decision.overall,
+                active_candidate: decision.active_candidate,
+                reason: decision.reason,
+                direct_state: decision.direct_state,
+                b4_active: decision.b4_active,
+                b4_ineffective: decision.b4_ineffective,
+                vpn_active: decision.vpn_active,
+                vpn_paused: decision.vpn_paused,
+                dpi_active: decision.dpi_active,
+            };
+            self.snapshot.update(|s| s.path_decision = dec).await;
+        }
     }
 
     /// Derive per-interface throughput from consecutive counter samples and

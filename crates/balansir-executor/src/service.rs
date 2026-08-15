@@ -117,9 +117,12 @@ impl NftablesExecutor {
     /// engine owns. Rules render with the nft `bypass` keyword: if the queue
     /// instance is gone the kernel ACCEPTS the packet, so a crash/leftover
     /// rule can never blackhole traffic.
-    pub async fn dpi_op(&self, op: &balansir_common::DpiOp) -> balansir_common::Result<DpiOpResult> {
-        use balansir_common::DpiOp;
+    pub async fn dpi_op(
+        &self,
+        op: &balansir_common::DpiOp,
+    ) -> balansir_common::Result<DpiOpResult> {
         use crate::nftables::{NftProto, NftRuleSpec, NftVerdict};
+        use balansir_common::DpiOp;
         match op {
             DpiOp::InstallQueue { queue_num, ports } => {
                 if *queue_num == 0 {
@@ -151,7 +154,14 @@ impl NftablesExecutor {
                 }
                 Ok(DpiOpResult {
                     installed,
-                    detail: format!("intercepted TCP {}", ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",")),
+                    detail: format!(
+                        "intercepted TCP {}",
+                        ports
+                            .iter()
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
                 })
             }
             DpiOp::RemoveQueue => {

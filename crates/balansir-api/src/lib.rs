@@ -153,6 +153,7 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/vpn/refresh", post(subsystems::refresh_vpn_pool))
         .route("/vpn/rotate", post(subsystems::rotate_vpn_pool))
         .route("/vpn/pin", post(subsystems::pin_vpn_pool))
+        .route("/path/decision", get(subsystems::get_path_decision))
         .route("/qos", get(subsystems::get_qos))
         .route("/qos", post(subsystems::set_qos))
         .route("/qos/:interface", delete(subsystems::remove_qos))

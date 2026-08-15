@@ -50,7 +50,11 @@ pub fn parse(uri: &str) -> Option<ParsedUri> {
         return None;
     }
     let (scheme, rest) = uri.split_once("://")?;
-    if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return None;
     }
 

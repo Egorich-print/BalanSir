@@ -389,6 +389,23 @@ impl SubsystemEvent {
     }
 }
 
+/// Unified path decision (mission §17): the single authoritative answer for
+/// which path traffic takes (direct / B4 / VPN pool), derived from the
+/// already-health-tracked subsystem state. Pure projection, no second health
+/// model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PathDecision {
+    pub overall: String,
+    pub active_candidate: String,
+    pub reason: String,
+    pub direct_state: String,
+    pub b4_active: bool,
+    pub b4_ineffective: bool,
+    pub vpn_active: Option<String>,
+    pub vpn_paused: bool,
+    pub dpi_active: bool,
+}
+
 /// A consistent point-in-time view of all non-policy subsystems.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubsystemSnapshot {
@@ -407,6 +424,9 @@ pub struct SubsystemSnapshot {
     /// VPN alternative-path pool (health-aware selection, rotation, LB).
     #[serde(default)]
     pub vpn_pool: VpnSnapshot,
+    /// Unified path decision (direct / B4 / VPN) — one authoritative answer.
+    #[serde(default)]
+    pub path_decision: PathDecision,
     /// Live system resources (CPU/RAM/load/uptime), refreshed by the daemon.
     pub system: SystemStats,
     /// Per-interface throughput derived from counter deltas.

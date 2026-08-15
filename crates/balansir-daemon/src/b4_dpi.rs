@@ -167,7 +167,10 @@ impl DpiManager {
             let Some(inner) = &self.inner else { return };
             let queue_num = inner.queue_num;
             let ports = inner.ports.clone();
-            match executor.dpi_op(&DpiOp::InstallQueue { queue_num, ports }).await {
+            match executor
+                .dpi_op(&DpiOp::InstallQueue { queue_num, ports })
+                .await
+            {
                 Ok(result) => {
                     tracing::info!(
                         rules = result.installed,
@@ -188,7 +191,9 @@ impl DpiManager {
     async fn remove_queue_rules(&self) {
         #[cfg(target_os = "linux")]
         {
-            let Some(executor) = &self.executor else { return };
+            let Some(executor) = &self.executor else {
+                return;
+            };
             match executor.dpi_op(&DpiOp::RemoveQueue).await {
                 Ok(result) => {
                     tracing::info!("DPI queue rules removed ({} installed)", result.installed);

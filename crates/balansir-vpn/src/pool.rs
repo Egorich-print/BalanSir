@@ -146,7 +146,11 @@ impl VpnPool {
     /// becomes the pool only after it is non-empty and every profile is
     /// valid; otherwise the previous known-good pool is kept and an error is
     /// returned. Rejected/unhealthy candidate sets never empty the pool.
-    pub fn atomic_replace(&mut self, profiles: Vec<VpnProfile>, _now_ms: i64) -> Result<usize, String> {
+    pub fn atomic_replace(
+        &mut self,
+        profiles: Vec<VpnProfile>,
+        _now_ms: i64,
+    ) -> Result<usize, String> {
         if profiles.is_empty() {
             return Err("refusing to replace pool with an empty set".into());
         }
@@ -168,7 +172,11 @@ impl VpnPool {
             .collect();
         // If the old active profile is gone, clear it.
         if let Some(active) = &self.active {
-            if !self.profiles.iter().any(|p| &p.profile.profile_id == active) {
+            if !self
+                .profiles
+                .iter()
+                .any(|p| &p.profile.profile_id == active)
+            {
                 self.active = None;
             }
         }
@@ -209,8 +217,17 @@ impl VpnPool {
 
     /// Record a health sample for a profile from the unified `PathSample`
     /// vocabulary. Returns the profile's new state.
-    pub fn observe_health(&mut self, profile_id: &str, sample: PathSample, now_ms: i64) -> ProfileState {
-        let idx = match self.profiles.iter().position(|p| p.profile.profile_id == profile_id) {
+    pub fn observe_health(
+        &mut self,
+        profile_id: &str,
+        sample: PathSample,
+        now_ms: i64,
+    ) -> ProfileState {
+        let idx = match self
+            .profiles
+            .iter()
+            .position(|p| p.profile.profile_id == profile_id)
+        {
             Some(i) => i,
             None => return ProfileState::Unknown,
         };
@@ -361,7 +378,10 @@ impl VpnPool {
                     ProfileState::Failed => "failed health probes".into(),
                     _ => "weight zero".into(),
                 };
-                excluded.push(Exclusion { profile_id: id, reason });
+                excluded.push(Exclusion {
+                    profile_id: id,
+                    reason,
+                });
                 continue;
             }
             let score = self.score(p, now_ms);
@@ -378,7 +398,9 @@ impl VpnPool {
 
         // Stickiness: keep a pin if its target is still eligible.
         if let Some(pinned_id) = self.pins.get(flow) {
-            if let Some((id, score, reason)) = candidates.iter().find(|c| &c.0 == pinned_id).cloned() {
+            if let Some((id, score, reason)) =
+                candidates.iter().find(|c| &c.0 == pinned_id).cloned()
+            {
                 let dec = SelectionDecision {
                     profile_id: id,
                     score,
@@ -387,7 +409,11 @@ impl VpnPool {
                     candidates: candidates_count,
                 };
                 self.active = Some(dec.profile_id.clone());
-                if let Some(p) = self.profiles.iter_mut().find(|p| p.profile.profile_id == dec.profile_id) {
+                if let Some(p) = self
+                    .profiles
+                    .iter_mut()
+                    .find(|p| p.profile.profile_id == dec.profile_id)
+                {
                     p.last_selected_ms = now_ms;
                 }
                 return dec;
@@ -404,7 +430,11 @@ impl VpnPool {
                     candidates: candidates_count,
                 };
                 self.active = Some(dec.profile_id.clone());
-                if let Some(p) = self.profiles.iter_mut().find(|p| p.profile.profile_id == dec.profile_id) {
+                if let Some(p) = self
+                    .profiles
+                    .iter_mut()
+                    .find(|p| p.profile.profile_id == dec.profile_id)
+                {
                     p.last_selected_ms = now_ms;
                 }
                 dec
@@ -426,17 +456,29 @@ impl VpnPool {
 
     /// Called when a flow is established on a profile: account load.
     pub fn flow_started(&mut self, profile_id: &str) {
-        if let Some(p) = self.profiles.iter_mut().find(|p| p.profile.profile_id == profile_id) {
+        if let Some(p) = self
+            .profiles
+            .iter_mut()
+            .find(|p| p.profile.profile_id == profile_id)
+        {
             p.load.active_flows = p.load.active_flows.saturating_add(1);
-            p.load.utilization = (p.load.active_flows as f64 / self.config.capacity_per_profile.max(1) as f64).min(1.0);
+            p.load.utilization = (p.load.active_flows as f64
+                / self.config.capacity_per_profile.max(1) as f64)
+                .min(1.0);
         }
     }
 
     /// Called when a flow ends on a profile: release load.
     pub fn flow_ended(&mut self, profile_id: &str) {
-        if let Some(p) = self.profiles.iter_mut().find(|p| p.profile.profile_id == profile_id) {
+        if let Some(p) = self
+            .profiles
+            .iter_mut()
+            .find(|p| p.profile.profile_id == profile_id)
+        {
             p.load.active_flows = p.load.active_flows.saturating_sub(1);
-            p.load.utilization = (p.load.active_flows as f64 / self.config.capacity_per_profile.max(1) as f64).min(1.0);
+            p.load.utilization = (p.load.active_flows as f64
+                / self.config.capacity_per_profile.max(1) as f64)
+                .min(1.0);
         }
     }
 
@@ -477,7 +519,9 @@ impl VpnPool {
             .unwrap_or(0.0);
 
         // Don't rotate away from a significantly-better active profile.
-        if active_score > best_other.1 && (active_score - best_other.1) >= self.config.better_threshold {
+        if active_score > best_other.1
+            && (active_score - best_other.1) >= self.config.better_threshold
+        {
             return None;
         }
 
@@ -486,24 +530,34 @@ impl VpnPool {
         self.last_rotation_ms = now_ms;
         self.last_rotation_reason = Some(format!(
             "planned rotation: {} better than active {} ({} vs {:.0})",
-            next,
-            active_id,
-            best_other.1,
-            active_score
+            next, active_id, best_other.1, active_score
         ));
         Some(next)
     }
 
     /// Force rotation to a specific profile (manual / failure failover path).
-    pub fn force_rotate_to(&mut self, profile_id: &str, reason: String, now_ms: i64) -> Result<String, String> {
-        if !self.profiles.iter().any(|p| p.profile.profile_id == profile_id) {
+    pub fn force_rotate_to(
+        &mut self,
+        profile_id: &str,
+        reason: String,
+        now_ms: i64,
+    ) -> Result<String, String> {
+        if !self
+            .profiles
+            .iter()
+            .any(|p| p.profile.profile_id == profile_id)
+        {
             return Err(format!("no profile '{profile_id}'"));
         }
         let prev = self.active.clone();
         self.active = Some(profile_id.to_string());
         self.last_rotation_ms = now_ms;
         self.last_rotation_reason = Some(format!("{reason} (was {prev:?})"));
-        if let Some(p) = self.profiles.iter_mut().find(|p| p.profile.profile_id == profile_id) {
+        if let Some(p) = self
+            .profiles
+            .iter_mut()
+            .find(|p| p.profile.profile_id == profile_id)
+        {
             p.last_selected_ms = now_ms;
         }
         Ok(profile_id.to_string())
@@ -597,7 +651,10 @@ mod tests {
     }
 
     fn ids(pool: &VpnPool) -> Vec<String> {
-        pool.profiles().iter().map(|p| p.profile.profile_id.clone()).collect()
+        pool.profiles()
+            .iter()
+            .map(|p| p.profile.profile_id.clone())
+            .collect()
     }
 
     #[test]
@@ -639,12 +696,17 @@ mod tests {
         // b fails twice → Failed (enter_degraded=2) → weight 0.
         pool.observe_health(&b_id, sample_failure(), TS);
         pool.observe_health(&b_id, sample_failure(), TS);
-        assert_eq!(pool.profile(&b_id).unwrap().health.state, ProfileState::Failed);
+        assert_eq!(
+            pool.profile(&b_id).unwrap().health.state,
+            ProfileState::Failed
+        );
 
         let d = pool.select_for("f", TS);
         assert_eq!(d.profile_id, a_id, "healthy profile selected over failed");
         assert!(
-            d.excluded.iter().any(|e| e.profile_id == b_id && e.reason.contains("failed")),
+            d.excluded
+                .iter()
+                .any(|e| e.profile_id == b_id && e.reason.contains("failed")),
             "exclusion explains why b was skipped: {:?}",
             d.excluded
         );
@@ -666,7 +728,10 @@ mod tests {
         pool.observe_health(&a_id, slow, TS);
         pool.observe_health(&a_id, slow, TS);
         pool.observe_health(&b_id, sample_healthy(), TS);
-        assert_eq!(pool.profile(&a_id).unwrap().health.state, ProfileState::Degraded);
+        assert_eq!(
+            pool.profile(&a_id).unwrap().health.state,
+            ProfileState::Degraded
+        );
         let d = pool.select_for("f", TS);
         assert_eq!(d.profile_id, b_id);
     }
@@ -692,7 +757,10 @@ mod tests {
         // Pin flow-x to a (the worse profile): stickiness must keep it on a.
         pool.pin_flow("flow-x", Some(a_id.clone()));
         let d = pool.select_for("flow-x", TS);
-        assert_eq!(d.profile_id, a_id, "pinned flow stays on a despite worse score");
+        assert_eq!(
+            d.profile_id, a_id,
+            "pinned flow stays on a despite worse score"
+        );
         assert!(d.reason.contains("stickiness"));
 
         // Releasing the pin lets ranking decide → b (clearly better).
@@ -754,7 +822,11 @@ mod tests {
         // Dwell met, but active is significantly better → still no rotation.
         pool.observe_health(&active, sample_healthy(), TS);
         // Make the other profile clearly worse (high latency).
-        let other = if active == a_id { b_id.clone() } else { a_id.clone() };
+        let other = if active == a_id {
+            b_id.clone()
+        } else {
+            a_id.clone()
+        };
         let slow = PathSample {
             latency_ms: Some(2000.0),
             loss_pct: None,
@@ -763,7 +835,10 @@ mod tests {
         };
         pool.observe_health(&other, slow, TS);
         pool.observe_health(&other, slow, TS);
-        assert!(pool.maybe_planned_rotate(TS + 200_000).is_none(), "don't break a better path");
+        assert!(
+            pool.maybe_planned_rotate(TS + 200_000).is_none(),
+            "don't break a better path"
+        );
     }
 
     #[test]
@@ -792,14 +867,20 @@ mod tests {
         // Force active = a to set the dwell clock, then rotate after dwell.
         let _ = pool.force_rotate_to(&a_id, "test".to_string(), TS);
         let rot = pool.maybe_planned_rotate(TS + 200_000);
-        assert_eq!(rot.as_deref(), Some(b_id.as_str()), "rotation to clearly-better candidate");
+        assert_eq!(
+            rot.as_deref(),
+            Some(b_id.as_str()),
+            "rotation to clearly-better candidate"
+        );
     }
 
     #[test]
     fn force_rotate_rejects_unknown_profile() {
         let mut pool = VpnPool::new(test_config());
         populate(&mut pool, &[("a.example.com", 443)]);
-        assert!(pool.force_rotate_to("nonexistent", "x".to_string(), TS).is_err());
+        assert!(pool
+            .force_rotate_to("nonexistent", "x".to_string(), TS)
+            .is_err());
     }
 
     #[test]
@@ -811,7 +892,10 @@ mod tests {
         // Fail → Failed (enter_degraded=2).
         pool.observe_health(&a_id, sample_failure(), TS);
         pool.observe_health(&a_id, sample_failure(), TS);
-        assert_eq!(pool.profile(&a_id).unwrap().health.state, ProfileState::Failed);
+        assert_eq!(
+            pool.profile(&a_id).unwrap().health.state,
+            ProfileState::Failed
+        );
         assert_eq!(pool.weight(&pool.profiles()[0], TS), 0);
 
         // After cooldown, healthy probes recover (exit_degraded=3; health
@@ -844,7 +928,10 @@ mod tests {
         let a_id = pool.profiles()[0].profile.profile_id.clone();
         pool.observe_health(&a_id, sample_failure(), TS);
         pool.observe_health(&a_id, sample_failure(), TS);
-        assert_eq!(pool.profile(&a_id).unwrap().health.state, ProfileState::Failed);
+        assert_eq!(
+            pool.profile(&a_id).unwrap().health.state,
+            ProfileState::Failed
+        );
 
         // During cooldown: excluded.
         let d = pool.select_for("f", TS + 10_000);
@@ -861,7 +948,10 @@ mod tests {
             ProfileState::Recovering
         );
         let d = pool.select_for("f", t + 2);
-        assert!(d.excluded.iter().all(|e| e.profile_id != a_id), "a no longer excluded");
+        assert!(
+            d.excluded.iter().all(|e| e.profile_id != a_id),
+            "a no longer excluded"
+        );
     }
 
     #[test]
@@ -887,7 +977,10 @@ mod tests {
         pool.pin_flow("f", Some(a_id.clone()));
         // Replace with only b.
         populate(&mut pool, &[("b.example.com", 443)]);
-        assert!(pool.pins().get("f").is_none(), "pin to removed profile dropped");
+        assert!(
+            pool.pins().get("f").is_none(),
+            "pin to removed profile dropped"
+        );
         let _ = b_id;
     }
 

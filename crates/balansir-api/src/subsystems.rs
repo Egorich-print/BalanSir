@@ -175,6 +175,15 @@ pub async fn rotate_xray(State(state): State<Arc<ApiState>>) -> Response {
     }
 }
 
+/// `GET /path/decision` — unified path decision (Direct / B4 / VPN pool).
+pub async fn get_path_decision(State(state): State<Arc<ApiState>>) -> Response {
+    let snapshot = match snapshot_or_unavailable(&state).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    Json(snapshot.path_decision).into_response()
+}
+
 /// `GET /vpn/pool` — VPN alternative-path pool state (health, selection,
 /// load, rotation diagnostics). No credentials exposed.
 pub async fn get_vpn_pool(State(state): State<Arc<ApiState>>) -> Response {

@@ -71,7 +71,9 @@ impl VpnToml {
             min_dwell: std::time::Duration::from_secs(p.min_dwell_secs.unwrap_or(120)),
             failure_cooldown: std::time::Duration::from_secs(p.failure_cooldown_secs.unwrap_or(60)),
             health_cooldown: std::time::Duration::from_secs(10),
-            rotation_interval: std::time::Duration::from_secs(p.rotation_interval_secs.unwrap_or(0)),
+            rotation_interval: std::time::Duration::from_secs(
+                p.rotation_interval_secs.unwrap_or(0),
+            ),
             better_threshold: p.better_threshold.unwrap_or(25.0),
             ramp_steps: vec![10, 25, 50, 100],
             capacity_per_profile: p.capacity_per_profile.unwrap_or(64),
@@ -100,7 +102,8 @@ impl VpnManagerHandle {
         self.refresh_requested.store(true, Ordering::Relaxed);
     }
     pub async fn request_rotation(&self) {
-        self.manual_rotation_requested.store(true, Ordering::Relaxed);
+        self.manual_rotation_requested
+            .store(true, Ordering::Relaxed);
     }
     pub async fn set_pin(&self, profile_id: Option<String>) {
         *self.pin.write().await = profile_id;
@@ -210,7 +213,8 @@ impl VpnManager {
         if let Some(local) = &self.config.local_source {
             // local_source is either inline config text or a path to a file.
             let trimmed = local.trim();
-            let is_path = trimmed.starts_with('/') || trimmed.starts_with("./") || trimmed.starts_with("../");
+            let is_path =
+                trimmed.starts_with('/') || trimmed.starts_with("./") || trimmed.starts_with("../");
             if is_path {
                 body = std::fs::read_to_string(trimmed)
                     .map_err(|e| format!("read local source {trimmed}: {e}"))?;
@@ -263,7 +267,11 @@ impl VpnManager {
             active_before = pool.active().map(|s| s.to_string());
 
             // Manual rotation (operator requested).
-            if self.handle.manual_rotation_requested.swap(false, Ordering::Relaxed) {
+            if self
+                .handle
+                .manual_rotation_requested
+                .swap(false, Ordering::Relaxed)
+            {
                 let cur = pool.active().map(|s| s.to_string());
                 if let Some(cur) = cur {
                     let next = pool
@@ -272,8 +280,7 @@ impl VpnManager {
                         .map(|p| p.profile.profile_id.clone())
                         .find(|id| *id != cur);
                     if let Some(next) = next {
-                        let _ =
-                            pool.force_rotate_to(&next, "manual rotation".into(), now_ms);
+                        let _ = pool.force_rotate_to(&next, "manual rotation".into(), now_ms);
                     }
                 }
             }
@@ -383,7 +390,12 @@ impl VpnManager {
         let (profiles, active, last_rotation_ms, last_rotation_reason) = {
             let pool = self.pool.read().await;
             let snap = pool.snapshot(now_ms);
-            (snap.profiles, snap.active, snap.last_rotation_ms, snap.last_rotation_reason)
+            (
+                snap.profiles,
+                snap.active,
+                snap.last_rotation_ms,
+                snap.last_rotation_reason,
+            )
         };
         let err = self.last_error.read().await.clone();
         let reason = self.last_refresh_reason.read().await.clone();
@@ -425,7 +437,16 @@ async fn reqwest_lite(url: &str) -> Result<String, String> {
     let url = url.to_string();
     let out = tokio::task::spawn_blocking(move || {
         std::process::Command::new("curl")
-            .args(["--silent", "--show-error", "--fail", "--max-time", "20", "--max-filesize", "1048576", &url])
+            .args([
+                "--silent",
+                "--show-error",
+                "--fail",
+                "--max-time",
+                "20",
+                "--max-filesize",
+                "1048576",
+                &url,
+            ])
             .output()
     })
     .await
@@ -576,7 +597,10 @@ vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@b.example.com:443?security=none&typ
         manager.selection_cycle(1_700_000_000_000).await;
         let recorded = consumer.0.lock().unwrap();
         let last = recorded.last().unwrap();
-        assert!(last.is_none(), "no eligible profile → consumer told to stop");
+        assert!(
+            last.is_none(),
+            "no eligible profile → consumer told to stop"
+        );
     }
 
     #[test]

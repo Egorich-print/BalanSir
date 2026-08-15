@@ -56,14 +56,17 @@
     return `${bps} b/s`;
   }
 
-  // Active path: B4 engine or Xray proxy overriding the direct path.
+  // Active path: unified decision (Direct / B4 / VPN pool) is authoritative.
+  $: pathDec = snapshot ? snapshot.path_decision || null : null;
+  $: vpn = snapshot ? snapshot.vpn_pool || null : null;
   $: activePath = snapshot
     ? {
-        direct: !(snapshot.xray && snapshot.xray.active && !snapshot.xray.paused),
+        direct: !(snapshot.xray && snapshot.xray.active && !snapshot.xray.paused) && !(vpn && vpn.active),
         b4: !!(snapshot.b4 && snapshot.b4.enabled && (snapshot.b4.flows || []).some((f) => f.state === 'Adapting' || f.state === 'Monitoring' || f.state === 'Fallback')),
         xray: !!(snapshot.xray && snapshot.xray.active && !snapshot.xray.paused),
+        vpn: !!(vpn && vpn.active),
       }
-    : { direct: true, b4: false, xray: false };
+    : { direct: true, b4: false, xray: false, vpn: false };
 </script>
 
 <div class="dashboard">
@@ -162,9 +165,21 @@
         <StatusBadge status={activePath.xray ? 'degraded' : 'disabled'}
           title={activePath.xray ? 'In use' : 'Inactive'} />
       </div>
+      <div class="path-row">
+        <span>VPN pool</span>
+        <StatusBadge status={activePath.vpn ? 'degraded' : 'disabled'}
+          title={activePath.vpn ? 'In use' : 'Inactive'} />
+      </div>
+      {#if pathDec}
+        <div class="path-decision">
+          <strong>{pathDec.overall}</strong>
+          <span class="muted">— {pathDec.reason}</span>
+        </div>
+      {/if}
       <p class="meta">
         B4: <span class="minibadge {b4.status}">{b4.title}</span>
         · Xray: <span class="minibadge {xray.status}">{xray.title}</span>
+        · Decision: <span class="minibadge">{pathDec ? pathDec.overall : '—'}</span>
       </p>
     </div>
 
@@ -235,6 +250,8 @@
   .card { background: #16213e; border: 1px solid #0f3460; border-radius: 12px; padding: 16px; }
   .card h3 { margin: 0 0 10px; color: #4ecdc4; font-size: 0.95rem; }
   .meta { color: #7a8aa5; font-size: 0.82rem; margin: 8px 0 0; }
+  .path-decision { margin-top: 0.5rem; font-size: 0.9rem; }
+  .path-decision strong { color: #4ecdc4; }
   .err { color: #ff6b6b; font-size: 0.85rem; }
   .reasons li { margin: 2px 0; }
   .rates { width: 100%; border-collapse: collapse; font-size: 0.82rem; }

@@ -325,9 +325,9 @@ async fn main() -> Result<()> {
                                     ),
                                 )
                             }
-                            None => std::sync::Arc::new(
-                                balansir_daemon::vpn_manager::NoopXrayConsumer,
-                            ),
+                            None => {
+                                std::sync::Arc::new(balansir_daemon::vpn_manager::NoopXrayConsumer)
+                            }
                         };
                         match balansir_daemon::vpn_manager::VpnManager::new(
                             vpn_cfg,

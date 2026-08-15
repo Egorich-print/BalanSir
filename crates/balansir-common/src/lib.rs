@@ -17,6 +17,9 @@ pub mod types;
 pub mod validation;
 pub mod version;
 
+/// Unified path-health model lives in `balansir-health`; re-exported here so
+/// the existing `balansir_common::path_health::*` imports keep working.
+pub use balansir_health as path_health;
 pub use diff::StateDiff;
 pub use error::{DriverError, Error, Result};
 pub use event_bus::BoundedEventBus;
@@ -28,6 +31,3 @@ pub use snapshot::Snapshot;
 pub use types::*;
 pub use validation::*;
 pub use version::*;
-/// Unified path-health model lives in `balansir-health`; re-exported here so
-/// the existing `balansir_common::path_health::*` imports keep working.
-pub use balansir_health as path_health;

@@ -386,7 +386,8 @@ impl XrayManager {
                         // stop current (if any) then start the pool-selected endpoint
                         if let Some(cur) = active {
                             if cur != idx {
-                                self.switch_to_index(idx, format!("vpn pool selected {sp}")).await?;
+                                self.switch_to_index(idx, format!("vpn pool selected {sp}"))
+                                    .await?;
                                 return Ok(());
                             }
                         } else {
@@ -404,7 +405,9 @@ impl XrayManager {
                     if self.driver.read().await.is_some() {
                         self.stop_driver().await;
                     }
-                    return Err(format!("vpn pool selected endpoint {sp} not in xray config"));
+                    return Err(format!(
+                        "vpn pool selected endpoint {sp} not in xray config"
+                    ));
                 }
             }
         }

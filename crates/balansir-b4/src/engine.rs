@@ -174,7 +174,10 @@ fn interception_loop(
         let Some(payload) = &packet.payload else {
             // No payload (COPY_META) — can't mutate; accept.
             stats.accepted.fetch_add(1, Ordering::Relaxed);
-            if queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None).is_err() {
+            if queue
+                .verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None)
+                .is_err()
+            {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
             }
             continue;
@@ -185,7 +188,10 @@ fn interception_loop(
             None => {
                 // Not TCP — pass through untouched.
                 stats.accepted.fetch_add(1, Ordering::Relaxed);
-                if queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None).is_err() {
+                if queue
+                    .verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None)
+                    .is_err()
+                {
                     stats.errors.fetch_add(1, Ordering::Relaxed);
                 }
                 continue;
@@ -195,7 +201,10 @@ fn interception_loop(
         // Only intercept the configured destination ports.
         if !ports.contains(&tcp.dst_port()) {
             stats.accepted.fetch_add(1, Ordering::Relaxed);
-            if queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None).is_err() {
+            if queue
+                .verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None)
+                .is_err()
+            {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
             }
             continue;
@@ -219,7 +228,10 @@ fn interception_loop(
         let Some(profile) = profile else {
             // No matching profile → pass through.
             stats.accepted.fetch_add(1, Ordering::Relaxed);
-            if queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None).is_err() {
+            if queue
+                .verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None)
+                .is_err()
+            {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
             }
             continue;
@@ -255,7 +267,10 @@ fn interception_loop(
             }
         } else {
             stats.accepted.fetch_add(1, Ordering::Relaxed);
-            if queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None).is_err() {
+            if queue
+                .verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None)
+                .is_err()
+            {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -295,11 +310,7 @@ pub fn default_config() -> EngineConfig {
 
 /// Debug helper: hex of the first up-to-6 bytes of a payload.
 fn hex6(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .take(6)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    bytes.iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

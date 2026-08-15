@@ -75,14 +75,19 @@ fn valid_host(host: &str) -> bool {
     }
     // Domain/hostname: labels of [a-z0-9-], each 1..63, dot-separated.
     let lower = h.to_ascii_lowercase();
-    if lower.chars().any(|c| !c.is_ascii_alphanumeric() && c != '.' && c != '-') {
+    if lower
+        .chars()
+        .any(|c| !c.is_ascii_alphanumeric() && c != '.' && c != '-')
+    {
         return false;
     }
     let labels: Vec<&str> = lower.split('.').filter(|l| !l.is_empty()).collect();
     if labels.is_empty() || labels.len() > 4 {
         return false;
     }
-    labels.iter().all(|l| l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-'))
+    labels
+        .iter()
+        .all(|l| l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-'))
 }
 
 /// Parse a single URI line into a profile (or a rejection reason).
@@ -144,15 +149,30 @@ pub fn parse_line(line: &str, source: &str, source_ts_ms: i64) -> Result<VpnProf
         "reality" => Security::Reality,
         other => return Err(format!("unsupported security '{other}'")),
     };
-    let sni = uri.get("sni").filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let sni = uri
+        .get("sni")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     if security != Security::None && sni.is_none() {
         return Err("TLS/reality requires a non-empty sni".into());
     }
 
-    let flow = uri.get("flow").filter(|f| !f.is_empty()).map(|f| f.to_string());
-    let reality_pbk = uri.get("pbk").filter(|s| !s.is_empty()).map(|s| s.to_string());
-    let reality_sid = uri.get("sid").filter(|s| !s.is_empty()).map(|s| s.to_string());
-    let fingerprint = uri.get("fp").filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let flow = uri
+        .get("flow")
+        .filter(|f| !f.is_empty())
+        .map(|f| f.to_string());
+    let reality_pbk = uri
+        .get("pbk")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let reality_sid = uri
+        .get("sid")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let fingerprint = uri
+        .get("fp")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
 
     let label = uri.fragment.unwrap_or_default();
     let label = if label.trim().is_empty() {
@@ -255,7 +275,10 @@ mod tests {
     fn stable_id_is_content_hash_of_normalized_endpoint() {
         let a = parse_line(&sample_vless("82.40.62.4"), "s1", TS).unwrap();
         let b = parse_line(&sample_vless("82.40.62.4"), "s2", TS).unwrap();
-        assert_eq!(a.profile_id, b.profile_id, "same endpoint dedupes across sources");
+        assert_eq!(
+            a.profile_id, b.profile_id,
+            "same endpoint dedupes across sources"
+        );
         let c = parse_line(&sample_vless("82.40.62.5"), "s", TS).unwrap();
         assert_ne!(a.profile_id, c.profile_id, "different endpoint differs");
     }
@@ -278,7 +301,8 @@ mod tests {
         assert!(parse_line(&format!("vless://{u}@not a host!:443#x"), "s", TS).is_err()); // bad host
         assert!(parse_line(&format!("vless://{u}@host:443?type=quic#x"), "s", TS).is_err()); // bad transport
         assert!(parse_line(&format!("vless://{u}@host:443?security=quic#x"), "s", TS).is_err()); // bad security
-        assert!(parse_line(&format!("vless://{u}@host:443?security=tls#x"), "s", TS).is_err()); // tls w/o sni
+        assert!(parse_line(&format!("vless://{u}@host:443?security=tls#x"), "s", TS).is_err());
+        // tls w/o sni
     }
 
     #[test]
@@ -319,7 +343,12 @@ mod tests {
     fn percent_encoded_paths_and_labels_decode() {
         let line = "vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@host:443?type=ws&path=%2Fvless&security=none#%F0%9F%87%A7%20Bulgaria";
         let p = parse_line(line, "s", TS).unwrap();
-        assert_eq!(p.transport, Transport::WebSocket { path: "/vless".into() });
+        assert_eq!(
+            p.transport,
+            Transport::WebSocket {
+                path: "/vless".into()
+            }
+        );
         assert!(p.label.contains("Bulgaria"));
     }
 

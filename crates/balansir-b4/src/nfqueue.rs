@@ -394,8 +394,14 @@ mod tests {
         let hex_params = hex(&params);
         // The message must be longer than the old (buggy) form that only had
         // PARAMS + QUEUE_MAXLEN, because FLAGS + MASK are now present.
-        assert!(hex_params.contains("08000500"), "NFQA_CFG_FLAGS attr: {hex_params}");
-        assert!(hex_params.contains("08000400"), "NFQA_CFG_MASK attr: {hex_params}");
+        assert!(
+            hex_params.contains("08000500"),
+            "NFQA_CFG_FLAGS attr: {hex_params}"
+        );
+        assert!(
+            hex_params.contains("08000400"),
+            "NFQA_CFG_MASK attr: {hex_params}"
+        );
     }
 
     #[test]
