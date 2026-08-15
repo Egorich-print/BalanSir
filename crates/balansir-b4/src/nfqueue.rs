@@ -189,7 +189,7 @@ fn parse_netfilter_message(buf: &[u8]) -> io::Result<NfMessage> {
     let header = &buf[..16];
     let length = u32::from_ne_bytes([header[0], header[1], header[2], header[3]]) as usize;
     let msg_type = u16::from_ne_bytes([header[4], header[5]]);
-    if length > buf.len() {
+    if length < 16 || length > buf.len() {
         return Ok(NfMessage::Other);
     }
     let body = &buf[16..length];
