@@ -61,8 +61,9 @@ impl NfQueue {
     }
 
     fn configure(&self) -> io::Result<()> {
-        // 1) PF_BIND to NFPROTO_INET (or UNSPEC to catch all families).
-        let pf_bind = self.config_msg(NFQNL_CFG_CMD_PF_BIND, Some(NFPROTO_INET));
+        // 1) PF_BIND to AF_INET (nfqnl_msg_config_cmd.pf uses AF_*, and the
+        // kernel only accepts AF_INET/AF_INET6/AF_UNSPEC here).
+        let pf_bind = self.config_msg(NFQNL_CFG_CMD_PF_BIND, Some(AF_INET));
         self.send(&pf_bind)?;
         // 2) BIND to the specific queue.
         let bind = self.config_msg(NFQNL_CFG_CMD_BIND, None);

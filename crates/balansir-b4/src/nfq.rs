@@ -30,6 +30,9 @@ pub const NFQNL_MSG_VERDICT_BATCH: u8 = 3;
 pub const NFNETLINK_V0: u8 = 0;
 pub const NFPROTO_UNSPEC: u8 = 0;
 pub const NFPROTO_INET: u8 = 1;
+/// AF_INET (2) — used in nfqnl_msg_config_cmd.pf for PF_BIND/PF_UNBIND
+/// (the kernel compares against AF_*, not NFPROTO_*).
+pub const AF_INET: u8 = 2;
 
 // --- nfqnl attributes (nfnetlink_queue.h) ---
 pub const NFQA_UNSPEC: u16 = 0;
