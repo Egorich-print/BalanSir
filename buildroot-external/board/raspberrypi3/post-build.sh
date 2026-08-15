@@ -9,6 +9,11 @@ TARGET_DIR="${1}"
 
 # --- BalanSir services ------------------------------------------------------
 # Enable the daemon + executor so the box enforces policy after first boot
+
+# Call OTA layout setup
+if [ -f "${TARGET_DIR}/usr/local/bin/post-image-ota.sh" ]; then
+    /usr/local/bin/post-image-ota.sh "${TARGET_DIR}"
+
 # (mission: image must start networking -> executor -> daemon -> config ->
 # first reconcile automatically).
 if [ -d "${TARGET_DIR}/etc/systemd/system" ]; then
@@ -64,3 +69,4 @@ if [ -d "${TARGET_DIR}/etc/systemd" ]; then
         printf '[Journal]\nStorage=persistent\n' > \
             "${TARGET_DIR}/etc/systemd/journald.conf.d/00-boot-debug.conf"
 fi
+
