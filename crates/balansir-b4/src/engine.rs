@@ -112,6 +112,13 @@ impl B4Engine {
                 // Try to identify the destination host from TLS SNI.
                 let tcp_payload = &payload[tcp.tcp_offset + tcp.tcp_header_len..];
                 let host = extract_tls_sni(tcp_payload);
+                tracing::debug!(
+                    dst_port = tcp.dst_port(),
+                    payload_len = tcp_payload.len(),
+                    head = %hex6(tcp_payload),
+                    sni = ?host,
+                    "b4 engine: inspected port packet",
+                );
                 if host.is_some() {
                     stats.tls_packets.fetch_add(1, Ordering::Relaxed);
                 }
@@ -203,6 +210,15 @@ pub fn default_config() -> EngineConfig {
             strategies: vec![Strategy::Mss { mss: 1200 }],
         }],
     }
+}
+
+/// Debug helper: hex of the first up-to-6 bytes of a payload.
+fn hex6(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
