@@ -8,6 +8,7 @@
   import Network from './views/Network.svelte';
   import Qos from './views/Qos.svelte';
   import B4 from './views/B4.svelte';
+  import Dpi from './views/Dpi.svelte';
   import Xray from './views/Xray.svelte';
   import Tailscale from './views/Tailscale.svelte';
   import Policy from './views/Policy.svelte';
@@ -38,6 +39,7 @@
     { id: 'policy', label: 'Policy', component: Policy },
     { id: 'qos', label: 'QoS', component: Qos },
     { id: 'b4', label: 'B4', component: B4 },
+    { id: 'dpi', label: 'DPI', component: Dpi },
     { id: 'xray', label: 'Xray', component: Xray },
     { id: 'tailscale', label: 'Tailscale', component: Tailscale },
     { id: 'events', label: 'Events', component: Events },

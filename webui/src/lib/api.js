@@ -50,6 +50,7 @@ export const api = {
   b4: () => req('/b4'),
   setB4Paused: (paused) =>
     req('/b4/pause', { method: 'POST', body: JSON.stringify({ paused }) }),
+  dpi: () => req('/dpi'),
 
   xray: () => req('/xray'),
   setXrayPaused: (paused) =>
