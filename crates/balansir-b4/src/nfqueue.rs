@@ -61,16 +61,43 @@ impl NfQueue {
     }
 
     fn configure(&self) -> io::Result<()> {
-        // 1) PF_BIND to AF_INET (nfqnl_msg_config_cmd.pf uses AF_*, and the
-        // kernel only accepts AF_INET/AF_INET6/AF_UNSPEC here).
+        // Match libnetfilter_queue's sequence: UNBIND_PF then PF_BIND (some
+        // kernels require the transition to (re)register the family), then
+        // BIND the specific queue, then copy-mode params.
+        let pf_unbind = self.config_msg(NFQNL_CFG_CMD_PF_UNBIND, Some(AF_INET));
+        self.send_config(&pf_unbind)?;
         let pf_bind = self.config_msg(NFQNL_CFG_CMD_PF_BIND, Some(AF_INET));
-        self.send(&pf_bind)?;
-        // 2) BIND to the specific queue.
+        self.send_config(&pf_bind)?;
         let bind = self.config_msg(NFQNL_CFG_CMD_BIND, None);
-        self.send(&bind)?;
-        // 3) Configure copy mode = COPY_PACKET with range, flags = SEQ|GSO.
+        self.send_config(&bind)?;
         let params = self.config_params();
-        self.send(&params)?;
+        self.send_config(&params)?;
+        Ok(())
+    }
+
+    /// Send a config message with NLM_F_ACK and read the kernel's reply so a
+    /// rejected command surfaces as an error instead of a silent no-op.
+    fn send_config(&self, buf: &[u8]) -> io::Result<()> {
+        // Patch the flags byte (offset 6..8) to add NLM_F_ACK (0x4).
+        let mut with_ack = buf.to_vec();
+        if with_ack.len() >= 8 {
+            let flags = u16::from_ne_bytes([with_ack[6], with_ack[7]]);
+            with_ack[6..8].copy_from_slice(&(flags | netlink_packet_core::NLM_F_ACK).to_ne_bytes());
+        }
+        self.sock.send(&with_ack, 0)?;
+        // Read the reply (ACK or NLMSG_ERROR). Short timeout to avoid hang.
+        let mut reply = vec![0u8; 512];
+        let n = self.sock.recv(&mut reply, 0)?;
+        if n >= 4 {
+            // Netlink message type: NLMSG_ERROR = 2.
+            let mtype = u16::from_ne_bytes([reply[4], reply[5]]);
+            if mtype == 2 && n >= 16 {
+                let err = i32::from_ne_bytes([reply[16], reply[17], reply[18], reply[19]]);
+                if err != 0 {
+                    return Err(io::Error::from_raw_os_error(-err));
+                }
+            }
+        }
         Ok(())
     }
 
