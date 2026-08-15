@@ -126,13 +126,15 @@ impl NfQueue {
     /// Build an `NFQNL_MSG_CONFIG` message.
     fn config_msg(&self, cmd: u8, pf: Option<u8>, res_id: u16) -> Vec<u8> {
         let mut attrs: Vec<u8> = Vec::new();
-        // NFQA_CFG_CMD (nested): { NFQNL_CFG_CMD_CMD, NFQNL_CFG_CMD_PF }
-        let mut cmd_attrs = Vec::new();
-        push_nla(&mut cmd_attrs, NFQNL_CFG_CMD_CMD, &[cmd]);
-        if let Some(pf) = pf {
-            push_nla(&mut cmd_attrs, NFQNL_CFG_CMD_PF, &[pf]);
-        }
-        push_nla(&mut attrs, NFQA_CFG_CMD, &cmd_attrs);
+        // NFQA_CFG_CMD payload = struct nfqnl_msg_config_cmd (4 bytes):
+        //   command: u8
+        //   _pad: u8
+        //   pf: __be16  (AF_* family, only for PF_BIND/PF_UNBIND)
+        let mut cmd_struct = Vec::with_capacity(4);
+        cmd_struct.push(cmd);
+        cmd_struct.push(0);
+        cmd_struct.extend_from_slice(&pf.unwrap_or(0).to_be_bytes());
+        push_nla(&mut attrs, NFQA_CFG_CMD, &cmd_struct);
 
         self.netlink_msg(NFQNL_MSG_CONFIG, attrs, res_id)
     }
