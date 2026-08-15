@@ -201,6 +201,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "balansir-b4"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "balansir-common",
+ "futures",
+ "libc",
+ "netlink-packet-core",
+ "netlink-packet-netfilter",
+ "netlink-packet-utils",
+ "netlink-sys",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "balansir-common"
 version = "0.4.0"
 dependencies = [
@@ -405,6 +426,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "convert_case"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -435,6 +462,19 @@ name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
+name = "derive_more"
+version = "0.99.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6edb4b64a43d977b8e99788fe3a04d483834fba1215a7e02caa415b626497f7f"
+dependencies = [
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "displaydoc"
@@ -1159,6 +1199,21 @@ checksum = "72724faf704479d67b388da142b186f916188505e7e0b26719019c525882eda4"
 dependencies = [
  "anyhow",
  "byteorder",
+ "netlink-packet-utils",
+]
+
+[[package]]
+name = "netlink-packet-netfilter"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a308aefdad7f1fb18abdcb0af971acd0cfaf5d405718c0365090dfaa54fca7d7"
+dependencies = [
+ "anyhow",
+ "bitflags 2.13.1",
+ "byteorder",
+ "derive_more",
+ "libc",
+ "netlink-packet-core",
  "netlink-packet-utils",
 ]
 

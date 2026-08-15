@@ -1,0 +1,470 @@
+//! IP/TCP packet parsing and mutation for DPI-bypass strategies.
+//!
+//! Operates on raw IP packets as delivered by NFQUEUE (COPY_PACKET). Only IPv4
+//! is handled for now (IPv6 is a documented limitation). All parsing is
+//! bounds-checked and defensive — a malformed packet is returned as-is.
+
+/// A parsed IPv4 header + TCP header (when present).
+#[derive(Debug, Clone)]
+pub struct TcpPacket {
+    pub raw: Vec<u8>,
+    pub ip_header_len: usize,
+    pub ip_total_len: usize,
+    pub tcp_offset: usize,
+    pub tcp_header_len: usize,
+    pub tcp_doff_field: usize, // offset of the 4-bit data offset byte
+    pub checksum_offsets: (usize, usize),
+}
+
+impl TcpPacket {
+    /// Try to parse `raw` as IPv4+TCP. Returns None if not TCP or malformed.
+    pub fn parse(raw: &[u8]) -> Option<Self> {
+        if raw.len() < 20 {
+            return None;
+        }
+        // IPv4 version/ihl
+        let ver_ihl = raw[0];
+        if ver_ihl >> 4 != 4 {
+            return None;
+        }
+        let ip_header_len = ((ver_ihl & 0x0f) as usize) * 4;
+        if ip_header_len < 20 || raw.len() < ip_header_len {
+            return None;
+        }
+        let proto = raw[9];
+        if proto != 6 {
+            // TCP only
+            return None;
+        }
+        let ip_total_len = u16::from_be_bytes([raw[2], raw[3]]) as usize;
+        if ip_total_len < ip_header_len || raw.len() < ip_total_len {
+            return None;
+        }
+        let tcp_offset = ip_header_len;
+        if raw.len() < tcp_offset + 20 {
+            return None;
+        }
+        // TCP data offset (in 32-bit words) is the high nibble of byte 12.
+        let tcp_doff_field = tcp_offset + 12;
+        let tcp_header_len = ((raw[tcp_doff_field] >> 4) as usize) * 4;
+        if tcp_header_len < 20 || raw.len() < tcp_offset + tcp_header_len {
+            return None;
+        }
+        // IPv4 header checksum is bytes 10..12; TCP checksum is bytes 16..18
+        // of the TCP header.
+        Some(Self {
+            raw: raw.to_vec(),
+            ip_header_len,
+            ip_total_len,
+            tcp_offset,
+            tcp_header_len,
+            tcp_doff_field,
+            checksum_offsets: (10, tcp_offset + 16),
+        })
+    }
+
+    /// Destination port (big-endian bytes 2..4 of TCP header).
+    pub fn dst_port(&self) -> u16 {
+        u16::from_be_bytes([self.raw[self.tcp_offset + 2], self.raw[self.tcp_offset + 3]])
+    }
+
+    /// Source port.
+    pub fn src_port(&self) -> u16 {
+        u16::from_be_bytes([self.raw[self.tcp_offset], self.raw[self.tcp_offset + 1]])
+    }
+
+    /// Full packet length (including IP header).
+    pub fn len(&self) -> usize {
+        self.raw.len()
+    }
+
+    /// Whether the packet has no payload bytes.
+    pub fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+}
+
+/// TCP header option manipulation.
+pub mod tcp_opt {
+    use super::TcpPacket;
+
+    /// The TCP MSS option kind.
+    pub const MSS: u8 = 2;
+    /// The TCP SACK-permitted option kind.
+    pub const SACK_PERMITTED: u8 = 4;
+
+    /// Set the TCP MSS option value in place. Returns new packet if the MSS
+    /// option was found and updated (best-effort: if absent, unchanged).
+    pub fn set_mss(pkt: &mut TcpPacket, mss: u16) -> bool {
+        let start = pkt.tcp_offset + 20;
+        let end = pkt.tcp_offset + pkt.tcp_header_len;
+        let mut i = start;
+        while i + 1 < end {
+            let kind = pkt.raw[i];
+            if kind == 0 {
+                break; // EOL
+            }
+            if kind == 1 {
+                i += 1;
+                continue; // NOP
+            }
+            let len = pkt.raw[i + 1] as usize;
+            if len < 2 || i + len > end {
+                break;
+            }
+            if kind == MSS && len >= 4 {
+                pkt.raw[i + 2..i + 4].copy_from_slice(&mss.to_be_bytes());
+                return true;
+            }
+            i += len;
+        }
+        false
+    }
+
+    /// Strip a TCP option kind in place (e.g. SACK-permitted). Rebuilds the
+    /// TCP header so the option bytes are removed. Returns true if changed.
+    pub fn strip_option(pkt: &mut TcpPacket, kind: u8) -> bool {
+        let start = pkt.tcp_offset + 20;
+        let end = pkt.tcp_offset + pkt.tcp_header_len;
+        let mut kept = Vec::new();
+        let mut changed = false;
+        let mut i = start;
+        while i < end {
+            let k = pkt.raw[i];
+            if k == 0 {
+                // EOL: copy the rest (including EOL + padding)
+                kept.extend_from_slice(&pkt.raw[i..end]);
+                break;
+            }
+            if k == 1 {
+                kept.push(1);
+                i += 1;
+                continue;
+            }
+            let len = pkt.raw[i + 1] as usize;
+            if len < 2 || i + len > end {
+                kept.extend_from_slice(&pkt.raw[i..end]);
+                break;
+            }
+            if k == kind {
+                changed = true;
+            } else {
+                kept.extend_from_slice(&pkt.raw[i..i + len]);
+            }
+            i += len;
+        }
+        if !changed {
+            return false;
+        }
+        // Pad to 4-byte alignment with NOPs (kind 1).
+        while kept.len() % 4 != 0 {
+            kept.push(1);
+        }
+        // Rebuild the packet: copy IP header + fixed TCP header (20 bytes) +
+        // new options + original payload.
+        let tcp_start = pkt.tcp_offset;
+        let payload = pkt.raw[tcp_start + pkt.tcp_header_len..].to_vec();
+        let mut out = Vec::new();
+        out.extend_from_slice(&pkt.raw[..tcp_start]);
+        out.extend_from_slice(&pkt.raw[tcp_start..tcp_start + 20]);
+        out.extend_from_slice(&kept);
+        out.extend_from_slice(&payload);
+        // Update TCP data offset field.
+        let new_tcp_header_len = (20 + kept.len() + 3) & !3;
+        let dof = (new_tcp_header_len / 4) as u8;
+        // The data offset is the high nibble of the byte at tcp_start+12.
+        out[tcp_start + 12] = (dof << 4) | (out[tcp_start + 12] & 0x0f);
+        // Update IP total length.
+        let new_total = out.len();
+        let old_ip_len = u16::from_be_bytes([out[2], out[3]]) as usize;
+        let _ = old_ip_len;
+        out[2..4].copy_from_slice(&(new_total as u16).to_be_bytes());
+        pkt.raw = out;
+        pkt.tcp_header_len = new_tcp_header_len;
+        true
+    }
+}
+
+/// Recompute and write the IPv4 header checksum.
+pub fn fix_ipv4_checksum(pkt: &mut TcpPacket) {
+    let mut sum: u32 = 0;
+    for i in 0..pkt.ip_header_len {
+        if i == 10 || i == 11 {
+            continue; // skip checksum field
+        }
+        let b = pkt.raw[i] as u32;
+        sum += if i % 2 == 0 { b << 8 } else { b };
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    let csum = !(sum as u16);
+    pkt.raw[10..12].copy_from_slice(&csum.to_be_bytes());
+}
+
+/// Recompute and write the TCP checksum (with pseudo-header).
+pub fn fix_tcp_checksum(pkt: &mut TcpPacket) {
+    let ip = &pkt.raw;
+    let src: [u8; 4] = [ip[12], ip[13], ip[14], ip[15]];
+    let dst: [u8; 4] = [ip[16], ip[17], ip[18], ip[19]];
+    let tcp_len = pkt.len() - pkt.tcp_offset;
+    let mut sum: u32 = 0;
+    // pseudo-header
+    for i in (0..4).step_by(2) {
+        sum += ((src[i] as u32) << 8) | (src[i + 1] as u32);
+    }
+    for i in (0..4).step_by(2) {
+        sum += ((dst[i] as u32) << 8) | (dst[i + 1] as u32);
+    }
+    sum += 6; // TCP protocol
+    sum += tcp_len as u32;
+    // TCP header + payload
+    let tcp_start = pkt.tcp_offset;
+    for i in (0..tcp_len).step_by(2) {
+        let hi = pkt.raw[tcp_start + i] as u32;
+        let lo = if i + 1 < tcp_len {
+            pkt.raw[tcp_start + i + 1] as u32
+        } else {
+            0
+        };
+        sum += (hi << 8) | lo;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    let csum = !(sum as u16);
+    let (cs_lo, cs_hi) = pkt.checksum_offsets;
+    // offsets are (ip_checksum_pos, tcp_checksum_pos)
+    pkt.raw[cs_hi..cs_hi + 2].copy_from_slice(&csum.to_be_bytes());
+    // after touching the TCP header the IPv4 checksum is also invalid
+    fix_ipv4_checksum(pkt);
+    let _ = (cs_lo,);
+}
+
+/// Test-only helper: a plain SYN with an MSS option. Lives outside `cfg(test)`
+/// so integration/unit tests in sibling modules can construct packets.
+#[cfg(test)]
+pub fn tests_synth_syn() -> Vec<u8> {
+    synth_syn_with_mss(1460, false)
+}
+
+/// Build a minimal valid IPv4+TCP SYN packet (test helper).
+#[cfg(test)]
+pub(crate) fn synth_syn_with_mss(mss: u16, with_sack: bool) -> Vec<u8> {
+    let mut opts = Vec::new();
+    opts.push(tcp_opt::MSS);
+    opts.push(4);
+    opts.extend_from_slice(&mss.to_be_bytes());
+    if with_sack {
+        opts.push(tcp_opt::SACK_PERMITTED);
+        opts.push(2);
+    }
+    while opts.len() % 4 != 0 {
+        opts.push(1);
+    }
+    let tcp_hdr_len = 20 + opts.len();
+    let total = 20 + tcp_hdr_len;
+    let mut pkt = vec![0u8; total];
+    // IP header
+    pkt[0] = 0x45;
+    pkt[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+    pkt[8] = 64; // TTL
+    pkt[9] = 6; // TCP
+    pkt[12..16].copy_from_slice(&[10, 0, 0, 1]);
+    pkt[16..20].copy_from_slice(&[10, 0, 0, 2]);
+    // TCP header
+    pkt[20 + 12] = ((tcp_hdr_len / 4) as u8) << 4; // data offset
+    pkt[20 + 14] = 0x50; // flags: SYN
+    pkt[20 + 2..20 + 4].copy_from_slice(&0x01bbu16.to_be_bytes()); // dst 443
+    pkt[20 + 20..20 + 20 + opts.len()].copy_from_slice(&opts);
+    // fix checksums
+    let mut p = TcpPacket::parse(&pkt).unwrap();
+    fix_ipv4_checksum(&mut p);
+    fix_tcp_checksum(&mut p);
+    p.raw
+}
+
+/// Extract the TLS Server Name Indication (SNI) from a ClientHello payload.
+///
+/// `tcp_payload` must be the TCP stream data (after the TCP header). The
+/// handshake/record framing is parsed defensively; returns None on any
+/// malformed input.
+pub fn extract_tls_sni(tcp_payload: &[u8]) -> Option<String> {
+    // TLS record: type(1) version(2) length(2)
+    if tcp_payload.len() < 5 {
+        return None;
+    }
+    if tcp_payload[0] != 0x16 {
+        // not a handshake record
+        return None;
+    }
+    let rec_len = u16::from_be_bytes([tcp_payload[3], tcp_payload[4]]) as usize;
+    // handshake: type(1) length(3)
+    let hs = 5;
+    if tcp_payload.len() < hs + 4 {
+        return None;
+    }
+    if tcp_payload[hs] != 0x01 {
+        // not ClientHello
+        return None;
+    }
+    let hs_len = ((tcp_payload[hs + 1] as usize) << 16)
+        | ((tcp_payload[hs + 2] as usize) << 8)
+        | (tcp_payload[hs + 3] as usize);
+    let hello = hs + 4;
+    if hello + hs_len > tcp_payload.len() || hello + hs_len > 5 + rec_len {
+        return None;
+    }
+    let body = &tcp_payload[hello..hello + hs_len];
+    // ClientHello: legacy_version(2) random(32) session_id(1+len)
+    if body.len() < 2 + 32 + 1 {
+        return None;
+    }
+    let mut off = 2 + 32;
+    let sid_len = body[off] as usize;
+    off += 1 + sid_len;
+    // cipher suites (2 + len)
+    if body.len() < off + 2 {
+        return None;
+    }
+    let cs_len = u16::from_be_bytes([body[off], body[off + 1]]) as usize;
+    off += 2 + cs_len;
+    // compression methods (1 + len)
+    if body.len() < off + 1 {
+        return None;
+    }
+    let comp_len = body[off] as usize;
+    off += 1 + comp_len;
+    // extensions (2 + total len)
+    if body.len() < off + 2 {
+        return None;
+    }
+    let ext_total = u16::from_be_bytes([body[off], body[off + 1]]) as usize;
+    off += 2;
+    if off + ext_total > body.len() {
+        return None;
+    }
+    let exts = &body[off..off + ext_total];
+    let mut e = 0;
+    while e + 4 <= exts.len() {
+        let ext_type = u16::from_be_bytes([exts[e], exts[e + 1]]);
+        let ext_len = u16::from_be_bytes([exts[e + 2], exts[e + 3]]) as usize;
+        if e + 4 + ext_len > exts.len() {
+            break;
+        }
+        if ext_type == 0 {
+            // server_name
+            let data = &exts[e + 4..e + 4 + ext_len];
+            return parse_sni_list(data);
+        }
+        e += 4 + ext_len;
+    }
+    None
+}
+
+/// Parse the server_name extension payload for the first host_name.
+fn parse_sni_list(data: &[u8]) -> Option<String> {
+    if data.len() < 2 {
+        return None;
+    }
+    let list_len = u16::from_be_bytes([data[0], data[1]]) as usize;
+    let list = &data[2..];
+    if list.len() < list_len {
+        return None;
+    }
+    let mut off = 0;
+    while off + 3 <= list.len() {
+        let name_type = list[off];
+        let name_len = u16::from_be_bytes([list[off + 1], list[off + 2]]) as usize;
+        if off + 3 + name_len > list.len() {
+            break;
+        }
+        if name_type == 0 {
+            return std::str::from_utf8(&list[off + 3..off + 3 + name_len])
+                .ok()
+                .map(|s| s.to_string());
+        }
+        off += 3 + name_len;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_syn_with_mss() {
+        let raw = synth_syn_with_mss(1460, false);
+        let pkt = TcpPacket::parse(&raw).unwrap();
+        assert_eq!(pkt.dst_port(), 443);
+        assert_eq!(pkt.tcp_header_len, 24); // 20 + 4 (mss, 4-byte aligned)
+    }
+
+    #[test]
+    fn sets_mss_in_place() {
+        let raw = synth_syn_with_mss(1460, true);
+        let mut pkt = TcpPacket::parse(&raw).unwrap();
+        assert!(tcp_opt::set_mss(&mut pkt, 1200));
+        // re-parse and confirm
+        let re = TcpPacket::parse(&pkt.raw).unwrap();
+        // find mss value
+        let start = re.tcp_offset + 20;
+        let end = re.tcp_offset + re.tcp_header_len;
+        let mut i = start;
+        let mut found = None;
+        while i + 1 < end {
+            let k = re.raw[i];
+            if k == 0 {
+                break;
+            }
+            if k == 1 {
+                i += 1;
+                continue;
+            }
+            let len = re.raw[i + 1] as usize;
+            if k == tcp_opt::MSS && len >= 4 {
+                found = Some(u16::from_be_bytes([re.raw[i + 2], re.raw[i + 3]]));
+            }
+            i += len;
+        }
+        assert_eq!(found, Some(1200));
+    }
+
+    #[test]
+    fn strips_sack_permitted() {
+        let raw = synth_syn_with_mss(1460, true);
+        let mut pkt = TcpPacket::parse(&raw).unwrap();
+        assert!(tcp_opt::strip_option(&mut pkt, tcp_opt::SACK_PERMITTED));
+        // re-parse; no SACK option should remain
+        let re = TcpPacket::parse(&pkt.raw).unwrap();
+        let start = re.tcp_offset + 20;
+        let end = re.tcp_offset + re.tcp_header_len;
+        let mut i = start;
+        let mut has_sack = false;
+        while i + 1 < end {
+            let k = re.raw[i];
+            if k == 0 {
+                break;
+            }
+            if k == 1 {
+                i += 1;
+                continue;
+            }
+            let len = re.raw[i + 1] as usize;
+            if k == tcp_opt::SACK_PERMITTED {
+                has_sack = true;
+            }
+            i += len;
+        }
+        assert!(!has_sack);
+    }
+
+    #[test]
+    fn non_tcp_is_rejected() {
+        let mut pkt = vec![0u8; 40];
+        pkt[0] = 0x45;
+        pkt[9] = 17; // UDP
+        assert!(TcpPacket::parse(&pkt).is_none());
+    }
+}

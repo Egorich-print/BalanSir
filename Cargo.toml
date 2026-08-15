@@ -6,6 +6,7 @@ members = [
     "crates/balansir-executor",
     "crates/balansir-api",
     "crates/balansir-tests",
+    "crates/balansir-b4",
     "tools/balansir-image",
 ]
 # The Tauri desktop shell is a standalone app (its own huge dependency tree);
@@ -38,6 +39,7 @@ zeroize = { version = "1", features = ["derive"] }
 rtnetlink = "0.14"
 netlink-packet-route = "0.19"
 netlink-packet-core = "0.7"
+netlink-sys = "0.8"
 libc = "0.2"
 futures = "0.3"
 
