@@ -1,0 +1,16 @@
+[package]
+name = "balansir-vpn"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "balansir_vpn"
+
+[dependencies]
+balansir-common = { path = "../balansir-common" }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
