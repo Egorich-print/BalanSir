@@ -69,6 +69,7 @@ impl B4Engine {
         let queue = std::sync::Arc::new(queue);
 
         tokio::task::spawn_blocking(move || {
+            tracing::info!("b4 engine: interception thread started");
             while running.load(Ordering::SeqCst) {
                 let packet = match queue.recv_packet() {
                     Ok(Some(p)) => p,
