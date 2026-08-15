@@ -49,14 +49,17 @@ pub struct NfQueue {
 impl NfQueue {
     /// Open and bind to a kernel NFQUEUE.
     pub fn new(queue_num: u16, copy_range: u32) -> io::Result<Self> {
+        tracing::info!(queue = queue_num, "NFQUEUE: opening socket");
         let mut sock = netlink_sys::Socket::new(NETLINK_NETFILTER as isize)?;
         sock.bind_auto()?;
+        tracing::info!(queue = queue_num, "NFQUEUE: socket bound");
         let queue = Self {
             sock,
             queue_num,
             copy_range,
         };
         queue.configure()?;
+        tracing::info!(queue = queue_num, "NFQUEUE: configure complete");
         Ok(queue)
     }
 
