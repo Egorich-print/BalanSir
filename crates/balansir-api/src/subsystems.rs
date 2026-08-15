@@ -85,6 +85,15 @@ pub async fn get_b4(State(state): State<Arc<ApiState>>) -> Response {
     Json(snapshot.b4).into_response()
 }
 
+/// `GET /dpi` — DPI-bypass engine state (enabled, queue, profiles, counters).
+pub async fn get_dpi(State(state): State<Arc<ApiState>>) -> Response {
+    let snapshot = match snapshot_or_unavailable(&state).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    Json(snapshot.dpi).into_response()
+}
+
 /// `POST /b4/pause` — pause/resume the B4 adaptation engine.
 pub async fn set_b4_paused(
     State(state): State<Arc<ApiState>>,

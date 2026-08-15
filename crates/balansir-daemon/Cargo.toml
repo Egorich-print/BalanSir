@@ -30,6 +30,7 @@ proptest = "1"
 balansir-common = { path = "../balansir-common" }
 balansir-control = { path = "../balansir-control" }
 balansir-api = { path = "../balansir-api" }
+balansir-b4 = { path = "../balansir-b4" }
 tokio = { workspace = true, features = ["rt", "net", "macros", "io-util", "fs", "time", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

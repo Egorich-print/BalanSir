@@ -286,6 +286,10 @@ pub enum NftVerdict {
     Accept,
     Drop,
     Reject,
+    /// NFQUEUE: send the packet to a userspace queue (DPI-bypass engine).
+    Queue {
+        num: u16,
+    },
 }
 
 impl fmt::Display for NftVerdict {
@@ -294,6 +298,7 @@ impl fmt::Display for NftVerdict {
             NftVerdict::Accept => "accept",
             NftVerdict::Drop => "drop",
             NftVerdict::Reject => "reject",
+            NftVerdict::Queue { num } => return write!(f, "queue num {num}"),
         })
     }
 }

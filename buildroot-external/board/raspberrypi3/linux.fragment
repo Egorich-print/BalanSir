@@ -41,6 +41,12 @@ CONFIG_NFT_REJECT=y
 CONFIG_NFT_LOG=y
 CONFIG_NFT_LIMIT=y
 CONFIG_NFT_COUNTER=y
+# NFQUEUE: DPI-bypass engine intercepts TCP via `nft ... queue` → NFQUEUE.
+# Built-in so the engine can bind at boot without module load.
+CONFIG_NETFILTER_NETLINK_QUEUE=y
+CONFIG_NFT_QUEUE=y
+CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y
+CONFIG_NF_QUEUE=y
 
 # Netlink (needed by rtnetlink-based executor drivers).
 CONFIG_NETLINK_DIAG=y

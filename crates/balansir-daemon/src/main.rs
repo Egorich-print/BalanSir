@@ -223,6 +223,27 @@ async fn main() -> Result<()> {
             }
         }
 
+        // DPI-bypass (Rust-native NFQUEUE engine). Loads the optional
+        // BALANSIR_DPI_CONFIG (profiles/sets); the engine intercepts matching
+        // TCP via NFQUEUE and applies per-domain bypass strategies.
+        if let Ok(dpi_path) = std::env::var("BALANSIR_DPI_CONFIG") {
+            match balansir_daemon::b4_dpi::DpiManager::new(&dpi_path) {
+                Ok(dpi_manager) => {
+                    let dpi = std::sync::Arc::new(dpi_manager);
+                    match dpi.start().await {
+                        Ok(()) => {
+                            manager.set_dpi(dpi.clone()).await;
+                            info!("DPI-bypass engine started from {dpi_path}");
+                        }
+                        Err(e) => {
+                            warn!("DPI-bypass engine start failed ({e}); engine disabled");
+                        }
+                    }
+                }
+                Err(e) => warn!("DPI-bypass config {dpi_path} rejected: {e} (disabled)"),
+            }
+        }
+
         let loop_manager = std::sync::Arc::clone(&manager);
         tokio::spawn(async move {
             loop_manager.run_loop().await;

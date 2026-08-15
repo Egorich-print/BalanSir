@@ -83,6 +83,21 @@ pub struct B4FlowView {
     pub path: crate::path_health::PathHealthView,
 }
 
+/// DPI-bypass engine view: enabled state, queue, ports, profiles, counters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DpiSnapshot {
+    pub enabled: bool,
+    pub config_path: Option<String>,
+    pub queue_num: u16,
+    pub ports: Vec<u16>,
+    pub profiles: Vec<String>,
+    pub packets_seen: u64,
+    pub tls_packets: u64,
+    pub mutated: u64,
+    pub accepted: u64,
+    pub last_error: Option<String>,
+}
+
 /// B4 component view: policy intent, per-flow adaptation state, ownership
 /// (intended vs reported MTU), and diagnostics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -339,6 +354,9 @@ pub struct SubsystemSnapshot {
     pub wan_identity: Option<crate::network::WanIdentity>,
     pub tailscale: TailscaleSnapshot,
     pub b4: B4Snapshot,
+    /// DPI-bypass engine (Rust-native NFQUEUE).
+    #[serde(default)]
+    pub dpi: DpiSnapshot,
     pub xray: XraySnapshot,
     /// Live system resources (CPU/RAM/load/uptime), refreshed by the daemon.
     pub system: SystemStats,

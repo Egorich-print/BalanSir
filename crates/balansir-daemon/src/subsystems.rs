@@ -114,6 +114,8 @@ pub struct SubsystemManager {
     events: broadcast::Sender<SubsystemEvent>,
     interface_filter: RwLock<String>,
     b4: RwLock<Option<crate::b4_manager::B4ManagerHandle>>,
+    /// DPI-bypass engine (Rust-native NFQUEUE). Attached when BALANSIR_DPI_CONFIG.
+    dpi: RwLock<Option<std::sync::Arc<crate::b4_dpi::DpiManager>>>,
     #[cfg(feature = "xray")]
     xray: RwLock<Option<crate::xray_manager::XrayManagerHandle>>,
     /// Previous CPU sample for utilization deltas.
@@ -161,6 +163,7 @@ impl SubsystemManager {
             events,
             interface_filter: RwLock::new(String::new()),
             b4: RwLock::new(None),
+            dpi: RwLock::new(None),
             #[cfg(feature = "xray")]
             xray: RwLock::new(None),
             cpu_prev: RwLock::new(None),
@@ -174,6 +177,11 @@ impl SubsystemManager {
     /// panics with "Cannot block the current thread from within a runtime").
     pub async fn set_b4_handle(&self, handle: crate::b4_manager::B4ManagerHandle) {
         *self.b4.write().await = Some(handle);
+    }
+
+    /// Attach the DPI-bypass engine manager.
+    pub async fn set_dpi(&self, dpi: std::sync::Arc<crate::b4_dpi::DpiManager>) {
+        *self.dpi.write().await = Some(dpi);
     }
 
     /// Attach the Xray manager handle (pause/select/rotate for the API seam).
@@ -317,6 +325,27 @@ impl SubsystemManager {
         self.snapshot
             .update(|s| s.executor_unreachable = unreachable)
             .await;
+
+        // DPI-bypass engine state (published into the same snapshot).
+        if let Some(dpi) = self.dpi.read().await.as_ref() {
+            let st = dpi.status();
+            self.snapshot
+                .update(|s| {
+                    s.dpi = balansir_common::subsystems::DpiSnapshot {
+                        enabled: st.enabled,
+                        config_path: st.config_path,
+                        queue_num: st.queue_num,
+                        ports: st.ports,
+                        profiles: st.profiles,
+                        packets_seen: st.packets_seen,
+                        tls_packets: st.tls_packets,
+                        mutated: st.mutated,
+                        accepted: st.accepted,
+                        last_error: st.last_error,
+                    };
+                })
+                .await;
+        }
 
         if let Some(err) = qos_err {
             warn!("subsystems: QoS convergence failed: {err}");
