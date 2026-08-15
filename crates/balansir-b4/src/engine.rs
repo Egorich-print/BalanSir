@@ -90,10 +90,10 @@ impl B4Engine {
             // the engine is marked dead and the daemon surfaces it, while the
             // kernel FAIL_OPEN flag keeps traffic flowing.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                interception_loop(&queue, &running, &dead, &stats, &config, &ports)
+                interception_loop(&queue, &running, &stats, &config, &ports)
             }));
             let outcome = match outcome {
-                Ok(exit) => format!("{exit:?}"),
+                Ok(()) => "stopped".to_string(),
                 Err(payload) => {
                     let msg = payload
                         .downcast_ref::<&str>()
@@ -144,26 +144,16 @@ impl B4Engine {
     }
 }
 
-/// Outcome of the interception loop; returned so the exit path can explain
-/// why the thread stopped.
-#[derive(Debug)]
-enum LoopExit {
-    Stopped,
-    FatalError(String),
-}
-
 /// The blocking packet-processing loop. Every error path ACCEPTs the packet
 /// (never hangs a flow) and increments the error counter. The loop only exits
-/// on `running == false` or a fatal recv failure.
+/// on `running == false`; errors are non-fatal (logged + counted).
 fn interception_loop(
     queue: &std::sync::Arc<NfQueue>,
     running: &Arc<AtomicBool>,
-    dead: &Arc<AtomicBool>,
     stats: &Arc<AtomicU64Arr>,
     config: &EngineConfig,
     ports: &[u16],
-) -> LoopExit {
-    let _ = dead;
+) {
     while running.load(Ordering::SeqCst) {
         let packet = match queue.recv_packet() {
             Ok(Some(p)) => p,
@@ -270,7 +260,6 @@ fn interception_loop(
             }
         }
     }
-    LoopExit::Stopped
 }
 
 /// Apply a strategy to a packet; returns true if it changed anything.
