@@ -57,6 +57,10 @@ define BALANSIR_INSTALL_TARGET_CMDS
 	# WebUI static assets: the SPA is built at repo time (npm run build) and
 	# shipped in-tree as webui/dist. The daemon serves it from
 	# /usr/share/balansir/webui when BALANSIR_WEBUI_DIR is set (systemd unit).
+	# Remove the previous set first so hashed asset filenames from an older
+	# build never linger (a stale index.html/assets mismatch renders a blank
+	# page).
+	rm -rf $(TARGET_DIR)/usr/share/balansir/webui
 	mkdir -p $(TARGET_DIR)/usr/share/balansir/webui
 	cp -a $(BALANSIR_SRCDIR)/webui/dist/. $(TARGET_DIR)/usr/share/balansir/webui/
 endef
