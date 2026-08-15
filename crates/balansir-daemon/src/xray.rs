@@ -16,7 +16,8 @@ pub struct XrayConfig {
     pub uuid: SecretString,
     pub flow: Option<String>,
     pub transport: XrayTransport,
-    pub tls: Option<XrayTls>,
+    #[serde(default)]
+    pub security: XraySecurity,
     /// Optional profile/endpoint label (management plane).
     #[serde(default)]
     pub name: Option<String>,
@@ -50,10 +51,38 @@ pub enum XrayTransport {
     },
 }
 
+/// TLS layer: plain TLS (server name + insecure flag) or REALITY.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XrayTls {
     pub server_name: String,
     pub allow_insecure: bool,
+}
+
+/// REALITY parameters (VLESS Reality outbound).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XrayReality {
+    /// The REALITY server name (also acts as the SNI).
+    pub server_name: String,
+    /// Client fingerprint (`fp=`), e.g. `chrome` / `firefox`.
+    pub fingerprint: String,
+    /// The REALITY public key (`pbk`).
+    pub public_key: String,
+    /// Short id (`sid`), if the server uses one.
+    #[serde(default)]
+    pub short_id: String,
+    /// Spider X path, when non-default.
+    #[serde(default)]
+    pub spider_x: String,
+}
+
+/// Security layer of an Xray outbound: plain (none), TLS, or REALITY.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XraySecurity {
+    #[default]
+    None,
+    Tls(XrayTls),
+    Reality(XrayReality),
 }
 
 impl XrayConfig {
@@ -93,11 +122,31 @@ impl XrayConfig {
             }
             XrayTransport::Tcp => {}
         }
-        if let Some(tls) = &self.tls {
-            if tls.server_name.trim().is_empty() {
-                return Err(DriverError::ConfigInvalid(
-                    "xray tls server_name must not be empty".into(),
-                ));
+        match &self.security {
+            XraySecurity::None => {}
+            XraySecurity::Tls(tls) => {
+                if tls.server_name.trim().is_empty() {
+                    return Err(DriverError::ConfigInvalid(
+                        "xray tls server_name must not be empty".into(),
+                    ));
+                }
+            }
+            XraySecurity::Reality(r) => {
+                if r.server_name.trim().is_empty() {
+                    return Err(DriverError::ConfigInvalid(
+                        "xray reality server_name must not be empty".into(),
+                    ));
+                }
+                if r.public_key.trim().is_empty() {
+                    return Err(DriverError::ConfigInvalid(
+                        "xray reality public_key must not be empty".into(),
+                    ));
+                }
+                if r.fingerprint.trim().is_empty() {
+                    return Err(DriverError::ConfigInvalid(
+                        "xray reality fingerprint must not be empty".into(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -150,8 +199,9 @@ impl XrayDriver {
 
         let mut stream = serde_json::Map::new();
         stream.insert("network".into(), serde_json::json!(transport_network(cfg)));
-        let (security, tls_settings) = match &cfg.tls {
-            Some(tls) => {
+        let (security, security_settings) = match &cfg.security {
+            XraySecurity::None => ("none", None),
+            XraySecurity::Tls(tls) => {
                 let mut settings = serde_json::Map::new();
                 settings.insert("serverName".into(), serde_json::json!(tls.server_name));
                 settings.insert(
@@ -160,11 +210,28 @@ impl XrayDriver {
                 );
                 ("tls", Some(settings))
             }
-            None => ("none", None),
+            XraySecurity::Reality(r) => {
+                let mut settings = serde_json::Map::new();
+                settings.insert("serverName".into(), serde_json::json!(r.server_name));
+                settings.insert("fingerprint".into(), serde_json::json!(r.fingerprint));
+                settings.insert("publicKey".into(), serde_json::json!(r.public_key));
+                if !r.short_id.is_empty() {
+                    settings.insert("shortId".into(), serde_json::json!(r.short_id));
+                }
+                if !r.spider_x.is_empty() {
+                    settings.insert("spiderX".into(), serde_json::json!(r.spider_x));
+                }
+                ("reality", Some(settings))
+            }
         };
         stream.insert("security".into(), serde_json::json!(security));
-        if let Some(settings) = tls_settings {
-            stream.insert("tlsSettings".into(), serde_json::Value::Object(settings));
+        if let Some(settings) = security_settings {
+            let key = match security {
+                "tls" => "tlsSettings",
+                "reality" => "realitySettings",
+                _ => "tlsSettings",
+            };
+            stream.insert(key.into(), serde_json::Value::Object(settings));
         }
         match &cfg.transport {
             XrayTransport::WebSocket { path } => {
@@ -370,7 +437,7 @@ mod tests {
             uuid: secrecy::SecretString::from("11111111-2222-3333-4444-555555555555"),
             flow: Some("xtls-rprx-vision".to_string()),
             transport: XrayTransport::Tcp,
-            tls: None,
+            security: XraySecurity::None,
             name: Some("main".to_string()),
             socks_port: 10808,
             http_port: 10809,
@@ -402,7 +469,7 @@ mod tests {
         assert!(cfg.validate().is_err());
 
         let mut cfg = sample_config();
-        cfg.tls = Some(XrayTls {
+        cfg.security = XraySecurity::Tls(XrayTls {
             server_name: "  ".into(),
             allow_insecure: false,
         });
@@ -421,7 +488,7 @@ mod tests {
         cfg.transport = XrayTransport::WebSocket {
             path: "/ws".to_string(),
         };
-        cfg.tls = Some(XrayTls {
+        cfg.security = XraySecurity::Tls(XrayTls {
             server_name: "sni.example.com".to_string(),
             allow_insecure: true,
         });
@@ -475,5 +542,28 @@ transport = "Tcp"
         assert_eq!(cfg.socks_port, 10808);
         assert_eq!(cfg.http_port, 10809);
         assert!(cfg.name.is_none());
+    }
+
+    #[test]
+    fn generate_config_honors_reality() {
+        let mut cfg = sample_config();
+        cfg.security = XraySecurity::Reality(XrayReality {
+            server_name: "asia.example.com".into(),
+            fingerprint: "firefox".into(),
+            public_key: "REALITY_PUBKEY_1234567890".into(),
+            short_id: "e53048e82bb20077".into(),
+            spider_x: String::new(),
+        });
+        let driver = XrayDriver::new(DriverId::Xray, cfg);
+        let json: serde_json::Value =
+            serde_json::from_str(&driver.generate_config()).expect("valid JSON");
+        let out = &json["outbounds"][0];
+        assert_eq!(out["streamSettings"]["security"], "reality");
+        let reality = &out["streamSettings"]["realitySettings"];
+        assert_eq!(reality["serverName"], "asia.example.com");
+        assert_eq!(reality["fingerprint"], "firefox");
+        assert_eq!(reality["publicKey"], "REALITY_PUBKEY_1234567890");
+        assert_eq!(reality["shortId"], "e53048e82bb20077");
+        assert!(reality.get("spiderX").is_none());
     }
 }

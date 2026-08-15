@@ -315,11 +315,13 @@ async fn main() -> Result<()> {
                                 let h = handle.clone();
                                 std::sync::Arc::new(
                                     balansir_daemon::vpn_manager::PoolXrayConsumer::new(
-                                        move |profile: Option<&str>| {
+                                        move |profile: Option<
+                                            &balansir_vpn::VpnProfile,
+                                        >| {
                                             let h = h.clone();
-                                            let sp = profile.map(|p| p.to_string());
+                                            let profile = profile.cloned();
                                             tokio::spawn(async move {
-                                                h.apply_pool_selection(sp).await;
+                                                h.apply_pool_profile(profile).await;
                                             });
                                         },
                                     ),

@@ -25,8 +25,77 @@ use std::sync::Arc;
 use balansir_common::path_health::PathSample;
 use balansir_common::subsystems::{SharedSubsystemSnapshot, SubsystemEvent};
 use balansir_vpn::{import_subscription, PoolConfig, VpnPool};
+use balansir_vpn::{Security, Transport, VpnProfile};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+
+use crate::xray::{XrayConfig, XrayReality, XraySecurity, XrayTls, XrayTransport};
+
+/// Convert a validated pool profile into an Xray outbound config.
+///
+/// The pool is the source of truth for *what* to run; this bridge materializes
+/// the exact runtime config (transport, TLS/REALITY, flow) so auto-imported
+/// profiles never need a static Xray entry. Returns `Err` only when the
+/// profile carries something the Xray runtime cannot express.
+pub fn profile_to_xray_config(
+    profile: &VpnProfile,
+    fallback_socks: u16,
+    fallback_http: u16,
+) -> Result<XrayConfig, String> {
+    let transport = match &profile.transport {
+        Transport::Tcp => XrayTransport::Tcp,
+        Transport::WebSocket { path } => XrayTransport::WebSocket {
+            path: path.clone(),
+        },
+        Transport::Grpc { service_name } => XrayTransport::Grpc {
+            service_name: service_name.clone(),
+        },
+        Transport::HttpUpgrade { path } => XrayTransport::HttpUpgrade {
+            path: path.clone(),
+        },
+    };
+    let security = match profile.security {
+        Security::None => XraySecurity::None,
+        Security::Tls => XraySecurity::Tls(XrayTls {
+            server_name: profile
+                .sni
+                .clone()
+                .unwrap_or_else(|| profile.server.clone()),
+            allow_insecure: false,
+        }),
+        Security::Reality => {
+            let pbk = profile
+                .reality_pbk
+                .clone()
+                .ok_or_else(|| "reality profile missing public key".to_string())?;
+            XraySecurity::Reality(XrayReality {
+                server_name: profile
+                    .sni
+                    .clone()
+                    .unwrap_or_else(|| profile.server.clone()),
+                fingerprint: profile.fingerprint.clone().unwrap_or_else(|| "chrome".into()),
+                public_key: pbk,
+                short_id: profile.reality_sid.clone().unwrap_or_default(),
+                spider_x: String::new(),
+            })
+        }
+    };
+    Ok(XrayConfig {
+        server: profile.server.clone(),
+        port: profile.port,
+        uuid: profile.uuid.clone().into(),
+        flow: profile.flow.clone(),
+        transport,
+        security,
+        name: Some(format!(
+            "{} @ {}",
+            profile.label,
+            profile.endpoint()
+        )),
+        socks_port: fallback_socks,
+        http_port: fallback_http,
+    })
+}
 
 /// TOML shape of `BALANSIR_VPN_CONFIG`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -116,8 +185,11 @@ impl VpnManagerHandle {
 /// How the pool drives the Xray manager (consumer seam). Injected so tests
 /// use a fake instead of real xray processes.
 pub trait XrayConsumer: Send + Sync {
-    /// Run the selected profile (by profile_id). `None` = stop the proxy.
-    fn apply_selected(&self, profile_id: Option<&str>);
+    /// Run the selected profile. `Some` carries the full validated profile the
+    /// pool decided on; `None` = stop the proxy. The consumer (Xray manager)
+    /// materializes the runtime config from the profile — no static endpoint
+    /// table required.
+    fn apply_selected(&self, profile: Option<&VpnProfile>);
 }
 
 /// A no-op consumer (used when Xray is not configured; the pool still tracks
@@ -125,20 +197,17 @@ pub trait XrayConsumer: Send + Sync {
 pub struct NoopXrayConsumer;
 
 impl XrayConsumer for NoopXrayConsumer {
-    fn apply_selected(&self, _profile_id: Option<&str>) {}
+    fn apply_selected(&self, _profile: Option<&VpnProfile>) {}
 }
 
-/// A consumer that maps a pool profile to the Xray manager's endpoint name.
-/// The Xray manager knows endpoints by `name`; the pool profile carries the
-/// endpoint (server:port) which the manager also knows, so we resolve through
-/// a small mapping closure.
+/// A consumer that forwards the pool's decision to the Xray manager.
 pub struct PoolXrayConsumer<F> {
     apply: F,
 }
 
 impl<F> PoolXrayConsumer<F>
 where
-    F: Fn(Option<&str>) + Send + Sync,
+    F: Fn(Option<&VpnProfile>) + Send + Sync,
 {
     pub fn new(apply: F) -> Self {
         Self { apply }
@@ -147,10 +216,10 @@ where
 
 impl<F> XrayConsumer for PoolXrayConsumer<F>
 where
-    F: Fn(Option<&str>) + Send + Sync,
+    F: Fn(Option<&VpnProfile>) + Send + Sync,
 {
-    fn apply_selected(&self, profile_id: Option<&str>) {
-        (self.apply)(profile_id);
+    fn apply_selected(&self, profile: Option<&VpnProfile>) {
+        (self.apply)(profile);
     }
 }
 
@@ -294,7 +363,14 @@ impl VpnManager {
 
         // Push the active profile to the Xray consumer (pool is authoritative).
         let active = self.pool.read().await.active().map(|s| s.to_string());
-        self.consumer.apply_selected(active.as_deref());
+        let active_profile = {
+            let pool = self.pool.read().await;
+            active
+                .as_deref()
+                .and_then(|id| pool.profile(id))
+                .map(|p| p.profile.clone())
+        };
+        self.consumer.apply_selected(active_profile.as_ref());
 
         if active != active_before {
             if let Some(id) = &active {
@@ -468,11 +544,11 @@ mod tests {
     struct RecordingConsumer(Mutex<Vec<Option<String>>>);
 
     impl XrayConsumer for RecordingConsumer {
-        fn apply_selected(&self, profile_id: Option<&str>) {
+        fn apply_selected(&self, profile: Option<&VpnProfile>) {
             self.0
                 .lock()
                 .unwrap()
-                .push(profile_id.map(|s| s.to_string()));
+                .push(profile.map(|p| p.endpoint()));
         }
     }
 
@@ -607,14 +683,31 @@ vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@b.example.com:443?security=none&typ
     fn pool_consumer_maps_selection() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let c = seen.clone();
-        let consumer = PoolXrayConsumer::new(move |p: Option<&str>| {
-            c.lock().unwrap().push(p.map(|s| s.to_string()));
+        let consumer = PoolXrayConsumer::new(move |p: Option<&VpnProfile>| {
+            c.lock().unwrap().push(p.map(|x| x.endpoint()));
         });
-        consumer.apply_selected(Some("abc123"));
+        let profile = VpnProfile {
+            profile_id: "abc123".into(),
+            protocol: balansir_vpn::Protocol::Vless,
+            server: "s.example.com".into(),
+            port: 443,
+            transport: balansir_vpn::Transport::Tcp,
+            security: balansir_vpn::Security::None,
+            sni: None,
+            reality_pbk: None,
+            reality_sid: None,
+            flow: None,
+            uuid: "194302fe-9c53-4203-b17e-c0b30a4d79b6".into(),
+            fingerprint: None,
+            label: "A".into(),
+            source: "test".into(),
+            source_ts_ms: 0,
+        };
+        consumer.apply_selected(Some(&profile));
         consumer.apply_selected(None);
         assert_eq!(
             *seen.lock().unwrap(),
-            vec![Some("abc123".to_string()), None]
+            vec![Some("s.example.com:443".to_string()), None]
         );
     }
 }

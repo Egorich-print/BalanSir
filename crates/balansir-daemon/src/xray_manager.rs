@@ -41,8 +41,11 @@ fn path_config_for(cfg: &XrayToml) -> PathHealthConfig {
     }
 }
 
+use balansir_vpn::VpnProfile;
+
 use crate::driver::ComponentDriver;
-use crate::xray::{XrayConfig, XrayDriver, XrayTls, XrayTransport};
+use crate::vpn_manager::profile_to_xray_config;
+use crate::xray::{XrayConfig, XrayDriver, XraySecurity, XrayTransport};
 
 const fn default_priority() -> i32 {
     100
@@ -62,7 +65,8 @@ pub struct XrayEndpoint {
     pub flow: Option<String>,
     #[serde(default)]
     pub transport: XrayTransport,
-    pub tls: Option<XrayTls>,
+    #[serde(default)]
+    pub security: XraySecurity,
     pub socks_port: Option<u16>,
     pub http_port: Option<u16>,
     #[serde(default = "default_priority")]
@@ -80,7 +84,7 @@ impl XrayEndpoint {
             uuid: self.uuid.clone(),
             flow: self.flow.clone(),
             transport: self.transport.clone(),
-            tls: self.tls.clone(),
+            security: self.security.clone(),
             name: Some(self.name.clone()),
             socks_port: self.socks_port.unwrap_or(fallback_socks),
             http_port: self.http_port.unwrap_or(fallback_http),
@@ -133,10 +137,10 @@ pub struct XrayManagerHandle {
     paused: Arc<AtomicBool>,
     pinned: Arc<RwLock<Option<String>>>,
     wake: Arc<Notify>,
-    /// External selection from the VPN pool (server:port). When set and not
-    /// paused, the manager converges to this endpoint and stops its own
+    /// External selection from the VPN pool (full profile). When set and not
+    /// paused, the manager runs exactly this profile and stops its own
     /// priority-based selection — the pool is the authoritative decision.
-    pool_selected: Arc<RwLock<Option<String>>>,
+    pool_profile: Arc<RwLock<Option<VpnProfile>>>,
 }
 
 impl XrayManagerHandle {
@@ -160,22 +164,13 @@ impl XrayManagerHandle {
             self.wake.notify_one();
         }
     }
-    /// Apply the VPN pool's selection. `server_port` is `host:port` (the pool
-    /// profile endpoint); `None` tells the manager to stop the proxy (no
-    /// eligible profile). The pool is authoritative when set.
-    pub async fn apply_pool_selection(&self, server_port: Option<String>) {
-        *self.pool_selected.write().await = server_port;
+    /// Apply the VPN pool's selection (full profile). `None` tells the
+    /// manager to stop the proxy (no eligible profile). The pool is
+    /// authoritative when set.
+    pub async fn apply_pool_profile(&self, profile: Option<VpnProfile>) {
+        *self.pool_profile.write().await = profile;
         self.wake.notify_one();
     }
-}
-
-/// Find the endpoint index matching `server:port` (pool selection target).
-fn index_of_server_port(endpoints: &[XrayEndpoint], server_port: &str) -> Option<usize> {
-    let needle = server_port.trim().to_ascii_lowercase();
-    endpoints.iter().position(|e| {
-        let ep = format!("{}:{}", e.server, e.port).to_ascii_lowercase();
-        ep == needle
-    })
 }
 
 /// Next enabled profile after `current` (wraps; used for manual rotation).
@@ -210,9 +205,12 @@ pub struct XrayManager {
     pinned: Arc<RwLock<Option<String>>>,
     wake: Arc<Notify>,
     active: RwLock<Option<usize>>,
-    /// External (VPN pool) selection: `host:port` of the endpoint to run.
-    /// Overrides priority selection; the manager is a consumer of the pool.
-    pool_selected: Arc<RwLock<Option<String>>>,
+    /// External (VPN pool) selection: the full profile to run. Overrides
+    /// priority selection; the manager is a consumer of the pool.
+    pool_profile: Arc<RwLock<Option<VpnProfile>>>,
+    /// Label of the currently running VPN-pool profile (no static endpoint
+    /// slot; tracked here so snapshots/events stay truthful).
+    pool_label: RwLock<Option<String>>,
     /// Whether the pool has taken over selection at least once. When true and
     /// the pool later selects `None`, the proxy is stopped (pool = authority).
     pool_driven: Arc<RwLock<bool>>,
@@ -266,8 +264,9 @@ impl XrayManager {
             pinned: Arc::new(RwLock::new(None)),
             wake: Arc::new(Notify::new()),
             active: RwLock::new(None),
-            pool_selected: Arc::new(RwLock::new(None)),
+            pool_profile: Arc::new(RwLock::new(None)),
             pool_driven: Arc::new(RwLock::new(false)),
+            pool_label: RwLock::new(None),
             paths: RwLock::new(
                 xray_cfg
                     .profiles
@@ -289,7 +288,7 @@ impl XrayManager {
             paused: Arc::clone(&self.paused),
             pinned: Arc::clone(&self.pinned),
             wake: Arc::clone(&self.wake),
-            pool_selected: Arc::clone(&self.pool_selected),
+            pool_profile: Arc::clone(&self.pool_profile),
         }
     }
     fn endpoint_config(&self, idx: usize) -> XrayConfig {
@@ -349,17 +348,52 @@ impl XrayManager {
         Ok(())
     }
 
+    /// Start a driver from an arbitrary config (used by the VPN-pool path —
+    /// auto-imported profiles have no static endpoint slot). `active` is set
+    /// to `None` because these profiles are not in `self.endpoints`.
+    async fn start_config(
+        &self,
+        config: XrayConfig,
+        label: String,
+        reason: String,
+    ) -> Result<(), String> {
+        let mut driver = (self.starter)(config);
+        driver.start().await.map_err(|e| e.to_string())?;
+        *self.driver.write().await = Some(driver);
+        *self.active.write().await = None;
+        *self.pool_label.write().await = Some(label.clone());
+        *self.switch_reason.write().await = Some(reason.clone());
+        *self.last_switch_ms.write().await = now_ms();
+        let _ = self.events.send(SubsystemEvent::XrayStarted {
+            profile: label.clone(),
+        });
+        info!("Xray: pool profile '{label}' started ({reason})");
+        Ok(())
+    }
+
+    /// Label of the currently running driver (pool profiles carry their own
+    /// label; static endpoints report their config name).
+    async fn active_label(&self) -> Option<String> {
+        self.pool_label.read().await.clone()
+    }
+
     async fn stop_driver(&self) {
         let mut guard = self.driver.write().await;
         if let Some(mut driver) = guard.take() {
             let _ = driver.stop().await;
             *self.active.write().await = None;
+            *self.pool_label.write().await = None;
         }
     }
 
     async fn active_name(&self) -> Option<String> {
         let active = *self.active.read().await;
-        active.map(|i| self.endpoints[i].name.clone())
+        match active {
+            Some(i) => Some(self.endpoints[i].name.clone()),
+            // Pool-driven profiles have no static endpoint slot; report the
+            // running driver's label so snapshots/events stay truthful.
+            None => self.active_label().await,
+        }
     }
 
     fn index_of(&self, name: &str) -> Option<usize> {
@@ -371,45 +405,26 @@ impl XrayManager {
     /// (priority-ordered) endpoint. When the pool is driving and selects "no
     /// profile", the proxy is stopped (traffic stays direct).
     async fn ensure_running(&self) -> Result<(), String> {
-        let pool_selected = self.pool_selected.read().await.clone();
+        let pool_profile = self.pool_profile.read().await.clone();
         let pool_driven = *self.pool_driven.read().await;
         let pinned_name = self.pinned.read().await.clone();
         let active = *self.active.read().await;
 
-        // Pool says "stop": no eligible profile.
-        if let Some(sp) = &pool_selected {
+        // Pool says "run this profile": materialize its config (the profile is
+        // authoritative — no static endpoint lookup needed) and converge.
+        if let Some(profile) = &pool_profile {
             *self.pool_driven.write().await = true;
-            let target = index_of_server_port(&self.endpoints, sp);
-            match target {
-                Some(idx) => {
-                    if active != Some(idx) || self.driver.read().await.is_none() {
-                        // stop current (if any) then start the pool-selected endpoint
-                        if let Some(cur) = active {
-                            if cur != idx {
-                                self.switch_to_index(idx, format!("vpn pool selected {sp}"))
-                                    .await?;
-                                return Ok(());
-                            }
-                        } else {
-                            return self.start_endpoint(idx).await;
-                        }
-                        if self.driver.read().await.is_none() {
-                            return self.start_endpoint(idx).await;
-                        }
-                    }
-                    return Ok(());
-                }
-                None => {
-                    // Pool selected an endpoint not in this xray config: stop
-                    // rather than run the wrong thing.
-                    if self.driver.read().await.is_some() {
-                        self.stop_driver().await;
-                    }
-                    return Err(format!(
-                        "vpn pool selected endpoint {sp} not in xray config"
-                    ));
-                }
+            let config = profile_to_xray_config(profile, self.socks_port, self.http_port)
+                .map_err(|e| format!("vpn pool profile invalid: {e}"))?;
+            let label = format!("{} @ {}", profile.label, profile.endpoint());
+            let running = self.driver.read().await.is_some();
+            let running_label = self.active_label().await;
+            if running && running_label.as_deref() == Some(label.as_str()) {
+                return Ok(());
             }
+            return self
+                .start_config(config, label, "vpn pool selected".to_string())
+                .await;
         }
 
         // The pool took over selection and cleared it: stop (no eligible path).
@@ -590,7 +605,7 @@ impl XrayManager {
                     server: e.server.clone(),
                     port: e.port,
                     transport: format!("{:?}", e.transport),
-                    tls: e.tls.is_some(),
+                    tls: !matches!(e.security, XraySecurity::None),
                     priority: e.priority,
                     enabled: e.enabled,
                     active: active == Some(i),
@@ -706,7 +721,7 @@ server = "us2.example.com"
 port = 8443
 uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 transport = { WebSocket = { path = "/ws" } }
-tls = { server_name = "us2.example.com", allow_insecure = false }
+security = { tls = { server_name = "us2.example.com", allow_insecure = false } }
 priority = 20
 "#,
         )
@@ -1003,8 +1018,8 @@ priority = 20
         assert_eq!(snap.profiles[1].failure_count, 0);
     }
     /// The VPN pool is the authoritative path decision: when the pool selects
-    /// an endpoint (by server:port), the Xray manager converges to it even if
-    /// it is not the priority-preferred endpoint. `None` stops the proxy.
+    /// a profile, the Xray manager materializes and runs it even if it is not
+    /// the priority-preferred static endpoint. `None` stops the proxy.
     #[tokio::test]
     async fn pool_selection_overrides_priority() {
         let cfg = sample_toml(); // jp-1 priority 10, us-2 priority 20
@@ -1018,29 +1033,24 @@ priority = 20
         manager.ensure_running().await.expect("start preferred");
         assert_eq!(manager.active_name().await.as_deref(), Some("jp-1"));
 
-        // Pool selects us-2 (server us2.example.com:8443). The manager must
-        // converge to it even though it is lower priority.
-        manager
-            .handle()
-            .apply_pool_selection(Some("us2.example.com:8443".into()))
-            .await;
+        // Pool selects a profile (the pool is authoritative). The manager
+        // must run exactly that profile.
+        let profile = test_profile("us2.example.com", 8443);
+        manager.handle().apply_pool_profile(Some(profile)).await;
         manager.ensure_running().await.expect("converge to pool");
-        assert_eq!(
-            manager.active_name().await.as_deref(),
-            Some("us-2"),
-            "pool selection is authoritative over priority"
-        );
+        assert_eq!(manager.active_name().await.as_deref(), Some("test @ us2.example.com:8443"));
 
         // Pool clears selection (no eligible profile) → stop the proxy.
-        manager.handle().apply_pool_selection(None).await;
+        manager.handle().apply_pool_profile(None).await;
         manager.ensure_running().await.expect("stop for pool");
         assert!(manager.driver.read().await.is_none(), "proxy stopped");
     }
 
-    /// Pool selecting an endpoint not in the xray config must not run the
-    /// wrong thing — it stops and reports the mismatch.
+    /// A pool profile that cannot be materialized into an Xray config (here:
+    /// a reality profile missing its public key) must fail loudly — never run
+    /// the wrong thing.
     #[tokio::test]
-    async fn pool_selection_of_unknown_endpoint_stops_and_errors() {
+    async fn pool_profile_missing_reality_key_fails() {
         let cfg = sample_toml();
         let health = FakeDriverHealth(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
             FAKE_HEALTHY,
@@ -1048,12 +1058,32 @@ priority = 20
         let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let manager = manager_with_fakes(&cfg, health.clone(), started);
 
-        manager
-            .handle()
-            .apply_pool_selection(Some("not-in-config.example:443".into()))
-            .await;
+        let mut profile = test_profile("bad-reality.example.com", 443);
+        profile.security = balansir_vpn::Security::Reality;
+        profile.reality_pbk = None;
+        manager.handle().apply_pool_profile(Some(profile)).await;
         let err = manager.ensure_running().await.expect_err("must fail");
-        assert!(err.contains("not in xray config"), "err: {err}");
+        assert!(err.contains("missing public key"), "err: {err}");
         assert!(manager.driver.read().await.is_none(), "nothing running");
+    }
+
+    fn test_profile(server: &str, port: u16) -> VpnProfile {
+        VpnProfile {
+            profile_id: "test-profile".into(),
+            protocol: balansir_vpn::Protocol::Vless,
+            server: server.into(),
+            port,
+            transport: balansir_vpn::Transport::Tcp,
+            security: balansir_vpn::Security::None,
+            sni: None,
+            reality_pbk: None,
+            reality_sid: None,
+            flow: Some("xtls-rprx-vision".into()),
+            uuid: "11111111-2222-3333-4444-555555555555".into(),
+            fingerprint: None,
+            label: "test".into(),
+            source: "test".into(),
+            source_ts_ms: 0,
+        }
     }
 }
