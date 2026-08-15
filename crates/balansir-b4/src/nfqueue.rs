@@ -113,8 +113,10 @@ impl NfQueue {
     /// Build a netlink message: `nfgenmsg` header + attributes.
     fn netlink_msg(&self, msg_type: u8, attrs: Vec<u8>, queue_num: u16) -> Vec<u8> {
         let mut payload = Vec::new();
-        // nfgenmsg: family(1) + version(1) + res_id(2)
-        payload.push(NFPROTO_INET);
+        // nfgenmsg: family(1) + version(1) + res_id(2). For NFQUEUE config
+        // messages the family is NFPROTO_UNSPEC (0); the AF_* is carried in
+        // the NFQNL_CFG_CMD_PF attribute (libnetfilter_queue does the same).
+        payload.push(NFPROTO_UNSPEC);
         payload.push(NFNETLINK_V0);
         payload.extend_from_slice(&queue_num.to_be_bytes());
         payload.extend_from_slice(&attrs);
