@@ -72,7 +72,10 @@ impl B4Engine {
             while running.load(Ordering::SeqCst) {
                 let packet = match queue.recv_packet() {
                     Ok(Some(p)) => p,
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        tracing::warn!("NFQUEUE recv: unrecognized message (not packet), skipping");
+                        continue;
+                    }
                     Err(e) => {
                         tracing::warn!("NFQUEUE recv error: {e}");
                         std::thread::sleep(std::time::Duration::from_millis(10));
