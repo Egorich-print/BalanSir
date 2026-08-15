@@ -1,16 +1,41 @@
 #!/bin/bash
-# BalanSir post-image: assemble the SD card image with genimage.
+# BalanSir OTA post-image: assemble the SD card image with A/B + persistent layout.
 #
-# Based on Buildroot's raspberrypi3-64 post-image.sh; the genimage config is
-# generated directly (no placeholder substitution, avoiding sed/awk newline
-# issues).
+# Generates genimage config with dynamic partition sizing based on target image size.
 
 set -e
 
 BOARD_DIR="$(dirname "$0")"
-GENIMAGE_CFG="${BOARD_DIR}/genimage.cfg"
+BUILD_DIR="${BUILD_DIR:-/home/builder/br-qemu/output/build}"
+BINARIES_DIR="${BINARIES_DIR:-/home/builder/br-qemu/output/images}"
 GENIMAGE_TMP="${BUILD_DIR}/genimage.tmp"
 
+# Read target SD card size from environment or default to 2GB (minimum for A/B)
+# SD_SIZE_MB can be overridden: make SD_SIZE_MB=4096
+SD_SIZE_MB="${SD_SIZE_MB:-2048}"
+
+# Fixed sizes
+BOOT_SIZE_MB=64
+SYSTEM_SIZE_MB=300
+
+# Calculate persistent partition size (remaining space)
+# Total partitions: boot + system-A + system-B + persistent + alignment overhead
+OVERHEAD_MB=32
+PERSISTENT_SIZE_MB=$((SD_SIZE_MB - BOOT_SIZE_MB - SYSTEM_SIZE_MB * 2 - OVERHEAD_MB))
+
+if [ ${PERSISTENT_SIZE_MB} -lt 64 ]; then
+    echo "ERROR: SD card too small for A/B + persistent layout (need >= 700MB, got ${SD_SIZE_MB}MB)" >&2
+    exit 1
+fi
+
+echo "OTA partition layout:"
+echo "  boot:       ${BOOT_SIZE_MB}MB (vfat)"
+echo "  system-A:   ${SYSTEM_SIZE_MB}MB (ext4)"
+echo "  system-B:   ${SYSTEM_SIZE_MB}MB (ext4)"
+echo "  persistent: ${PERSISTENT_SIZE_MB}MB (ext4)"
+echo "  total:      ${SD_SIZE_MB}MB"
+
+# Collect boot files
 FILES=()
 for i in "${BINARIES_DIR}"/*.dtb "${BINARIES_DIR}"/rpi-firmware/*; do
     FILES+=( "${i#${BINARIES_DIR}/}" )
@@ -18,11 +43,13 @@ done
 
 KERNEL=$(sed -n 's/^kernel=//p' "${BINARIES_DIR}/rpi-firmware/config.txt")
 FILES+=( "${KERNEL}" )
-# cmdline.txt is installed by the rpi-firmware package into
-# rpi-firmware/cmdline.txt (BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE), which is
-# already in FILES via rpi-firmware/*.
 
-# Write the genimage config, embedding the boot-file list directly.
+# Copy cmdline-A.txt as default cmdline.txt (Slot A boots first)
+cp "${BOARD_DIR}/cmdline-A.txt" "${BINARIES_DIR}/cmdline.txt"
+FILES+=( "cmdline.txt" )
+
+# Write genimage config
+GENIMAGE_CFG="${BOARD_DIR}/genimage-ota.cfg"
 {
     echo "image boot.vfat {"
     echo "	vfat {"
@@ -33,7 +60,29 @@ FILES+=( "${KERNEL}" )
     echo "		}"
     echo "	}"
     echo ""
-    echo "	size = 64M"
+    echo "	size = ${BOOT_SIZE_MB}M"
+    echo "}"
+    echo ""
+    echo "image system-A.ext4 {"
+    echo "	ext4 {"
+    echo "		base = \"rootfs.ext4\""
+    echo "	}"
+    echo ""
+    echo "	size = ${SYSTEM_SIZE_MB}M"
+    echo "}"
+    echo ""
+    echo "image system-B.ext4 {"
+    echo "	ext4 {"
+    echo "	}"
+    echo ""
+    echo "	size = ${SYSTEM_SIZE_MB}M"
+    echo "}"
+    echo ""
+    echo "image persistent.ext4 {"
+    echo "	ext4 {"
+    echo "	}"
+    echo ""
+    echo "	size = ${PERSISTENT_SIZE_MB}M"
     echo "}"
     echo ""
     echo "image sdcard.img {"
@@ -46,14 +95,24 @@ FILES+=( "${KERNEL}" )
     echo "		image = \"boot.vfat\""
     echo "	}"
     echo ""
-    echo "	partition rootfs {"
+    echo "	partition system-A {"
     echo "		partition-type = 0x83"
-    echo "		image = \"rootfs.ext4\""
+    echo "		image = \"system-A.ext4\""
+    echo "	}"
+    echo ""
+    echo "	partition system-B {"
+    echo "		partition-type = 0x83"
+    echo "		image = \"system-B.ext4\""
+    echo "	}"
+    echo ""
+    echo "	partition persistent {"
+    echo "		partition-type = 0x83"
+    echo "		image = \"persistent.ext4\""
     echo "	}"
     echo "}"
 } > "${GENIMAGE_CFG}"
 
-# Pass an empty rootpath: genimage only inserts the pre-built rootfs image.
+# Run genimage
 trap 'rm -rf "${ROOTPATH_TMP}"' EXIT
 ROOTPATH_TMP="$(mktemp -d)"
 rm -rf "${GENIMAGE_TMP}"

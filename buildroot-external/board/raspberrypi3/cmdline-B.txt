@@ -1,0 +1,1 @@
+root=/dev/mmcblk0p3 rootwait console=tty1 console=serial0,115200 loglevel=8 consoleblank=0 systemd.log_level=debug net.ifnames=0 biosdevname=0 balansir_slot=B

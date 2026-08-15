@@ -1,0 +1,60 @@
+# BalanSir OTA genimage configuration for A/B + persistent layout
+#
+# This generates an SD card image with:
+#   - boot (vfat, 64M): shared kernel, dtbs, firmware, cmdline.txt
+#   - system-A (ext4, 300M): slot A rootfs
+#   - system-B (ext4, 300M): slot B rootfs
+#   - persistent (ext4, remaining): shared config/state/OTA metadata
+#
+# Slot selection is via cmdline.txt on boot:
+#   root=/dev/mmcblk0p2  -> system-A (partition 2)
+#   root=/dev/mmcblk0p3  -> system-B (partition 3)
+#   root=/dev/mmcblk0p4  -> persistent (partition 4, mounted at /persistent)
+# Default sizes - will be overridden by post-image.sh based on available space
+define SYSTEM_SIZE_MB = 300
+define BOOT_SIZE_MB = 64
+image boot.vfat {
+	vfat {
+		files = {
+#BOOT_FILES#
+		}
+	}
+	size = BOOT_SIZE_MB"M"
+}
+image system-A.ext4 {
+	ext4 {
+		base = "rootfs.ext4"
+	}
+	size = SYSTEM_SIZE_MB"M"
+}
+image system-B.ext4 {
+	ext4 {
+	}
+	size = SYSTEM_SIZE_MB"M"
+}
+image persistent.ext4 {
+	ext4 {
+	}
+	size = 0  # 0 = use remaining space
+}
+image sdcard.img {
+	hdimage {
+	}
+	partition boot {
+		partition-type = 0xC
+		bootable = "true"
+		image = "boot.vfat"
+	}
+	partition system-A {
+		partition-type = 0x83
+		image = "system-A.ext4"
+	}
+	partition system-B {
+		partition-type = 0x83
+		image = "system-B.ext4"
+	}
+	partition persistent {
+		partition-type = 0x83
+		image = "persistent.ext4"
+	}
+}
