@@ -254,6 +254,7 @@ impl XrayDriver {
 
         let mut user = serde_json::Map::new();
         user.insert("id".into(), serde_json::json!(cfg.uuid.expose_secret()));
+        user.insert("encryption".into(), serde_json::json!("none"));
         if let Some(flow) = &cfg.flow {
             if !flow.is_empty() {
                 user.insert("flow".into(), serde_json::json!(flow));
