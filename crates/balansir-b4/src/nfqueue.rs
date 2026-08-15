@@ -108,7 +108,10 @@ impl NfQueue {
         }
         self.sock.send(&with_ack, 0)?;
         // Read the reply (ACK or NLMSG_ERROR). Short timeout to avoid hang.
-        let mut reply = vec![0u8; 512];
+        // Use a zero-length Vec with capacity: netlink_sys recv() writes via
+        // BufMut::chunk_mut(), which for a pre-filled vec![] points PAST the
+        // initialized bytes.
+        let mut reply = Vec::with_capacity(512);
         let n = self.sock.recv(&mut reply, 0)?;
         if n >= 4 {
             // Netlink message type: NLMSG_ERROR = 2.
@@ -193,7 +196,10 @@ impl NfQueue {
 
     /// Blocking receive of one message; returns the parsed packet.
     pub fn recv_packet(&self) -> io::Result<Option<QueuedPacket>> {
-        let mut buf = vec![0u8; 65536];
+        // Zero-length Vec with capacity: netlink_sys recv() fills via
+        // BufMut::chunk_mut(), which for a pre-filled vec![] would point
+        // past the initialized bytes (all zeros).
+        let mut buf: Vec<u8> = Vec::with_capacity(65536);
         let n = self.sock.recv(&mut buf, 0)?;
         let msg = parse_netfilter_message(&buf[..n])?;
         match msg {
