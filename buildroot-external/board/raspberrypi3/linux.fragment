@@ -64,3 +64,12 @@ CONFIG_NF_QUEUE=y
 
 # Netlink (needed by rtnetlink-based executor drivers).
 CONFIG_NETLINK_DIAG=y
+
+# USB Ethernet adapters: the transparent gateway topology is
+# [provider] -- USB Ethernet adapter (WAN) -- RPi -- built-in eth0 (LAN) --
+# [router]. Both ASIX AX88179 (USB3, 1GbE) and Realtek RTL8156 (USB3, 2.5GbE)
+# are supported so either can serve as the WAN port. Built-in so the WAN link
+# comes up without module autoload.
+CONFIG_USB_NET_DRIVERS=y
+CONFIG_USB_NET_AX8817X=y
+CONFIG_USB_RTL8152=y

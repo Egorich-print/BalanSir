@@ -108,6 +108,13 @@ async fn main() -> Result<()> {
         ),
     }
 
+    // Gateway port roles + WAN MAC cloning (mission §12–13). The roles are
+    // explicit configuration — never autodetection. When configured, the
+    // daemon validates them against the live interface snapshot, then clones
+    // the router's WAN MAC onto the provider-facing port via the executor. A
+    // fail-closed daemon refuses to run a misconfigured gateway.
+    apply_network_config(&executor_client).await;
+
     // P4.1 (ADR-020) ownership loop: converge Desired → kernel on a cadence,
     // re-seeding ActualState from the executor inventory periodically so
     // external kernel edits and executor restarts are discovered, not just
@@ -443,6 +450,92 @@ async fn main() -> Result<()> {
 
     info!("BalanSir Daemon stopped");
     Ok(())
+}
+
+/// Apply the gateway port-role configuration and WAN MAC cloning (mission
+/// §12–13) at startup.
+///
+/// Fail-closed: when roles are configured but invalid against the live
+/// interface snapshot, the daemon logs the exact reason and exits — a gateway
+/// that guesses WAN/LAN must not run. WAN MAC is resolved in order: explicit
+/// `wan_mac`, then auto-learned L2 peer on the LAN port; when neither is
+/// available the MAC is left untouched with a warning (never a guess).
+async fn apply_network_config(executor: &ExecutorClient) {
+    use balansir_daemon::network_config::{learn_lan_peer_mac, NetworkConfig};
+
+    let config = match NetworkConfig::load() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Network config rejected: {e}");
+            std::process::exit(1);
+        }
+    };
+    // No roles configured → gateway mode off; nothing to do.
+    if config.wan_interface.is_none() && config.lan_interface.is_none() {
+        return;
+    }
+
+    // Fetch the live interface snapshot through the executor (netlink). A
+    // failure here is fatal: we cannot validate roles without it, and running
+    // a gateway with unvalidated roles is the exact failure mode we forbid.
+    let interfaces = match executor.interface_info("").await {
+        Ok(infos) => infos,
+        Err(e) => {
+            error!("Network config: could not read interfaces from executor: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = config.validate(&interfaces) {
+        error!("{e}");
+        std::process::exit(1);
+    }
+
+    let wan = config.wan_interface.as_deref().unwrap_or_default();
+    let lan = config.lan_interface.as_deref().unwrap_or_default();
+
+    // Link state is informational at startup: the provider cable may not be
+    // plugged yet. A link-down port is a warning, not a fatal error — the roles
+    // themselves are still valid.
+    for (role, name) in [("wan", wan), ("lan", lan)] {
+        let up = interfaces
+            .iter()
+            .find(|i| i.name == name)
+            .map(|i| i.link_up)
+            .unwrap_or(false);
+        if !up {
+            warn!(role, interface = name, "Gateway port is down (carrier absent); check cabling");
+        }
+    }
+
+    if !config.cloning_enabled() {
+        info!(wan, lan, "Gateway roles configured; WAN MAC cloning disabled");
+        return;
+    }
+
+    // Resolve the WAN MAC to clone: explicit config wins, then the auto-learned
+    // L2 peer on the LAN port (the router). No result → warn and do not change.
+    let mac = config
+        .wan_mac
+        .clone()
+        .or_else(|| learn_lan_peer_mac(lan));
+    let Some(mac) = mac else {
+        warn!(
+            wan,
+            lan,
+            "WAN MAC cloning enabled but no wan_mac configured and no LAN peer MAC learned; leaving WAN MAC unchanged"
+        );
+        return;
+    };
+
+    match executor.interface_set_mac(wan, &mac).await {
+        Ok(result) => info!(
+            wan,
+            cloned_mac = result.current_mac.as_deref().unwrap_or_default(),
+            hardware = result.hardware_mac.as_deref().unwrap_or_default(),
+            "WAN MAC cloned"
+        ),
+        Err(e) => warn!("WAN MAC cloning on {wan} failed: {e}"),
+    }
 }
 
 async fn handle_connection(

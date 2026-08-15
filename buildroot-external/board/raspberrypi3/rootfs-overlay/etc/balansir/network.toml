@@ -1,0 +1,28 @@
+# BalanSir gateway port roles (mission §12–13).
+#
+# This is the ONLY authoritative place that decides which physical port faces
+# the provider (WAN) and which faces the router (LAN). The daemon NEVER guesses
+# roles from carrier/driver state — a gateway that swaps WAN/LAN under cable
+# reconfiguration would silently break the network. When roles are set, the
+# daemon validates them at boot (interfaces exist, are Ethernet, differ) and
+# refuses to start in gateway mode if they are invalid.
+#
+# Topology for the BalanSir RPi 3B+:
+#   [provider] -- USB Ethernet adapter (WAN) -- RPi -- built-in eth0 (LAN) -- [router]
+#
+# Identify the interfaces by STABLE udev names where possible (e.g. enx<pci>
+# for a USB adapter, or rename via systemd .link). Fill in your real names:
+#
+# [network]
+# wan_interface = "enx00e04c680224"
+# lan_interface = "eth0"
+#
+# WAN MAC cloning: the daemon clones the router's WAN MAC onto the WAN port so
+# the provider keeps seeing the device it expects. Resolution order:
+#   1. explicit wan_mac (below);
+#   2. auto-learned L2 peer on the LAN port (the router, via ARP);
+#   3. none → warn and leave the MAC unchanged (never a guess).
+#
+# wan_mac = "90:98:38:52:AE:79"
+#
+# Set clone_mac = false to disable cloning while keeping the roles.

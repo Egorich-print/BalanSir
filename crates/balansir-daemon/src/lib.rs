@@ -14,6 +14,7 @@ pub mod driver;
 pub mod hysteria;
 #[cfg(target_os = "linux")]
 pub mod netlink;
+pub mod network_config;
 pub mod path_decision;
 pub mod policy;
 pub mod reconciliation;
