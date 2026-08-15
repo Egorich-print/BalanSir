@@ -61,6 +61,10 @@ pub enum MsgType {
     // Tailscale driver: status + controlled operations. Payloads are
     // `TailscaleOp` / `TailscaleResult`.
     TailscaleOp,
+    // DPI-bypass queue-rule lifecycle. Payload is a postcard `DpiOp`: install
+    // or remove the NFQUEUE interception rules (rendered with the `bypass`
+    // keyword so a leftover rule can never blackhole traffic).
+    DpiOp,
     ResponseOk,
     ResponseError,
     ResponseData,

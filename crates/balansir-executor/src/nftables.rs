@@ -298,7 +298,12 @@ impl fmt::Display for NftVerdict {
             NftVerdict::Accept => "accept",
             NftVerdict::Drop => "drop",
             NftVerdict::Reject => "reject",
-            NftVerdict::Queue { num } => return write!(f, "queue num {num}"),
+            // `queue num N bypass`: when the queue instance is gone (engine
+            // crashed, daemon stopped, rule left behind) the kernel ACCEPTS
+            // the packet instead of dropping it (nf_queue.c: QUEUE == DROP if
+            // no one is waiting, *unless* NF_VERDICT_FLAG_QUEUE_BYPASS). This
+            // is the "never break the network" guarantee for DPI interception.
+            NftVerdict::Queue { num } => return write!(f, "queue num {num} bypass"),
         })
     }
 }

@@ -13,7 +13,7 @@
 
 use async_trait::async_trait;
 use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
-use balansir_common::{ActionRequest, ActionResult, PathMtu, Result};
+use balansir_common::{ActionRequest, ActionResult, DpiOpResult, PathMtu, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -102,6 +102,72 @@ impl NftablesExecutor {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&policy_id);
+    }
+}
+
+/// Comment tag for DPI queue rules, so the executor can find/remove exactly
+/// the rules it installed (never a fragile flush-all of the balansir chain).
+pub const DPI_RULE_TAG: &str = "balansir:dpi";
+
+impl NftablesExecutor {
+    /// Install (or replace, idempotently) the DPI queue rules for each port.
+    ///
+    /// Every rule is tagged `balansir:dpi` so a re-run replaces rather than
+    /// duplicates, and `remove_dpi_rules` can delete precisely the set the DPI
+    /// engine owns. Rules render with the nft `bypass` keyword: if the queue
+    /// instance is gone the kernel ACCEPTS the packet, so a crash/leftover
+    /// rule can never blackhole traffic.
+    pub async fn dpi_op(&self, op: &balansir_common::DpiOp) -> balansir_common::Result<DpiOpResult> {
+        use balansir_common::DpiOp;
+        use crate::nftables::{NftProto, NftRuleSpec, NftVerdict};
+        match op {
+            DpiOp::InstallQueue { queue_num, ports } => {
+                if *queue_num == 0 {
+                    return Err(balansir_common::Error::Misconfiguration(
+                        "DPI queue number must be non-zero (0 is the default unbound queue)".into(),
+                    ));
+                }
+                if ports.is_empty() {
+                    return Err(balansir_common::Error::Misconfiguration(
+                        "DPI InstallQueue requires at least one port".into(),
+                    ));
+                }
+                // Replace any previously installed DPI rules first (idempotent).
+                self.remove_dpi_rules_impl()?;
+                let mut installed = 0u32;
+                for port in ports {
+                    let spec = NftRuleSpec {
+                        proto: Some(NftProto::Tcp),
+                        src_cidr: None,
+                        dst_cidr: None,
+                        sport: None,
+                        dport: Some(*port),
+                        verdict: NftVerdict::Queue { num: *queue_num },
+                        mark: None,
+                        comment: Some(DPI_RULE_TAG.to_string()),
+                    };
+                    self.backend.add_rule(&spec)?;
+                    installed += 1;
+                }
+                Ok(DpiOpResult {
+                    installed,
+                    detail: format!("intercepted TCP {}", ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",")),
+                })
+            }
+            DpiOp::RemoveQueue => {
+                self.remove_dpi_rules_impl()?;
+                Ok(DpiOpResult {
+                    installed: 0,
+                    detail: "DPI queue rules removed".into(),
+                })
+            }
+        }
+    }
+
+    fn remove_dpi_rules_impl(&self) -> balansir_common::Result<()> {
+        self.backend
+            .remove_rule_by_comment(DPI_RULE_TAG)
+            .map_err(|e| balansir_common::Error::Fatal(format!("remove DPI rules: {e}")))
     }
 }
 
@@ -314,6 +380,10 @@ impl Executor for NftablesExecutor {
     async fn path_mtu_state(&self) -> Vec<PathMtu> {
         self.path_mtu.state()
     }
+
+    async fn dpi_op(&self, op: &balansir_common::DpiOp) -> Result<balansir_common::DpiOpResult> {
+        NftablesExecutor::dpi_op(self, op).await
+    }
 }
 
 /// Allowed executor operations. Anything not in this set is rejected before
@@ -334,6 +404,7 @@ fn is_allowlisted(msg_type: MsgType) -> bool {
             | MsgType::GetQosCapabilities
             | MsgType::InterfaceOp
             | MsgType::TailscaleOp
+            | MsgType::DpiOp
     )
 }
 
@@ -573,6 +644,17 @@ pub async fn dispatch(msg: &IpcMessage, services: &ExecutorServices) -> IpcMessa
                         &services.tailscale.set_routes(&routes, exit_node).await,
                     )
                 }
+            }
+        }
+        // DPI-bypass queue-rule lifecycle. The daemon manages the NFQUEUE
+        // interception rules (install/remove, idempotent, `bypass` rendered).
+        MsgType::DpiOp => {
+            let Ok(op) = postcard::from_bytes::<balansir_common::DpiOp>(&msg.payload) else {
+                return IpcMessage::response_error(msg.correlation_id, "invalid DpiOp payload");
+            };
+            match executor.dpi_op(&op).await {
+                Ok(result) => data_response(msg.correlation_id, &result),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
             }
         }
         _ => IpcMessage::response_error(msg.correlation_id, "operation not allowed"),

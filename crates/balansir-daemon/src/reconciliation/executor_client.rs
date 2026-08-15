@@ -352,6 +352,24 @@ impl ExecutorAdapter for ExecutorClient {
             Err(_) => Vec::new(),
         }
     }
+
+    async fn dpi_op(&self, op: &balansir_common::DpiOp) -> Result<balansir_common::DpiOpResult> {
+        let payload = postcard::to_allocvec(op)
+            .map_err(|e| balansir_common::error::Error::Fatal(format!("encode: {e}")))?;
+        let resp = self.request(MsgType::DpiOp, payload).await?;
+        match resp.msg_type {
+            MsgType::ResponseData => postcard::from_bytes(&resp.payload).map_err(|e| {
+                balansir_common::error::Error::Fatal(format!("decode DpiOpResult: {e}"))
+            }),
+            MsgType::ResponseError => Err(balansir_common::error::Error::Fatal(format!(
+                "executor rejected DpiOp: {}",
+                String::from_utf8_lossy(&resp.payload)
+            ))),
+            _ => Err(balansir_common::error::Error::Fatal(
+                "unexpected DpiOp response".into(),
+            )),
+        }
+    }
 }
 
 /// Default daemon-side executor client bound to the standard socket.

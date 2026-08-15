@@ -85,6 +85,15 @@ pub trait Executor: Send + Sync {
     async fn path_mtu_state(&self) -> Vec<PathMtu> {
         Vec::new()
     }
+
+    /// Apply a DPI queue-rule lifecycle operation (install/remove the NFQUEUE
+    /// interception rules). Default returns Unsupported for mechanisms that do
+    /// not manage DPI queue rules.
+    async fn dpi_op(&self, _op: &balansir_common::DpiOp) -> Result<balansir_common::DpiOpResult> {
+        Err(balansir_common::error::Error::Unsupported(
+            "dpi_op not implemented by this executor".into(),
+        ))
+    }
 }
 
 /// Dummy executor for testing

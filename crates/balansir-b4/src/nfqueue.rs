@@ -144,50 +144,41 @@ impl NfQueue {
     }
 
     fn config_params(&self) -> Vec<u8> {
+        Self::build_config_params(self.copy_range, self.queue_num)
+    }
+
+    /// Build the NFQA_CFG_PARAMS config message. Extracted as a static so
+    /// tests can verify the wire format without a real netlink socket.
+    fn build_config_params(copy_range: u32, queue_num: u16) -> Vec<u8> {
         // NFQA_CFG_PARAMS payload (struct nfqnl_msg_config_params, 8 bytes):
         //   copy_range: u32 (network order)
         //   copy_mode: u8
         //   _pad[3]: u8
         let mut params = Vec::with_capacity(8);
-        params.extend_from_slice(&self.copy_range.to_be_bytes());
+        params.extend_from_slice(&copy_range.to_be_bytes());
         params.push(NFQNL_COPY_PACKET);
         params.extend_from_slice(&[0u8; 3]);
 
         let mut attrs = Vec::new();
         push_nla(&mut attrs, NFQA_CFG_PARAMS, &params);
-        // NOTE: the kernel rejects NFQA_CFG_FLAGS unless NFQA_CFG_MASK is
-        // also present (nfnetlink_queue.c nfqnl_recv_config). We don't need
-        // the optional SEQ/GSO flags for basic COPY_PACKET interception, so
-        // we omit them entirely.
+        // Fail-open: when this queue is full or the userspace engine is
+        // unreachable/crashed, the kernel ACCEPTS the packet instead of
+        // dropping it. This is the "never break the network" guarantee — a
+        // stalled DPI engine degrades to direct pass-through, never a
+        // blackhole. NFQA_CFG_FLAGS requires NFQA_CFG_MASK (which bits to
+        // change); kernel rejects the message without it.
+        let flags = NFQNL_CFG_F_FAIL_OPEN;
+        push_nla(&mut attrs, NFQA_CFG_FLAGS, &flags.to_be_bytes());
+        push_nla(&mut attrs, NFQA_CFG_MASK, &flags.to_be_bytes());
         // generous queue maxlen to avoid drops under load
         push_nla(&mut attrs, NFQA_CFG_QUEUE_MAXLEN, &4096u32.to_be_bytes());
 
-        self.netlink_msg(NFQNL_MSG_CONFIG, attrs, self.queue_num)
+        build_netlink_msg(NFQNL_MSG_CONFIG, attrs, queue_num)
     }
 
     /// Build a netlink message: `nfgenmsg` header + attributes.
     fn netlink_msg(&self, msg_type: u8, attrs: Vec<u8>, queue_num: u16) -> Vec<u8> {
-        let mut payload = Vec::new();
-        // nfgenmsg: family(1) + version(1) + res_id(2). For NFQUEUE config
-        // messages the family is NFPROTO_UNSPEC (0); the AF_* is carried in
-        // the NFQNL_CFG_CMD_PF attribute (libnetfilter_queue does the same).
-        payload.push(NFPROTO_UNSPEC);
-        payload.push(NFNETLINK_V0);
-        payload.extend_from_slice(&queue_num.to_be_bytes());
-        payload.extend_from_slice(&attrs);
-
-        let inner_type = nfgenmsg_type(NFNL_SUBSYS_QUEUE, msg_type);
-        // Netlink header fields are in *host* byte order (native endianness);
-        // only netfilter payload attributes use network order.
-        let total_len = (16 + payload.len()) as u32;
-        let mut msg = Vec::with_capacity(total_len as usize);
-        msg.extend_from_slice(&total_len.to_ne_bytes());
-        msg.extend_from_slice(&inner_type.to_ne_bytes());
-        msg.extend_from_slice(&(netlink_packet_core::NLM_F_REQUEST as u16).to_ne_bytes());
-        msg.extend_from_slice(&0u32.to_ne_bytes()); // sequence
-        msg.extend_from_slice(&0u32.to_ne_bytes()); // port
-        msg.extend_from_slice(&payload);
-        msg
+        build_netlink_msg(msg_type, attrs, queue_num)
     }
 
     fn send(&self, buf: &[u8]) -> io::Result<()> {
@@ -392,9 +383,57 @@ mod tests {
             NfMessage::Other => panic!("expected packet"),
         }
     }
+
+    #[test]
+    fn params_message_sets_fail_open_with_mask() {
+        // Build the PARAMS config message and assert it carries BOTH
+        // NFQA_CFG_FLAGS and NFQA_CFG_MASK with the FAIL_OPEN bit. The kernel
+        // rejects FLAGS without MASK (nfqnl_recv_config) — the regression that
+        // left copy_mode=COPY_NONE and silently dropped queued packets.
+        let params = NfQueue::build_config_params(64 * 1024, 0);
+        let hex_params = hex(&params);
+        // The message must be longer than the old (buggy) form that only had
+        // PARAMS + QUEUE_MAXLEN, because FLAGS + MASK are now present.
+        assert!(hex_params.contains("08000500"), "NFQA_CFG_FLAGS attr: {hex_params}");
+        assert!(hex_params.contains("08000400"), "NFQA_CFG_MASK attr: {hex_params}");
+    }
+
+    #[test]
+    fn fail_open_bit_is_set() {
+        assert_eq!(NFQNL_CFG_F_FAIL_OPEN, 1);
+        // Kernel 6.18 uses bit 0 for FAIL_OPEN (libnetfilter_queue's old
+        // SEQ/GSO constants do not apply and must not be used).
+        assert_eq!(NFQNL_CFG_F_GSO, 1 << 2);
+    }
 }
 
 /// Hex dump helper for diagnostics.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Build a netlink message: `nfgenmsg` header + attributes. Free function so
+/// config builders can be unit-tested without a real netlink socket.
+fn build_netlink_msg(msg_type: u8, attrs: Vec<u8>, queue_num: u16) -> Vec<u8> {
+    let mut payload = Vec::new();
+    // nfgenmsg: family(1) + version(1) + res_id(2). For NFQUEUE config
+    // messages the family is NFPROTO_UNSPEC (0); the AF_* is carried in
+    // the NFQNL_CFG_CMD_PF attribute (libnetfilter_queue does the same).
+    payload.push(NFPROTO_UNSPEC);
+    payload.push(NFNETLINK_V0);
+    payload.extend_from_slice(&queue_num.to_be_bytes());
+    payload.extend_from_slice(&attrs);
+
+    let inner_type = nfgenmsg_type(NFNL_SUBSYS_QUEUE, msg_type);
+    // Netlink header fields are in *host* byte order (native endianness);
+    // only netfilter payload attributes use network order.
+    let total_len = (16 + payload.len()) as u32;
+    let mut msg = Vec::with_capacity(total_len as usize);
+    msg.extend_from_slice(&total_len.to_ne_bytes());
+    msg.extend_from_slice(&inner_type.to_ne_bytes());
+    msg.extend_from_slice(&(netlink_packet_core::NLM_F_REQUEST as u16).to_ne_bytes());
+    msg.extend_from_slice(&0u32.to_ne_bytes()); // sequence
+    msg.extend_from_slice(&0u32.to_ne_bytes()); // port
+    msg.extend_from_slice(&payload);
+    msg
 }

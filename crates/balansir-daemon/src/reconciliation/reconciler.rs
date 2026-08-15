@@ -136,6 +136,14 @@ pub trait ExecutorAdapter: Send + Sync {
     async fn path_mtu_state(&self) -> Vec<PathMtu> {
         Vec::new()
     }
+
+    /// Apply a DPI queue-rule lifecycle operation through the executor.
+    /// Default reports Unsupported; the real executor client forwards it.
+    async fn dpi_op(&self, _op: &balansir_common::DpiOp) -> balansir_common::Result<balansir_common::DpiOpResult> {
+        Err(balansir_common::error::Error::Unsupported(
+            "dpi_op not implemented by this adapter".into(),
+        ))
+    }
 }
 
 impl Reconciler {

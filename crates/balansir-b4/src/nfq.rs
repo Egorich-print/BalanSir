@@ -75,10 +75,23 @@ pub const NFQA_CFG_MASK: u16 = 4;
 pub const NFQA_CFG_FLAGS: u16 = 5;
 
 // --- NFQNL_CFG_F_* flags ---
-pub const NFQNL_CFG_F_SEQ: u32 = 1 << 0;
-pub const NFQNL_CFG_F_GSO: u32 = 1 << 1;
-pub const NFQNL_CFG_F_CONNTRACK: u32 = 1 << 2;
-pub const NFQNL_CFG_F_GSO_META: u32 = 1 << 3;
+// NOTE: these are the *kernel 6.18* values (nfnetlink_queue.h). The historic
+// libnetfilter_queue SEQ/GSO/GSO_META constants no longer match this kernel
+// and must not be used — the kernel validates flags against its own enum and
+// rejects unknown bits.
+/// FAIL_OPEN (bit 0): when the queue is full or the userspace socket is
+/// unreachable, ACCEPT the packet instead of dropping it. This is the core
+/// "don't break the network" guarantee: a stalled/crashed DPI engine never
+/// blackholes traffic, it degrades to direct pass-through.
+pub const NFQNL_CFG_F_FAIL_OPEN: u32 = 1 << 0;
+/// CONNTRACK (bit 1).
+pub const NFQNL_CFG_F_CONNTRACK: u32 = 1 << 1;
+/// GSO (bit 2): kernel delivers GSO packets as-is (no segmentation).
+pub const NFQNL_CFG_F_GSO: u32 = 1 << 2;
+/// UID_GID (bit 3).
+pub const NFQNL_CFG_F_UID_GID: u32 = 1 << 3;
+/// SECCTX (bit 4).
+pub const NFQNL_CFG_F_SECCTX: u32 = 1 << 4;
 
 // --- copy modes ---
 pub const NFQNL_COPY_NONE: u8 = 0;

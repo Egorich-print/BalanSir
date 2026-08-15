@@ -178,11 +178,16 @@ async fn main() -> Result<()> {
     // `[api]` section of BALANSIR_CONFIG; the WebUI talks to this.
     let api_bind = balansir_daemon::server::api_bind();
     let mut b4_control: Option<balansir_daemon::b4_manager::B4ManagerHandle> = None;
+    // Keep the subsystem manager alive past the API spawn so the graceful
+    // shutdown path can stop the DPI engine / remove its queue rules.
+    let mut manager_cleanup: Option<std::sync::Arc<balansir_daemon::subsystems::SubsystemManager>> =
+        None;
     if !api_bind.trim().is_empty() {
         // One shared snapshot + event bus for QoS / interfaces / Tailscale / B4.
         let manager = std::sync::Arc::new(balansir_daemon::subsystems::SubsystemManager::new(
             executor_client.clone(),
         ));
+        manager_cleanup = Some(std::sync::Arc::clone(&manager));
         manager
             .set_interface_filter(std::env::var("BALANSIR_INTERFACES").unwrap_or_default())
             .await;
@@ -225,9 +230,14 @@ async fn main() -> Result<()> {
 
         // DPI-bypass (Rust-native NFQUEUE engine). Loads the optional
         // BALANSIR_DPI_CONFIG (profiles/sets); the engine intercepts matching
-        // TCP via NFQUEUE and applies per-domain bypass strategies.
+        // TCP via NFQUEUE and applies per-domain bypass strategies. The
+        // manager installs/removes the nft queue rules through the executor so
+        // a stopped engine never leaves a blackhole (rules render `bypass`).
         if let Ok(dpi_path) = std::env::var("BALANSIR_DPI_CONFIG") {
-            match balansir_daemon::b4_dpi::DpiManager::new(&dpi_path) {
+            match balansir_daemon::b4_dpi::DpiManager::new_with_executor(
+                &dpi_path,
+                Some(reconciler.executor_adapter()),
+            ) {
                 Ok(dpi_manager) => {
                     let dpi = std::sync::Arc::new(dpi_manager);
                     match dpi.start().await {
@@ -360,6 +370,11 @@ async fn main() -> Result<()> {
 
     // Cleanup
     info!("Cleaning up...");
+    // Stop the DPI engine and remove its queue rules first so no NFQUEUE
+    // interception rule is left behind (never a blackhole after restart).
+    if let Some(manager) = manager_cleanup {
+        manager.stop_dpi().await;
+    }
     if socket_path.exists() {
         if let Err(e) = tokio::fs::remove_file(socket_path).await {
             warn!("Failed to remove socket: {}", e);

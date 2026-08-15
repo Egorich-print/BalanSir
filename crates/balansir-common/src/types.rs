@@ -523,6 +523,37 @@ pub struct PathMtu {
     pub mtu: u16,
 }
 
+/// DPI-bypass queue-rule lifecycle operation (`MsgType::DpiOp`).
+///
+/// The daemon manages the NFQUEUE interception rules through the executor so
+/// they are installed/removed idempotently and never left behind after a
+/// stop/restart. Rules are rendered with the nft `bypass` keyword — a leftover
+/// rule with no queue instance ACCEPTS the packet instead of dropping it, so
+/// a crashed engine can never blackhole traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DpiOp {
+    /// Install `queue num N bypass` rules for each TCP destination port.
+    /// Idempotent: re-running replaces (never duplicates) the rules tagged
+    /// `balansir:dpi`.
+    InstallQueue {
+        /// NFQUEUE queue number the rules send packets to.
+        queue_num: u16,
+        /// TCP destination ports to intercept (e.g. [443]).
+        ports: Vec<u16>,
+    },
+    /// Remove every DPI queue rule previously installed (`balansir:dpi` tag).
+    RemoveQueue,
+}
+
+/// Result of a DPI queue-rule operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DpiOpResult {
+    /// Number of queue rules currently installed after the operation.
+    pub installed: u32,
+    /// Human-readable detail (e.g. which ports were intercepted).
+    pub detail: String,
+}
+
 #[cfg(test)]
 mod driver_id_tests {
     use super::DriverId;

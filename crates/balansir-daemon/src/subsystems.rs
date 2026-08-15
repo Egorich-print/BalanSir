@@ -184,6 +184,14 @@ impl SubsystemManager {
         *self.dpi.write().await = Some(dpi);
     }
 
+    /// Stop the DPI engine and remove its queue rules (graceful shutdown path).
+    /// Called by the daemon before exit so no interception rule is left behind.
+    pub async fn stop_dpi(&self) {
+        if let Some(dpi) = self.dpi.read().await.as_ref() {
+            dpi.stop().await;
+        }
+    }
+
     /// Attach the Xray manager handle (pause/select/rotate for the API seam).
     #[cfg(feature = "xray")]
     pub async fn set_xray_handle(&self, handle: crate::xray_manager::XrayManagerHandle) {
@@ -341,6 +349,9 @@ impl SubsystemManager {
                         tls_packets: st.tls_packets,
                         mutated: st.mutated,
                         accepted: st.accepted,
+                        dropped: st.dropped,
+                        errors: st.errors,
+                        engine_dead: st.engine_dead,
                         last_error: st.last_error,
                     };
                 })

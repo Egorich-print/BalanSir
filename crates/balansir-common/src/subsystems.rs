@@ -95,6 +95,13 @@ pub struct DpiSnapshot {
     pub tls_packets: u64,
     pub mutated: u64,
     pub accepted: u64,
+    pub dropped: u64,
+    pub errors: u64,
+    /// Whether the engine thread exited unexpectedly (e.g. a panic). When
+    /// true the engine is NOT processing packets and `enabled` is false;
+    /// kernel FAIL_OPEN keeps traffic flowing while this is the case.
+    #[serde(default)]
+    pub engine_dead: bool,
     pub last_error: Option<String>,
 }
 

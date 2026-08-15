@@ -19,6 +19,9 @@ pub struct B4Stats {
     pub mutated: u64,
     pub dropped: u64,
     pub accepted: u64,
+    /// Processing/verdict errors. A growing counter with no matching packet
+    /// flow means the engine is in trouble and the operator should look.
+    pub errors: u64,
 }
 
 /// The DPI-bypass engine runtime.
@@ -28,6 +31,11 @@ pub struct B4Engine {
     /// Which TCP destination ports to intercept (default 443).
     ports: Vec<u16>,
     running: Arc<AtomicBool>,
+    /// Set when the interception thread exits unexpectedly (not via stop()).
+    /// Lets the daemon detect a dead engine and surface it instead of leaving
+    /// a silently-blackholed queue (FAIL_OPEN keeps traffic flowing, but the
+    /// operator must know the engine died).
+    dead: Arc<AtomicBool>,
     stats: Arc<AtomicU64Arr>,
 }
 
@@ -39,6 +47,7 @@ struct AtomicU64Arr {
     mutated: AtomicU64,
     dropped: AtomicU64,
     accepted: AtomicU64,
+    errors: AtomicU64,
 }
 
 impl B4Engine {
@@ -49,12 +58,17 @@ impl B4Engine {
             config,
             ports: if ports.is_empty() { vec![443] } else { ports },
             running: Arc::new(AtomicBool::new(false)),
+            dead: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(AtomicU64Arr::default()),
         }
     }
 
     /// Run the interception loop until stopped.
     pub async fn run(&self) -> Result<(), String> {
+        if self.running.load(Ordering::SeqCst) {
+            return Err("b4 engine already running".into());
+        }
+        self.dead.store(false, Ordering::SeqCst);
         let queue = NfQueue::new(self.queue_num, 64 * 1024)
             .map_err(|e| format!("NFQUEUE bind failed: {e}"))?;
         self.running.store(true, Ordering::SeqCst);
@@ -64,101 +78,38 @@ impl B4Engine {
         // task so the async executor is not starved.
         let stats = Arc::clone(&self.stats);
         let running = Arc::clone(&self.running);
+        let dead = Arc::clone(&self.dead);
         let config = self.config.clone();
         let ports = self.ports.clone();
         let queue = std::sync::Arc::new(queue);
 
         tokio::task::spawn_blocking(move || {
             tracing::info!("b4 engine: interception thread started");
-            while running.load(Ordering::SeqCst) {
-                let packet = match queue.recv_packet() {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        tracing::warn!("NFQUEUE recv: unrecognized message (not packet), skipping");
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!("NFQUEUE recv error: {e}");
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        continue;
-                    }
-                };
-                stats.packets_seen.fetch_add(1, Ordering::Relaxed);
-
-                let Some(payload) = &packet.payload else {
-                    // No payload (COPY_META) — can't mutate; accept.
-                    stats.accepted.fetch_add(1, Ordering::Relaxed);
-                    let _ = queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None);
-                    continue;
-                };
-
-                let tcp = match TcpPacket::parse(payload) {
-                    Some(t) => t,
-                    None => {
-                        // Not TCP — pass through untouched.
-                        stats.accepted.fetch_add(1, Ordering::Relaxed);
-                        let _ = queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None);
-                        continue;
-                    }
-                };
-
-                // Only intercept the configured destination ports.
-                if !ports.contains(&tcp.dst_port()) {
-                    stats.accepted.fetch_add(1, Ordering::Relaxed);
-                    let _ = queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None);
-                    continue;
+            // catch_unwind so a panic in packet processing (a malformed
+            // packet, a bug in a strategy) never kills the thread silently:
+            // the engine is marked dead and the daemon surfaces it, while the
+            // kernel FAIL_OPEN flag keeps traffic flowing.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                interception_loop(&queue, &running, &dead, &stats, &config, &ports)
+            }));
+            let outcome = match outcome {
+                Ok(exit) => format!("{exit:?}"),
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    format!("panic: {msg}")
                 }
-
-                // Try to identify the destination host from TLS SNI.
-                let tcp_payload = &payload[tcp.tcp_offset + tcp.tcp_header_len..];
-                let host = extract_tls_sni(tcp_payload);
-                tracing::debug!(
-                    dst_port = tcp.dst_port(),
-                    payload_len = tcp_payload.len(),
-                    head = %hex6(tcp_payload),
-                    sni = ?host,
-                    "b4 engine: inspected port packet",
-                );
-                if host.is_some() {
-                    stats.tls_packets.fetch_add(1, Ordering::Relaxed);
-                }
-
-                let profile = host.as_deref().and_then(|h| config.profile_for(h));
-                let Some(profile) = profile else {
-                    // No matching profile → pass through.
-                    stats.accepted.fetch_add(1, Ordering::Relaxed);
-                    let _ = queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None);
-                    continue;
-                };
-
-                // Apply the profile's strategies in order.
-                let mut changed = false;
-                let mut mutated_pkt = tcp.clone();
-                for strat in &profile.strategies {
-                    if apply_to(&mut mutated_pkt, strat) {
-                        changed = true;
-                    }
-                }
-
-                if changed {
-                    crate::packet::fix_ipv4_checksum(&mut mutated_pkt);
-                    crate::packet::fix_tcp_checksum(&mut mutated_pkt);
-                    stats.mutated.fetch_add(1, Ordering::Relaxed);
-                    tracing::debug!(
-                        host = ?host,
-                        strategies = ?profile.strategies,
-                        "b4 mutation applied",
-                    );
-                    let _ = queue.verdict(
-                        packet.packet_id,
-                        crate::nfq::NF_ACCEPT,
-                        Some(&mutated_pkt.raw),
-                    );
-                } else {
-                    stats.accepted.fetch_add(1, Ordering::Relaxed);
-                    let _ = queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None);
-                }
+            };
+            // The loop always exits because running flipped to false OR it
+            // hit a fatal error/panic. Only the latter is an unexpected death.
+            if running.load(Ordering::SeqCst) {
+                dead.store(true, Ordering::SeqCst);
+                tracing::error!("b4 engine: interception thread exited while running: {outcome}");
             }
+            running.store(false, Ordering::SeqCst);
         });
 
         Ok(())
@@ -169,6 +120,17 @@ impl B4Engine {
         self.running.store(false, Ordering::SeqCst);
     }
 
+    /// Whether the engine is marked dead (thread exited while supposedly
+    /// running). The daemon surfaces this as `enabled=false + last_error`.
+    pub fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::SeqCst)
+    }
+
+    /// Whether the interception loop is currently running.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
     /// Snapshot of the engine counters.
     pub fn stats(&self) -> B4Stats {
         B4Stats {
@@ -177,8 +139,138 @@ impl B4Engine {
             mutated: self.stats.mutated.load(Ordering::Relaxed),
             dropped: self.stats.dropped.load(Ordering::Relaxed),
             accepted: self.stats.accepted.load(Ordering::Relaxed),
+            errors: self.stats.errors.load(Ordering::Relaxed),
         }
     }
+}
+
+/// Outcome of the interception loop; returned so the exit path can explain
+/// why the thread stopped.
+#[derive(Debug)]
+enum LoopExit {
+    Stopped,
+    FatalError(String),
+}
+
+/// The blocking packet-processing loop. Every error path ACCEPTs the packet
+/// (never hangs a flow) and increments the error counter. The loop only exits
+/// on `running == false` or a fatal recv failure.
+fn interception_loop(
+    queue: &std::sync::Arc<NfQueue>,
+    running: &Arc<AtomicBool>,
+    dead: &Arc<AtomicBool>,
+    stats: &Arc<AtomicU64Arr>,
+    config: &EngineConfig,
+    ports: &[u16],
+) -> LoopExit {
+    let _ = dead;
+    while running.load(Ordering::SeqCst) {
+        let packet = match queue.recv_packet() {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!("NFQUEUE recv: unrecognized message (not packet), skipping");
+                continue;
+            }
+            Err(e) => {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!("NFQUEUE recv error: {e}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+        };
+        stats.packets_seen.fetch_add(1, Ordering::Relaxed);
+
+        let Some(payload) = &packet.payload else {
+            // No payload (COPY_META) — can't mutate; accept.
+            stats.accepted.fetch_add(1, Ordering::Relaxed);
+            if queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None).is_err() {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+            }
+            continue;
+        };
+
+        let tcp = match TcpPacket::parse(payload) {
+            Some(t) => t,
+            None => {
+                // Not TCP — pass through untouched.
+                stats.accepted.fetch_add(1, Ordering::Relaxed);
+                if queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None).is_err() {
+                    stats.errors.fetch_add(1, Ordering::Relaxed);
+                }
+                continue;
+            }
+        };
+
+        // Only intercept the configured destination ports.
+        if !ports.contains(&tcp.dst_port()) {
+            stats.accepted.fetch_add(1, Ordering::Relaxed);
+            if queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None).is_err() {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+            }
+            continue;
+        }
+
+        // Try to identify the destination host from TLS SNI.
+        let tcp_payload = &payload[tcp.tcp_offset + tcp.tcp_header_len..];
+        let host = extract_tls_sni(tcp_payload);
+        tracing::debug!(
+            dst_port = tcp.dst_port(),
+            payload_len = tcp_payload.len(),
+            head = %hex6(tcp_payload),
+            sni = ?host,
+            "b4 engine: inspected port packet",
+        );
+        if host.is_some() {
+            stats.tls_packets.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let profile = host.as_deref().and_then(|h| config.profile_for(h));
+        let Some(profile) = profile else {
+            // No matching profile → pass through.
+            stats.accepted.fetch_add(1, Ordering::Relaxed);
+            if queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None).is_err() {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+            }
+            continue;
+        };
+
+        // Apply the profile's strategies in order.
+        let mut changed = false;
+        let mut mutated_pkt = tcp.clone();
+        for strat in &profile.strategies {
+            if apply_to(&mut mutated_pkt, strat) {
+                changed = true;
+            }
+        }
+
+        if changed {
+            crate::packet::fix_ipv4_checksum(&mut mutated_pkt);
+            crate::packet::fix_tcp_checksum(&mut mutated_pkt);
+            stats.mutated.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                host = ?host,
+                strategies = ?profile.strategies,
+                "b4 mutation applied",
+            );
+            if queue
+                .verdict(
+                    packet.packet_id,
+                    crate::nfq::NF_ACCEPT,
+                    Some(&mutated_pkt.raw),
+                )
+                .is_err()
+            {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            stats.accepted.fetch_add(1, Ordering::Relaxed);
+            if queue.verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None).is_err() {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    LoopExit::Stopped
 }
 
 /// Apply a strategy to a packet; returns true if it changed anything.
