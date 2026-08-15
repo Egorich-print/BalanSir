@@ -23,7 +23,7 @@ const SOCKET_PERMS: u32 = 0o600;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("balansir_daemon=debug")
+        .with_env_filter("balansir_daemon=debug,balansir_b4=debug")
         .init();
 
     info!("BalanSir Daemon starting");
