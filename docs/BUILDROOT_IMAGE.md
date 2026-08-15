@@ -156,3 +156,35 @@ rm -f output/build/balansir-0.4.0/.stamp_{built,target_installed,rsynced}
 - Boot partition: `Image`, `bcm2710-rpi-3-b{-plus,cm3}.dtb`, `bootcode.bin`,
   `fixup.dat`, `start.elf`, `overlays/`, `cmdline.txt`
   (`... net.ifnames=0 biosdevname=0`), `config.txt` (UART debug, arm_64bit)
+
+## DNS gateway (LAN DNS forwarder)
+
+The daemon embeds a UDP DNS forwarder (`dns.rs`, feature `dns`) that can serve
+DNS to the whole LAN. Enable it with a forwarder config:
+
+```toml
+# /etc/balansir/dns.toml
+listen = "192.168.3.12:53"          # LAN address of the RPi
+upstreams = ["1.1.1.1:53", "8.8.8.8:53"]
+cache_size = 10000
+log_queries = true
+```
+
+Point the daemon at it (systemd drop-in `balansir-daemon.service.d/dns.conf`):
+
+```ini
+[Service]
+Environment=BALANSIR_DNS_CONFIG=/etc/balansir/dns.toml
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+```
+
+The daemon runs unprivileged (User=balansir); `CAP_NET_BIND_SERVICE` lets it
+bind privileged port 53 without any other privilege. `systemd-resolved` keeps
+serving the loopback (127.0.0.53) for local processes.
+
+**VERIFIED** on RPi 3B+: forwarder listens on 192.168.3.12:53, serves A/AAAA,
+logs queries, cache on.
+
+Then point LAN clients' DNS at 192.168.3.12 (router DHCP DNS option) to make
+the RPi the network's DNS gateway.
