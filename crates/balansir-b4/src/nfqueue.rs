@@ -67,12 +67,16 @@ impl NfQueue {
         // libnetfilter_queue: PF_UNBIND/PF_BIND use res_id=0, queue BIND and
         // params use the queue number.
         let pf_unbind = self.config_msg(NFQNL_CFG_CMD_PF_UNBIND, Some(AF_INET), 0);
+        tracing::info!(msg = %hex(&pf_unbind), "NFQUEUE PF_UNBIND");
         self.send_config(&pf_unbind)?;
         let pf_bind = self.config_msg(NFQNL_CFG_CMD_PF_BIND, Some(AF_INET), 0);
+        tracing::info!(msg = %hex(&pf_bind), "NFQUEUE PF_BIND");
         self.send_config(&pf_bind)?;
         let bind = self.config_msg(NFQNL_CFG_CMD_BIND, None, self.queue_num);
+        tracing::info!(msg = %hex(&bind), "NFQUEUE BIND");
         self.send_config(&bind)?;
         let params = self.config_params();
+        tracing::info!(msg = %hex(&params), "NFQUEUE PARAMS");
         self.send_config(&params)?;
 
         // Diagnostic: confirm the kernel registered the queue.
@@ -370,4 +374,9 @@ mod tests {
             NfMessage::Other => panic!("expected packet"),
         }
     }
+}
+
+/// Hex dump helper for diagnostics.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
