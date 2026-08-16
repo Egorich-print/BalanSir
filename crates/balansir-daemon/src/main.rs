@@ -144,37 +144,44 @@ async fn main() -> Result<()> {
     // unless configured (and must stay alive for the daemon's lifetime, hence
     // the holder below).
     #[cfg(feature = "dns")]
-    let dns_forwarder_holder: Option<balansir_daemon::dns::DnsForwarderDriver> = {
-        match std::env::var("BALANSIR_DNS_CONFIG") {
-            Ok(dns_path) => match balansir_daemon::dns::DnsForwarderConfig::from_file(&dns_path) {
-                Ok(dns_cfg) => {
-                    let mut driver = balansir_daemon::dns::DnsForwarderDriver::new(
-                        balansir_common::DriverId::DnsForwarder,
-                        dns_cfg,
-                    );
-                    driver.attach_registry(Arc::clone(&dns_registry));
-                    match driver.start().await {
-                        Ok(()) => {
-                            info!("DNS forwarder started from {dns_path}");
-                            Some(driver)
-                        }
-                        Err(e) => {
-                            warn!("DNS forwarder from {dns_path} failed to start: {e}");
-                            None
-                        }
-                    }
+    let dns_forwarder: std::sync::Arc<balansir_daemon::dns::DnsForwarderDriver> = {
+        let dns_path = std::env::var("BALANSIR_DNS_CONFIG").ok();
+        let driver = dns_path
+            .and_then(|path| balansir_daemon::dns::DnsForwarderConfig::from_file(&path).ok())
+            .map(|dns_cfg| {
+                let mut driver = balansir_daemon::dns::DnsForwarderDriver::new(
+                    balansir_common::DriverId::DnsForwarder,
+                    dns_cfg,
+                );
+                driver.attach_registry(Arc::clone(&dns_registry));
+                driver
+            });
+        match driver {
+            Some(mut driver) => match driver.start().await {
+                Ok(()) => {
+                    info!("DNS forwarder started");
+                    Arc::new(driver)
                 }
                 Err(e) => {
-                    warn!("DNS config {dns_path} rejected: {e}");
-                    None
+                    warn!("DNS forwarder failed to start: {e}");
+                    Arc::new(balansir_daemon::dns::DnsForwarderDriver::new(
+                        balansir_common::DriverId::DnsForwarder,
+                        balansir_daemon::dns::DnsForwarderConfig::default(),
+                    ))
                 }
             },
-            Err(_) => None,
+            None => Arc::new(balansir_daemon::dns::DnsForwarderDriver::new(
+                balansir_common::DriverId::DnsForwarder,
+                balansir_daemon::dns::DnsForwarderConfig::default(),
+            )),
         }
     };
     #[cfg(not(feature = "dns"))]
-    let _dns_forwarder_holder: Option<()> = None;
-    let _ = &dns_forwarder_holder;
+    let dns_forwarder: std::sync::Arc<balansir_daemon::dns::DnsForwarderDriver> =
+        Arc::new(balansir_daemon::dns::DnsForwarderDriver::new(
+            balansir_common::DriverId::DnsForwarder,
+            balansir_daemon::dns::DnsForwarderConfig::default(),
+        ));
 
     let dns_loop_reconciler = Arc::clone(&reconciler);
     tokio::spawn(async move {
@@ -363,6 +370,35 @@ async fn main() -> Result<()> {
         {
             let _ = xray_control;
         }
+
+        // DNS VPN proxy monitoring task: updates DNS forwarder's SOCKS5 proxy
+        // based on path_decision from SubsystemManager. When path_decision
+        // indicates VpnActive, DNS queries are routed through Xray's SOCKS5
+        // proxy (default 127.0.0.1:10808) via SOCKS5 UDP associate.
+        let dns_forwarder_clone = Arc::clone(&dns_forwarder);
+        let manager_snapshot = manager.snapshot();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            let mut last_vpn_active = false;
+            loop {
+                interval.tick().await;
+                let snap = manager_snapshot.read().await;
+                let vpn_active = snap.vpn_pool.active.is_some() && !snap.vpn_pool.paused;
+                drop(snap);
+
+                if vpn_active != last_vpn_active {
+                    if vpn_active {
+                        // Xray SOCKS5 inbound default port is 10808
+                        dns_forwarder_clone.set_vpn_proxy(Some("127.0.0.1:10808".parse().unwrap()));
+                        info!("DNS forwarder VPN proxy enabled (SOCKS5 127.0.0.1:10808)");
+                    } else {
+                        dns_forwarder_clone.set_vpn_proxy(None);
+                        info!("DNS forwarder VPN proxy disabled");
+                    }
+                    last_vpn_active = vpn_active;
+                }
+            }
+        });
 
         let api_bind_clone = api_bind.clone();
         let api_reconciler = Arc::clone(&reconciler);

@@ -155,6 +155,13 @@ impl B4Engine {
             .unwrap_or(B4State::Idle)
     }
 
+    /// Mark a flow as Adapting (used by the controller for DNS-path adaptation).
+    pub fn mark_adapting(&mut self, flow: &str) {
+        if let Some(ctx) = self.flows.get_mut(flow) {
+            ctx.state = B4State::Adapting;
+        }
+    }
+
     /// The last decision for a flow (introspection / explain).
     pub fn last_decision(&self, flow: &str) -> Option<&B4Decision> {
         self.last_decisions.get(flow)

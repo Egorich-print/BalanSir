@@ -84,8 +84,11 @@ impl B4Controller {
             }
             B4Decision::SwitchDnsPath => {
                 // DNS-path adaptation is expressed through the DNS plane (P6);
-                // the engine decision is recorded. A concrete DNS-path switch
-                // hook is P7.2's DNS-side (registry already supports it).
+                // the engine decision is recorded. Also mark the flow as
+                // Adapting so the unified path-decision reflects B4 activity
+                // (the engine itself returns Monitoring here; the controller
+                // promotes it to Adapting to signal an active adaptation).
+                self.engine.mark_adapting(flow);
                 tracing::info!(flow, "B4 DNS-path adaptation requested");
             }
             B4Decision::Recovered => {

@@ -84,7 +84,7 @@ impl NftablesExecutor {
             backend,
             installed: Mutex::new(HashMap::new()),
             path_mtu: crate::path_mtu::PathMtuStore::new(Box::new(
-                crate::path_mtu::RecordOnlyApplier,
+                crate::path_mtu::RouteMtuApplier,
             )),
         }
     }

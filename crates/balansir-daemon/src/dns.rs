@@ -2,10 +2,12 @@ use async_trait::async_trait;
 use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
 
 use crate::driver::ComponentDriver;
@@ -22,16 +24,168 @@ const FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
 /// not re-write TTLs; 30s is a safe floor for typical A/AAAA records).
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
-/// DNS forwarder configuration.
+/// SOCKS5 UDP Associate relay for routing DNS queries through a SOCKS5 proxy.
 ///
-/// The forwarder is the single LAN DNS listener (mission Pi-hole/AdGuard
-/// role). A query whose domain (or any parent suffix) matches `blocklist` is
-/// answered locally with NXDOMAIN and never sent upstream; `allowlist`
-/// overrides the blocklist for a domain and all of its subdomains. Resolution
-/// for every allowed domain goes through `upstreams` with round-robin
-/// failover, and each forwarded response feeds the shared `DnsRegistry` — the
-/// same policy-plane observation truth the flow compiler and B4 read. There is
-/// no second DNS listener/classifier/registry.
+/// Implements the SOCKS5 UDP ASSOCIATE protocol (RFC 1928) to route UDP packets
+/// through a SOCKS5 proxy with UDP support (e.g., Xray SOCKS5 inbound).
+struct Socks5UdpRelay {
+    /// The UDP socket connected to the SOCKS5 relay address, used to send/receive
+    /// SOCKS5-wrapped UDP packets.
+    udp_socket: UdpSocket,
+}
+
+impl Socks5UdpRelay {
+    /// Establish a SOCKS5 UDP ASSOCIATE connection to the given proxy address.
+    ///
+    /// Performs SOCKS5 handshake (no auth) and UDP ASSOCIATE command,
+    /// returning a relay that can send/receive UDP packets through the proxy.
+    async fn connect(proxy_addr: SocketAddr) -> io::Result<Self> {
+        // Connect to SOCKS5 proxy via TCP
+        let mut tcp = TcpStream::connect(proxy_addr).await?;
+
+        // SOCKS5 handshake: VER=5, NMETHODS=1, METHODS=[0x00 (no auth)]
+        tcp.write_all(&[0x05, 0x01, 0x00]).await?;
+        tcp.flush().await?;
+
+        // Read server response: VER=5, METHOD=0x00
+        let mut resp = [0u8; 2];
+        tcp.read_exact(&mut resp).await?;
+        if resp[0] != 0x05 || resp[1] != 0x00 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SOCKS5 handshake failed",
+            ));
+        }
+
+        // Send UDP ASSOCIATE command:
+        // VER=5, CMD=3 (UDP ASSOCIATE), RSV=0, ATYP=1 (IPv4), DST.ADDR=0.0.0.0, DST.PORT=0
+        let cmd = [0x05, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        tcp.write_all(&cmd).await?;
+        tcp.flush().await?;
+
+        // Read server response: VER=5, REP=0, RSV=0, ATYP, BND.ADDR, BND.PORT
+        let mut resp = [0u8; 10];
+        tcp.read_exact(&mut resp).await?;
+        if resp[0] != 0x05 || resp[1] != 0x00 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "UDP ASSOCIATE failed",
+            ));
+        }
+
+        // Parse bound address (BND.ADDR, BND.PORT) from response
+        let relay_addr = parse_socks5_addr(&resp[3..])?;
+
+        // Create local UDP socket for relay communication
+        let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
+        udp_socket.connect(relay_addr).await?;
+
+        Ok(Self { udp_socket })
+    }
+
+    /// Send a DNS query to the upstream through the SOCKS5 relay.
+    ///
+    /// Wraps the payload in a SOCKS5 UDP header (RSV=0, FRAG=0, ATYP, DST.ADDR, DST.PORT).
+    async fn send(&self, query: &[u8], upstream: SocketAddr) -> io::Result<()> {
+        let mut packet = Vec::with_capacity(10 + query.len());
+        // SOCKS5 UDP header: RSV=0 (2 bytes), FRAG=0 (1 byte)
+        packet.extend_from_slice(&[0x00, 0x00, 0x00]);
+        // ATYP and DST.ADDR, DST.PORT
+        match upstream {
+            SocketAddr::V4(v4) => {
+                packet.push(0x01); // ATYP=1 (IPv4)
+                packet.extend_from_slice(&v4.ip().octets());
+                packet.extend_from_slice(&v4.port().to_be_bytes());
+            }
+            SocketAddr::V6(v6) => {
+                packet.push(0x04); // ATYP=4 (IPv6)
+                packet.extend_from_slice(&v6.ip().octets());
+                packet.extend_from_slice(&v6.port().to_be_bytes());
+            }
+        }
+        packet.extend_from_slice(query);
+        self.udp_socket.send(&packet).await.map(|_| ())
+    }
+
+    /// Receive a response from the SOCKS5 relay.
+    async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.udp_socket.recv(buf).await?;
+        // Strip SOCKS5 UDP header (RSV=2, FRAG=1, ATYP=1, DST.ADDR, DST.PORT)
+        // SOCKS5 UDP header format (RFC 1928):
+        // RSV (2 bytes) = 0x0000
+        // FRAG (1 byte) = 0x00
+        // ATYP (1 byte) = address type
+        // DST.ADDR (variable) = destination address
+        // DST.PORT (2 bytes) = destination port
+        // DATA = payload
+        if n < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Short SOCKS5 packet",
+            ));
+        }
+        // Check RSV=0, FRAG=0
+        if buf[0] != 0x00 || buf[1] != 0x00 || buf[2] != 0x00 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid SOCKS5 UDP header (RSV/FRAG)",
+            ));
+        }
+        let atyp = buf[3];
+        let header_len = match atyp {
+            0x01 => 2 + 1 + 1 + 4 + 2, // RSV(2) + FRAG(1) + ATYP(1) + IPv4(4) + PORT(2) = 10
+            0x03 => {
+                let addr_len = buf[4] as usize;
+                2 + 1 + 1 + 1 + addr_len + 2 // RSV(2) + FRAG(1) + ATYP(1) + LEN(1) + ADDR + PORT(2)
+            }
+            0x04 => 2 + 1 + 1 + 16 + 2, // IPv6
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Unknown ATYP")),
+        };
+        if n < header_len || buf[0] != 0x00 || buf[1] != 0x00 || buf[2] != 0x00 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid SOCKS5 UDP header",
+            ));
+        }
+        // Copy payload to beginning of buffer using split_at_mut
+        let (prefix, suffix) = buf.split_at_mut(header_len);
+        prefix[..n - header_len].copy_from_slice(&suffix[..n - header_len]);
+        Ok(n - header_len)
+    }
+}
+
+/// Parse a SOCKS5 address from bytes (ATYP + ADDR + PORT).
+fn parse_socks5_addr(bytes: &[u8]) -> io::Result<SocketAddr> {
+    if bytes.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Empty address"));
+    }
+    match bytes[0] {
+        0x01 => {
+            // IPv4: 4 bytes + 2 port
+            if bytes.len() < 6 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Short IPv4"));
+            }
+            let ip = std::net::Ipv4Addr::new(bytes[1], bytes[2], bytes[3], bytes[4]);
+            let port = u16::from_be_bytes([bytes[5], bytes[6]]);
+            Ok(SocketAddr::from((ip, port)))
+        }
+        0x04 => {
+            // IPv6: 16 bytes + 2 port
+            if bytes.len() < 18 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Short IPv6"));
+            }
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&bytes[1..17]);
+            let ip = std::net::Ipv6Addr::from(octets);
+            let port = u16::from_be_bytes([bytes[18], bytes[19]]);
+            Ok(SocketAddr::from((ip, port)))
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Unsupported ATYP",
+        )),
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsForwarderConfig {
     /// Listen address
@@ -52,6 +206,10 @@ pub struct DnsForwarderConfig {
     /// Allowlist: domains (and their subdomains) that override the blocklist.
     #[serde(default)]
     pub allowlist: Vec<String>,
+    /// Optional SOCKS5 proxy for upstream queries (e.g., VPN SOCKS5 inbound).
+    /// When set, upstream DNS queries are sent through this proxy via SOCKS5 UDP.
+    #[serde(default)]
+    pub socks5_proxy: Option<SocketAddr>,
 }
 
 impl Default for DnsForwarderConfig {
@@ -65,6 +223,7 @@ impl Default for DnsForwarderConfig {
             log_queries: false,
             blocklist: Vec::new(),
             allowlist: Vec::new(),
+            socks5_proxy: None,
         }
     }
 }
@@ -112,15 +271,31 @@ impl DnsCache {
 }
 
 /// Send one DNS query to `upstream` and return the (opaque) response.
-async fn forward_query(query: &[u8], upstream: SocketAddr) -> Option<Vec<u8>> {
-    let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
-    sock.connect(upstream).await.ok()?;
-    sock.send(query).await.ok()?;
+///
+/// If `socks5_relay` is provided, the query is sent through the SOCKS5 UDP
+/// associate relay; otherwise, a direct UDP connection is used.
+async fn forward_query(
+    query: &[u8],
+    upstream: SocketAddr,
+    socks5_relay: Option<&Socks5UdpRelay>,
+) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; 4096];
-    match tokio::time::timeout(FORWARD_TIMEOUT, sock.recv(&mut buf)).await {
-        Ok(Ok(n)) => Some(buf[..n].to_vec()),
-        _ => None,
-    }
+    let result = match socks5_relay {
+        Some(relay) => {
+            relay.send(query, upstream).await.ok()?;
+            relay.recv(&mut buf).await.ok()
+        }
+        None => {
+            let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+            sock.connect(upstream).await.ok()?;
+            sock.send(query).await.ok()?;
+            tokio::time::timeout(FORWARD_TIMEOUT, sock.recv(&mut buf))
+                .await
+                .ok()?
+                .ok()
+        }
+    };
+    result.map(|n| buf[..n].to_vec())
 }
 
 /// DNS filtering decision for a queried domain.
@@ -204,6 +379,10 @@ impl DnsFilterSets {
 /// compiler and the B4 observer. Cached responses are not re-parsed (the
 /// cache TTL bounds registry freshness). Blocked domains are answered with
 /// NXDOMAIN without an upstream round-trip and never reach the registry.
+///
+/// If `vpn_proxy` is set, upstream DNS queries are sent through the SOCKS5
+/// proxy via UDP associate, routing DNS through the VPN tunnel.
+#[allow(clippy::too_many_arguments)]
 async fn forward_loop(
     socket: UdpSocket,
     upstreams: Vec<SocketAddr>,
@@ -212,9 +391,15 @@ async fn forward_loop(
     log_queries: bool,
     registry: Option<Arc<DnsRegistry>>,
     filter: DnsFilterSets,
+    vpn_proxy: Arc<Mutex<Option<SocketAddr>>>,
 ) {
     let mut round_robin = 0usize;
     let mut buf = vec![0u8; 4096];
+
+    // SOCKS5 relay state - created lazily when VPN proxy is set
+    let mut socks5_relay: Option<Socks5UdpRelay> = None;
+    let mut last_proxy_addr: Option<SocketAddr> = None;
+
     loop {
         let (n, peer) = match socket.recv_from(&mut buf).await {
             Ok(v) => v,
@@ -227,6 +412,32 @@ async fn forward_loop(
         if log_queries {
             tracing::debug!(from = %peer, bytes = n, "dns query");
         }
+
+        // Check if VPN proxy has changed and recreate relay if needed
+        let current_proxy = *vpn_proxy.lock().unwrap_or_else(|e| e.into_inner());
+        if current_proxy != last_proxy_addr {
+            let mut relay: Option<Socks5UdpRelay> = None;
+            if let Some(addr) = current_proxy {
+                match tokio::time::timeout(Duration::from_secs(3), Socks5UdpRelay::connect(addr))
+                    .await
+                {
+                    Ok(Ok(rel)) => {
+                        tracing::info!(%addr, "SOCKS5 UDP relay established for DNS");
+                        relay = Some(rel);
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(%addr, error=%e, "Failed to establish SOCKS5 UDP relay, using direct");
+                    }
+                    Err(_) => {
+                        tracing::warn!(%addr, "SOCKS5 UDP relay connection timeout, using direct");
+                    }
+                }
+            }
+            socks5_relay = relay;
+            last_proxy_addr = current_proxy;
+        }
+
+        let socks5_relay_ref = socks5_relay.as_ref();
 
         // DNS filtering: blocklist/allowlist decide locally, before any
         // upstream contact (a blocked query never leaks to a resolver).
@@ -248,7 +459,7 @@ async fn forward_loop(
                 let mut response = None;
                 for offset in 0..upstreams.len() {
                     let idx = (round_robin + offset) % upstreams.len();
-                    if let Some(r) = forward_query(&query, upstreams[idx]).await {
+                    if let Some(r) = forward_query(&query, upstreams[idx], socks5_relay_ref).await {
                         response = Some(r);
                         break;
                     }
@@ -286,6 +497,9 @@ pub struct DnsForwarderDriver {
     /// Shared DNS observation truth for the policy plane (P6/ADR-023).
     /// When attached, forwarded responses populate it (domain → A/AAAA).
     registry: Option<Arc<DnsRegistry>>,
+    /// Shared VPN SOCKS5 proxy address. When set, upstream DNS queries are
+    /// sent through this proxy via SOCKS5 UDP associate.
+    vpn_proxy: Arc<Mutex<Option<SocketAddr>>>,
 }
 
 impl DnsForwarderDriver {
@@ -299,6 +513,7 @@ impl DnsForwarderDriver {
             task: None,
             local: None,
             registry: None,
+            vpn_proxy: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -306,6 +521,13 @@ impl DnsForwarderDriver {
     /// plane observations. Must be called before `start`.
     pub fn attach_registry(&mut self, registry: Arc<DnsRegistry>) {
         self.registry = Some(registry);
+    }
+
+    /// Set the VPN SOCKS5 proxy address for upstream queries.
+    /// When set, upstream DNS queries are sent through this proxy via SOCKS5 UDP associate.
+    /// Pass `None` to disable VPN proxy and use direct upstream connections.
+    pub fn set_vpn_proxy(&self, addr: Option<SocketAddr>) {
+        *self.vpn_proxy.lock().unwrap_or_else(|e| e.into_inner()) = addr;
     }
 
     /// Actual bound listener address (useful when configured with port 0).
@@ -375,6 +597,7 @@ impl ComponentDriver for DnsForwarderDriver {
             self.config.log_queries,
             registry,
             filter,
+            self.vpn_proxy.clone(),
         ));
 
         self.task = Some(task);
