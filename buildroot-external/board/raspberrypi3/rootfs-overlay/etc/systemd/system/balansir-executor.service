@@ -38,7 +38,8 @@ ProtectHome=yes
 PrivateTmp=yes
 
 # Kernel hardening
-ProtectKernelTunables=yes
+# ProtectKernelTunables disabled: gateway datapath writes ip_forward via sysctl.
+ProtectKernelModules=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectClock=yes
