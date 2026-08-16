@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::signal::unix::{signal, SignalKind};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use balansir_daemon::driver::factory::ConfiguredFactory;
 use balansir_daemon::driver::health::TierTracker;
@@ -408,6 +408,60 @@ async fn main() -> Result<()> {
                     }
                     last_vpn_active = vpn_active;
                 }
+            }
+        });
+
+        // Gateway re-check: periodically re-validate and re-apply gateway config
+        // when interfaces change state (e.g. eth1 comes UP after AX3 is connected).
+        // apply_network_config is called once at startup; this loop catches the
+        // case where a required interface was DOWN at boot and comes UP later.
+        let gw_executor = Arc::clone(&executor_client);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let cfg = match balansir_daemon::network_config::NetworkConfig::load() {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                // Skip if no roles configured.
+                if cfg.wan_interface.is_none() && cfg.lan_interface.is_none() {
+                    continue;
+                }
+                let interfaces = match gw_executor.interface_info("").await {
+                    Ok(infos) => infos,
+                    Err(_) => continue,
+                };
+                // Only re-apply if validation passes (all interfaces UP and valid).
+                // This is the same validation as apply_network_config — if it passes,
+                // the gateway can be safely applied.
+                if cfg.validate(&interfaces).is_err() {
+                    continue;
+                }
+                // Validation passed. Apply gateway — idempotent if already applied.
+                // We need to replicate the non-failing part of apply_network_config:
+                // gateway_apply, but skip MAC cloning (already done at startup).
+                let lan = cfg.lan_interface.as_deref().unwrap_or("eth0");
+                let gateway_cfg = balansir_common::gateway::GatewayConfig {
+                    wan_interface: cfg.wan_interface.unwrap_or_default(),
+                    lan_interface: lan.to_string(),
+                    lan_subnet: cfg.lan_subnet,
+                };
+                match gw_executor.gateway_apply(&gateway_cfg).await {
+                    Ok(result) => {
+                        if result.ok {
+                            info!("Gateway re-check: datapath re-applied ({})", result.detail);
+                        }
+                    }
+                    Err(e) => {
+                        debug!(
+                            "Gateway re-check: apply failed (expected if already active): {}",
+                            e
+                        );
+                    }
+                }
+                // ip_forward is idempotent — set it again to be safe.
+                let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1\n");
             }
         });
 
