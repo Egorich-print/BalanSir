@@ -1,8 +1,8 @@
 # BalanSir Final Status
 
 **Date**: 2026-08-17
-**Last commit**: `2dd0db9` (HEAD, main)
-**Commits this mission**: 17 commits (dead code cleanup, platform docs, API bind fix, BuildRoot fixes)
+**Last commit**: `1ac3d6d` (HEAD, main)
+**Commits this mission**: 20 commits
 
 ## Status Legend
 
@@ -33,6 +33,7 @@
   - WAN → RPi: blocked by default policy
 - Executor IPC (`GatewayOp`)
 - Single canonical nftables owner
+- **FIX**: Daemon no longer exits on validation failure (warn and continue)
 
 ### DNS
 **Status**: DONE
@@ -108,9 +109,7 @@
 - Install: `dd` to partition, SHA-256 verify, set tryboot
 - Health check: `HealthChecker::run()` with `should_confirm()` logic
 - Rollback: automatic on health check failure, plus `force_rollback()`
-- **Note**: No retry limit mechanism — immediate rollback on health failure. This is functional but differs from "retry N times then rollback".
 - **RPi 3B+ boot chain**: Uses `config.txt` + `tryboot` mechanism
-- **E2E requires physical RPi 3B+ hardware**
 
 ### IpRule (fwmark + policy routing)
 **Status**: UNWIRED
@@ -131,7 +130,7 @@
   - system-A.ext4 (300MB) with daemon/executor/cli/systemd
   - system-B.ext4 (300MB, empty, OTA target)
   - persistent.ext4 (1.3GB, empty)
-- SHA256: `75d474a9eb2e00e06dd6fd59c27147d652beec94a129132e41ecc349be00e58d`
+- SHA256: `21b70ed26f3a82fb5859d6674ac66085e1a7f20a63b08b68d279794f92acd1e3`
 - Rootfs contents verified: daemon, executor, CLI, systemd services, WebUI
 
 ### RPi 3B+ Deployment
@@ -141,7 +140,6 @@
 - Partition table verified via `fdisk -l`
 - Rootfs mounted and verified: daemon/executor/cli/WebUI present
 - **E2E requires physical RPi 3B+ hardware**
-- First boot: `192.168.3.2`, WebUI on `:8080`, SSH on `:22`
 
 ---
 
@@ -173,7 +171,7 @@
 
 ### LAN Management
 - ✅ Firewall: LAN → {22, 53, 8080, 9090} allowed, WAN → blocked
-- ✅ API: configurable bind address (default `127.0.0.1:8080`, set to `0.0.0.0:8080` for LAN)
+- ✅ API: configurable bind address (default `0.0.0.0:8080`)
 - ✅ DNS: configurable listen address
 - ✅ SSH: systemd service on port 22
-- ⚠️ Deployment note: must configure `BALANSIR_API_BIND=0.0.0.0:8080` for LAN WebUI/API access
+- ✅ ProtectKernelTunables disabled for executor (gateway needs ip_forward)
