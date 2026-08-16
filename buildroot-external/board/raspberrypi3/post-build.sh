@@ -13,6 +13,7 @@ TARGET_DIR="${1}"
 # Call OTA layout setup
 if [ -f "${TARGET_DIR}/usr/local/bin/post-image-ota.sh" ]; then
     /usr/local/bin/post-image-ota.sh "${TARGET_DIR}"
+fi
 
 # (mission: image must start networking -> executor -> daemon -> config ->
 # first reconcile automatically).
