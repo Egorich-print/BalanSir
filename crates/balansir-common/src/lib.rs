@@ -5,6 +5,7 @@ pub mod gateway;
 pub mod ipc;
 pub mod metrics;
 pub mod network;
+pub mod path_pool;
 pub mod paths;
 pub mod plan;
 pub mod profile;
