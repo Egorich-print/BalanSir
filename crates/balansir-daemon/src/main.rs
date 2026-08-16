@@ -511,8 +511,8 @@ async fn apply_network_config(executor: &Arc<ExecutorClient>) {
     let config = match NetworkConfig::load() {
         Ok(c) => c,
         Err(e) => {
-            error!("Network config rejected: {e}");
-            std::process::exit(1);
+            warn!("Network config rejected: {e} (running without gateway mode)");
+            return;
         }
     };
     // No roles configured → gateway mode off; nothing to do.
@@ -526,13 +526,13 @@ async fn apply_network_config(executor: &Arc<ExecutorClient>) {
     let interfaces = match executor.interface_info("").await {
         Ok(infos) => infos,
         Err(e) => {
-            error!("Network config: could not read interfaces from executor: {e}");
-            std::process::exit(1);
+            warn!("Network config: could not read interfaces from executor: {e} (running without gateway mode)");
+            return;
         }
     };
     if let Err(e) = config.validate(&interfaces) {
-        error!("{e}");
-        std::process::exit(1);
+        warn!("{e} (running without gateway mode)");
+        return;
     }
 
     let wan = config.wan_interface.as_deref().unwrap_or_default();
