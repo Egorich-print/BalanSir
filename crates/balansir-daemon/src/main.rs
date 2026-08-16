@@ -374,9 +374,17 @@ async fn main() -> Result<()> {
         // DNS VPN proxy monitoring task: updates DNS forwarder's SOCKS5 proxy
         // based on path_decision from SubsystemManager. When path_decision
         // indicates VpnActive, DNS queries are routed through Xray's SOCKS5
-        // proxy (default 127.0.0.1:10808) via SOCKS5 UDP associate.
+        // proxy via SOCKS5 UDP associate.
         let dns_forwarder_clone = Arc::clone(&dns_forwarder);
         let manager_snapshot = manager.snapshot();
+        #[cfg(feature = "xray")]
+        let xray_socks_port = xray_control
+            .as_ref()
+            .map(|h| h.socks_port())
+            .unwrap_or(10808);
+        #[cfg(not(feature = "xray"))]
+        let xray_socks_port = 10808u16;
+        let _manager_snapshot = manager.snapshot(); // for potential future use
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             let mut last_vpn_active = false;
@@ -388,9 +396,12 @@ async fn main() -> Result<()> {
 
                 if vpn_active != last_vpn_active {
                     if vpn_active {
-                        // Xray SOCKS5 inbound default port is 10808
-                        dns_forwarder_clone.set_vpn_proxy(Some("127.0.0.1:10808".parse().unwrap()));
-                        info!("DNS forwarder VPN proxy enabled (SOCKS5 127.0.0.1:10808)");
+                        let proxy_addr = format!("127.0.0.1:{}", xray_socks_port).parse().unwrap();
+                        dns_forwarder_clone.set_vpn_proxy(Some(proxy_addr));
+                        info!(
+                            "DNS forwarder VPN proxy enabled (SOCKS5 127.0.0.1:{})",
+                            xray_socks_port
+                        );
                     } else {
                         dns_forwarder_clone.set_vpn_proxy(None);
                         info!("DNS forwarder VPN proxy disabled");

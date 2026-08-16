@@ -141,6 +141,8 @@ pub struct XrayManagerHandle {
     /// paused, the manager runs exactly this profile and stops its own
     /// priority-based selection — the pool is the authoritative decision.
     pool_profile: Arc<RwLock<Option<VpnProfile>>>,
+    /// SOCKS5 inbound port for the Xray process (default 10808).
+    socks_port: u16,
 }
 
 impl XrayManagerHandle {
@@ -170,6 +172,10 @@ impl XrayManagerHandle {
     pub async fn apply_pool_profile(&self, profile: Option<VpnProfile>) {
         *self.pool_profile.write().await = profile;
         self.wake.notify_one();
+    }
+    /// Get the SOCKS5 inbound port for the Xray process.
+    pub fn socks_port(&self) -> u16 {
+        self.socks_port
     }
 }
 
@@ -289,6 +295,7 @@ impl XrayManager {
             pinned: Arc::clone(&self.pinned),
             wake: Arc::clone(&self.wake),
             pool_profile: Arc::clone(&self.pool_profile),
+            socks_port: self.socks_port,
         }
     }
     fn endpoint_config(&self, idx: usize) -> XrayConfig {
@@ -1038,7 +1045,10 @@ priority = 20
         let profile = test_profile("us2.example.com", 8443);
         manager.handle().apply_pool_profile(Some(profile)).await;
         manager.ensure_running().await.expect("converge to pool");
-        assert_eq!(manager.active_name().await.as_deref(), Some("test @ us2.example.com:8443"));
+        assert_eq!(
+            manager.active_name().await.as_deref(),
+            Some("test @ us2.example.com:8443")
+        );
 
         // Pool clears selection (no eligible profile) → stop the proxy.
         manager.handle().apply_pool_profile(None).await;
