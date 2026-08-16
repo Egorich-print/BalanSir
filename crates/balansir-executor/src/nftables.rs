@@ -110,13 +110,30 @@ impl NftablesBackend {
     ///
     /// `hook_args` is the middle of the chain spec, e.g.
     /// `&["type","filter","hook","input","priority","0","policy","drop",";"]`.
-    /// The whole `{ type filter hook input priority 0 policy drop; }` group is
-    /// passed as one argument so `nft` parses it as a unit (mirroring how the
-    /// forward chain is created in `init`).
+    ///
+    /// nftables ≤1.1.4 (used by Buildroot 2026.05) does not support `policy`
+    /// inside the chain creation command. The policy is extracted from
+    /// `hook_args` and applied as a separate `nft chain` command after
+    /// creating the chain, so the same caller code works on all versions.
     pub fn ensure_hooked_chain(&self, name: &str, hook_args: &[&str]) -> Result<()> {
         validate_identifier(name)?;
+
+        // Split policy out of hook_args if present (nftables ≤1.1.4 compat).
+        let mut policy: Option<&str> = None;
+        let mut spec_parts: Vec<&str> = Vec::new();
+        let mut i = 0;
+        while i < hook_args.len() {
+            if hook_args[i] == "policy" && i + 1 < hook_args.len() {
+                policy = Some(hook_args[i + 1]);
+                i += 2;
+                continue;
+            }
+            spec_parts.push(hook_args[i]);
+            i += 1;
+        }
+
         let mut spec = "{".to_string();
-        for part in hook_args {
+        for part in &spec_parts {
             spec.push(' ');
             spec.push_str(part);
         }
@@ -124,7 +141,30 @@ impl NftablesBackend {
         self.create_if_absent(
             ["add", "chain", "inet", &self.table_name, name, &spec],
             "chain",
-        )
+        )?;
+
+        // Set policy separately (idempotent on newer nftables too).
+        if let Some(pol) = policy {
+            let output = Command::new(nft_bin()?)
+                .args([
+                    "chain", "inet", &self.table_name, name,
+                    "{", "policy", pol, ";", "}",
+                ])
+                .output()?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // Ignore "File exists" / "already has policy" idempotency errors.
+                if !stderr.contains("File exists")
+                    && !stderr.contains("already has policy")
+                    && !stderr.contains("same policy")
+                {
+                    return Err(balansir_common::Error::Fatal(format!(
+                        "nft chain {name} policy {pol} failed: {stderr}"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Add a rule to an arbitrary chain in this table (not just the default
