@@ -6,11 +6,8 @@
 //! and current `/proc/stat` samples (the caller keeps the previous sample).
 
 use balansir_common::subsystems::FilesystemInfo;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use libc;
 use std::time::Duration;
-
-/// A CPU time sample (`/proc/stat` first line).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CpuSample {
     pub idle: u64,
@@ -146,7 +143,6 @@ pub fn read_filesystems() -> Option<Vec<FilesystemInfo>> {
             continue;
         }
         let _device = parts[0];
-        let mount_point = parts[1];
         let fstype = parts[2];
 
         // Skip virtual filesystems
@@ -200,9 +196,9 @@ pub fn read_filesystems() -> Option<Vec<FilesystemInfo>> {
         }
 
         // statfs returns blocks, not bytes. Convert to MB.
-        let block_size = stat.f_bsize as u64;
-        let total_blocks = stat.f_blocks as u64;
-        let free_blocks = stat.f_bavail as u64; // available to non-root
+        let _block_size = stat.f_bsize as u64;
+        let _total_blocks = stat.f_blocks as u64;
+        let _free_blocks = stat.f_bavail as u64; // available to non-root
         let total_blocks = stat.f_blocks as u64;
 
         let total_mb = total_blocks.saturating_mul(stat.f_bsize as u64) / 1_048_576;
