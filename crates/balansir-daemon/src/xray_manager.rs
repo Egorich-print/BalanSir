@@ -721,7 +721,7 @@ server = "us2.example.com"
 port = 8443
 uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 transport = { WebSocket = { path = "/ws" } }
-security = { tls = { server_name = "us2.example.com", allow_insecure = false } }
+security = { tls = { server_name = "us2.example.com", pinned_peer_cert_sha256 = "e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9" } }
 priority = 20
 "#,
         )

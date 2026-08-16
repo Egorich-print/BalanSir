@@ -61,6 +61,8 @@ pub fn profile_to_xray_config(
                 .sni
                 .clone()
                 .unwrap_or_else(|| profile.server.clone()),
+            pinned_peer_cert_sha256: None,
+            verify_peer_cert_by_name: None,
             allow_insecure: false,
         }),
         Security::Reality => {

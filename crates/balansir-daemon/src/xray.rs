@@ -51,10 +51,28 @@ pub enum XrayTransport {
     },
 }
 
-/// TLS layer: plain TLS (server name + insecure flag) or REALITY.
+/// TLS layer: plain TLS (server name + optional certificate pinning) or
+/// REALITY.
+///
+/// NOTE (Xray ≥26): the `allowInsecure` option was removed upstream
+/// (migrated to `pinnedPeerCertSha256` / `verifyPeerCertByName` in 26.2.6 and
+/// hard-disabled since 2026-06-01; configs still carrying it fail to build).
+/// It is kept here only to *parse* legacy configs and reject them loudly —
+/// never emitted into the generated runtime config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XrayTls {
     pub server_name: String,
+    /// SHA-256 fingerprint(s) of the peer certificate (`pinnedPeerCertSha256`,
+    /// comma-separated hex; any match passes verification).
+    #[serde(default)]
+    pub pinned_peer_cert_sha256: Option<String>,
+    /// Override the server name used for certificate verification
+    /// (`verifyPeerCertByName`, comma-separated domain list).
+    #[serde(default)]
+    pub verify_peer_cert_by_name: Option<String>,
+    /// Legacy `allowInsecure` (removed in Xray ≥26). Parsed for backward
+    /// compatibility only; `true` is rejected by `validate()`.
+    #[serde(default)]
     pub allow_insecure: bool,
 }
 
@@ -128,6 +146,16 @@ impl XrayConfig {
                 if tls.server_name.trim().is_empty() {
                     return Err(DriverError::ConfigInvalid(
                         "xray tls server_name must not be empty".into(),
+                    ));
+                }
+                // allowInsecure was removed in Xray ≥26 (it now fails config
+                // build). A legacy config still carrying `true` must not run
+                // with silently-weaker TLS: reject it and name the migration.
+                if tls.allow_insecure {
+                    return Err(DriverError::ConfigInvalid(
+                        "xray tls allow_insecure is not supported by Xray ≥26; \
+                         migrate to pinned_peer_cert_sha256 (and/or verify_peer_cert_by_name)"
+                            .into(),
                     ));
                 }
             }
@@ -204,10 +232,18 @@ impl XrayDriver {
             XraySecurity::Tls(tls) => {
                 let mut settings = serde_json::Map::new();
                 settings.insert("serverName".into(), serde_json::json!(tls.server_name));
-                settings.insert(
-                    "allowInsecure".into(),
-                    serde_json::json!(tls.allow_insecure),
-                );
+                // Xray ≥26 removed `allowInsecure`; pinning is the supported
+                // path. Emit only the pin/verify fields when configured.
+                if let Some(pcs) = &tls.pinned_peer_cert_sha256 {
+                    if !pcs.trim().is_empty() {
+                        settings.insert("pinnedPeerCertSha256".into(), serde_json::json!(pcs));
+                    }
+                }
+                if let Some(vcn) = &tls.verify_peer_cert_by_name {
+                    if !vcn.trim().is_empty() {
+                        settings.insert("verifyPeerCertByName".into(), serde_json::json!(vcn));
+                    }
+                }
                 ("tls", Some(settings))
             }
             XraySecurity::Reality(r) => {
@@ -472,9 +508,23 @@ mod tests {
         let mut cfg = sample_config();
         cfg.security = XraySecurity::Tls(XrayTls {
             server_name: "  ".into(),
+            pinned_peer_cert_sha256: None,
+            verify_peer_cert_by_name: None,
             allow_insecure: false,
         });
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn allow_insecure_true_is_rejected() {
+        let mut cfg = sample_config();
+        cfg.security = XraySecurity::Tls(XrayTls {
+            server_name: "sni.example.com".into(),
+            pinned_peer_cert_sha256: None,
+            verify_peer_cert_by_name: None,
+            allow_insecure: true,
+        });
+        assert!(cfg.validate().is_err(), "allowInsecure must be rejected");
     }
 
     #[test]
@@ -491,7 +541,11 @@ mod tests {
         };
         cfg.security = XraySecurity::Tls(XrayTls {
             server_name: "sni.example.com".to_string(),
-            allow_insecure: true,
+            pinned_peer_cert_sha256: Some(
+                "e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9".into(),
+            ),
+            verify_peer_cert_by_name: Some("alt.example.com".into()),
+            allow_insecure: false,
         });
         let driver = XrayDriver::new(DriverId::Xray, cfg);
         let json: serde_json::Value =
@@ -503,6 +557,19 @@ mod tests {
         assert_eq!(
             out["streamSettings"]["tlsSettings"]["serverName"],
             "sni.example.com"
+        );
+        // Xray ≥26: allowInsecure must never be emitted; pinning fields are.
+        assert!(
+            out["streamSettings"]["tlsSettings"].get("allowInsecure").is_none(),
+            "allowInsecure must not appear in the generated config"
+        );
+        assert_eq!(
+            out["streamSettings"]["tlsSettings"]["pinnedPeerCertSha256"],
+            "e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9"
+        );
+        assert_eq!(
+            out["streamSettings"]["tlsSettings"]["verifyPeerCertByName"],
+            "alt.example.com"
         );
         assert_eq!(out["streamSettings"]["wsSettings"]["path"], "/ws");
         let user = &out["settings"]["vnext"][0]["users"][0];
