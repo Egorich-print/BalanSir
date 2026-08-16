@@ -1,180 +1,123 @@
-# BalanSir — Architecture Audit
+# BalanSir — Architecture (canonical)
 
-> Дата: 2026-08-07 | Режим: read-only аудит кода | Объект: `crates/` (52 файла)
+> Единый канонический архитектурный документ. Дата ревизии: 2026-08-16.
+> Отражает фактический код (`crates/`, main: HEAD). Устаревшие версии: `docs/ARCHITECTURE_AUDIT_2026-08-14.md`.
 
 ---
 
-## 1. Dependency graph
+## 1. Назначение
+
+Прозрачный шлюз (RPi 3B+ / Proxmox VM / QEMU) между ISP WAN и LAN:
+USB-WAN / eth0-LAN с явными ролями портов, MAC-клонирование, DNS-фильтрация
+(Pi-hole role), NAT, B4 (path-MTU / DPI), VPN-туннели, OTA. Код — Rust,
+workspace из 10 crates.
+
+## 2. Workspace (10 crates) и границы
 
 ```
-                      +---------------------+
-                      |  balansir-common    |   (base layer; pure types/traits)
-                      +---------------------+
-                        ^        ^        ^
-                        |        |        |
-              +---------+        |        +---------+
-              |                 |                  |
-   +----------+--------+   +----+-------------+   ++----------------+
-   | balansir-control  |   | balansir-daemon |   | balansir-executor|
-   | (control plane)   |   | (drivers+recon) |   | (priv kernel ops)|
-   +-------------------+   +-----------------+   +------------------+
-            ^                       ^                     ^
-            |                       |                     |
-            +----- depends on ------+                     |
-                                    |                     |
-                          +---------+---------+           |
-                          |   balansir-api    |          |
-                          |  (HTTP/axum port) |          |
-                          +-------------------+          |
-                                                        |
-                              +-------------------------+
-                              |   balansir-tests    |
-                              | (integration tests) |
-                              +---------------------+
+balansir-common    базовый слой: DTO, Action, Matcher types, IPC (postcard), QoS, ops
+balansir-control   hexagonal control plane: traits {DesiredProvider, StateProvider,
+                   Planner, Executor, SnapshotStore, EventSink, Rollback} + Coordinator
+balansir-daemon    unprivileged daemon: policy engine, drivers, reconciliation, DNS,
+                   B4 (b4_dpi + b4_engine + b4_manager), network_config, VPN/Xray mgr
+balansir-executor  privileged: shell-out to ip/nft/tailscale/... по whitelist-операциям
+balansir-api       HTTP (axum): админ-API, подключается к control plane через reconciler
+balansir-b4        DPI-движок (NFQUEUE sniffing): извлечение SNI/TLS, классификация
+balansir-vpn       VPN-абстракции (wireguard/amneziawg/hysteria/xray)
+balansir-health    health-телефония для policy engine
+balansir-ota       A/B-слоты, подписанные манифесты, rollback
+balansir-tests     интеграционные тесты
 ```
 
-- Циклов нет. `common` — leaf, никто из crate'ов не зависит обратно наверх.
-- Проверено трассировкой всех 69 `use balansir_*` и всех `Cargo.toml [dependencies]`.
+Зависимости: `common` — leaf. `daemon`/`control` не зависят от `executor` напрямую —
+только через DTO из `common` (IPC поверх unix-socket, postcard). Циклов нет.
 
----
+## 3. Модель политики (единая)
 
-## 2. Границы модулей — где чисто
+- `crates/balansir-daemon/src/policy/` — `PolicyEngine`, `PolicyRule { matcher: Matcher, action: Action }`.
+- `Action` — `crates/balansir-common/src/types.rs:281`: `Route | Mark | Forward { driver } | Block | Reject | Allow | Shape | Log | Queue { num }`.
+- Цепочка целостности: **Matcher → Decision → Executor**. Решение принимает policy,
+  исполнение — только через IPC в executor. Daemon не трогает kernel напрямую.
+- Решение по каждому новому соединению принимает `path_decision` (`path_decision.rs`),
+  классификацию даёт `dns_plane`/`DnsRegistry` + `b4_dpi`.
+- **Единый словарь**: нет параллельных enum'ов для классификации DNS. Старый
+  `DnsClassification {Direct,Block,B4,Vpn}` удалён вместе с мёртвым `dns_filter.rs`.
 
-### 2.1 balansir-control — hexagonal-ядро
+## 4. DNS (канонический стек)
 
-`crates/balansir-control/src/traits.rs` определяет 6 портов:
+- **Единственный listener**: `crates/balansir-daemon/src/dns.rs` (`DnsForwarderDriver`,
+  wired в `main.rs` через `BALANSIR_DNS_CONFIG`). UDP-форвардер, round-robin failover по upstreams.
+- **Фильтрация встроена** (Pi-hole role): `DnsForwarderConfig { blocklist, allowlist }`.
+  Домен извлекается через `dns_plane::query_name`; суффикс-матчинг (запись покрывает
+  домен и поддомены); `allowlist` перекрывает `blocklist`. Заблокированный запрос
+  отвечается NXDOMAIN локально, **в upstream не уходит** и в registry не попадает.
+- **Наблюдения**: каждый пропущенный ответ идёт через `dns_plane::ingest(registry, query, resp)`
+  (`dns_plane.rs:301`) в общий `DnsRegistry` (`reconciliation/dns_flow.rs`, `DnsRegistry::insert`).
+  Registry — единственная точка истины "домен → IP" для flow compiler и B4.
+- Cached-ответы не пере-парсятся (TTL кеша ограничивает свежесть registry).
 
-- `DesiredProvider`, `StateProvider`, `Planner`, `Executor`, `SnapshotStore`, `EventSink`
-- + `Rollback` (пока живёт в `coordinator.rs:93`, стоит перенести в `traits.rs`)
+## 5. Gateway / роли портов
 
-`Coordinator` (`coordinator.rs:152`)_wireно собирается из `Config` (`Arc<dyn ...>`
-семи портов). **Координатор не видит ни одного daemon-типа** — это эталон
-гексагональной границы.
+- Канон: `network_config.rs` + `main.rs::apply_network_config` (роли WAN/LAN,
+  MAC-клонирование через executor `InterfaceOp::SetMac/RestoreMac`).
+- Мёртвые дубликаты **удалены**: `gateway.rs` и `upnp.rs` (не компилировались,
+  ссылались на несуществующие executor-операции `set_interface_ip/enable_nat/
+  enable_forwarding/mgmt_firewall/set_mac/add_dnat/remove_dnat`).
+- **Реальный пробел**: executor НЕ имеет NAT / firewall / DNAT / IP-forwarding /
+  set-ip операций (`InterfaceOp` — только Get/SetMac/RestoreMac). NAT и UPnP на шлюзе
+  **не реализованы** — это открытая фича (см. §9).
 
-### 2.2 Драйверы — чистый lifecycle
+## 6. Executor IPC surface (подтверждено)
 
-Все 6 драйверов (`wireguard.rs`, `amneziawg.rs`, `xray.rs`, `hysteria.rs`, `b4.rs`,
-`dns.rs`) реализуют только `ComponentDriver::{start, stop, restart, health_check}`.
-**Ни один не выбирает "какой драйвер запустить"** — выбор делает `policy/mod.rs`
-через `Action::Forward { driver: DriverId }`.
+`balansir-common`:
+- `InterfaceOp { Get, SetMac, RestoreMac }` — `network.rs:136`
+- `TailscaleOp { Status, Up, Down, Reconnect, SetRoutes }` — `network.rs:110`
+- `QosOp` — `qos.rs:175`
+- `DpiOp` — `types.rs:534` (DPI-bypass queue rules)
+- `MsgType::QosOp | DpiOp | ...` — `ipc.rs:53-67`
 
-### 2.3 balansir-executor — изолирован
+Нет операций NAT/firewall/DNAT/SetInterfaceIp → фича незакрыта, не дублирована.
 
-Executor не зависит от `daemon`/`control`. `lib.rs` = `pub mod executor; pub mod nftables;`,
-`executor.rs` — trait + `DummyExecutor`, `nftables.rs` — shells out to `nft`.
-Политики нет.
+## 7. Startup flow (main.rs)
 
----
+`startup::load_startup_desired` → `Reconciler::new` → `sync_actual_from_executor`
+(inventory) → **initial reconcile** (fail-close: недоступность → откат, ActualState
+не мутируется) → `apply_network_config(executor)` (роли+MAC) →
+`reconciler.run_loop()` + `dns_loop()` (DnsForwarder + ingest в registry) →
+flow compiler подключён → `b4_manager::B4Manager` (path-MTU контроллер per-flow) →
+`b4_dpi::DpiManager` (NFQUEUE) → xray/vpn manager → `server::api_bind()` (HTTP API).
 
-## 3. Где нарушена чистота — leaks
+## 8. Известные точки переработки / чистые места
 
-### 3.1 [HIGH] `DaemonRunner` вмещает 3 порта + inline-политику
-`crates/balansir-daemon/src/reconciliation/mod.rs:243-334`
+- **Чисто**: `balansir-control` гексагонален (Coordinator видит только порты).
+  Daemon-адаптеры расщеплены: `reconciliation/adapters.rs` —
+  `DaemonActualStore`, `DaemonDesiredProvider`, `DaemonExecutorAdapter`,
+  `DaemonRollback` (устаревший монолит `DaemonRunner` больше не существует).
+- **API подключён к control plane** (`plane.reconcile_api()`, `trigger_reconcile`).
+- **Сильно**: kernel-работа спрятана за executor IPC; daemon не содержит
+  прямых `Command`/nftable-вызовов в policy-пути; 0 `unsafe` (кроме getpeereid в IPC).
+- **Форматирование**: часть файлов имеет fmt-отклонения (network_config, vpn_manager,
+  ota/slot) — артефакт параллельных правок; CI fmt не пройден до их фиксации.
 
-`DaemonRunner` одновременно реализует `StateProvider`, `Executor` и `Rollback`,
-обернув один `Arc<Mutex<ActualState>>`. `impl Executor::execute` (`:255-324`):
-- pattern-matches `ReconciliationOperation` (UpdatePolicy/RemovePolicy/NoOp, catch-all `_ => {}` — **молча проглатывает** `CreateDriver`/`DropDriver`);
-- строит full `ActionRequest` + **синтезирует `DecisionTrace{policy_id:0, steps:[], correlation_id:0}`** — изобретает policy decision внутри executor-адаптера;
-- мутирует `ActualState` напрямую.
+## 9. Открытые фичи / blockers (не дубликаты)
 
-Это смешивает read-state, execute и actual-store. Чисто: разделить на
-`DaemonActualStore`, `DaemonExecutorAdapter`, `DaemonRollback`; actual-mutation
-поднять в `Coordinator`/отдельный порт.
+1. **NAT/UPnP/management firewall не реализованы** — executor не имеет соответствующих ops.
+2. **B4 TCP reassembly** фрагментированного ClientHello отсутствует (`balansir-b4/src/{engine,packet}.rs`,
+   `extract_tls_sni` возвращает None при фрагментации) — базовое требование пути B4.
+3. **Xray `allowInsecure`** (`daemon/src/xray.rs:208`) несовместим с xray 26.7.28.
+4. QEMU slirp: смена MAC активного eth0 рвёт сеть (свойство user-mode networking).
+5. Rootfs VM эфемерный — пересборка: `sync-to-vm.sh 2222` (после commit), builder `/home/builder/br-qemu`, `make balansir-rebuild all`.
 
-### 3.2 [HIGH] `Rollback` — paper rollback
-`reconciliation/mod.rs:326-334`
+## 10. Как добавлять новую фичу (ownership map)
 
-`rollback()` восстанавливает только in-memory `ActualState`. Он **не отменяет**
-nftables rules / `ip link` deletes, которые executor уже применил. Контракт `Rollback`
-("восстановить систему") не выполняется. Координатор честно репортит `Failed`, но
-откат физически неполный.
+| Слой | Что здесь живёт | Куда добавлять |
+|------|-----------------|----------------|
+| config/decision | правила, Action, роли | `policy/`, `types.rs`, `network_config.rs` |
+| DNS-наблюдения | домен→IP для policy | `dns.rs` (listener), `dns_plane::ingest` → `DnsRegistry` |
+| kernel-операции | ip/nft/tailscale | `balansir-executor` (новая Op в `common` + whitelist) |
+| B4 | DPI sniff / path-MTU | `balansir-b4` (engine), `b4_dpi.rs`, `b4_manager.rs` |
+| Xray/VPN | туннели | `xray.rs`/`xray_manager.rs`, `vpn_manager.rs`, `balansir-vpn` |
+| OTA | A/B обновления | `balansir-ota` |
 
-### 3.3 [HIGH] `balansir-api` не подключён к control plane
-`crates/balansir-api/src/handlers.rs:23-96`
-
-`balansir-api` не зависит ни от `daemon`, ни от `control`. Вместо использования
-`Coordinator::reconcile(ApiRequest)` он держит собственный `ReconcilerHandle`
-(stub) с `trigger_reconcile()`, который только инкрементирует counter (`:91-95`).
- Handlers `get_actual`, `list_drivers`, `restart_driver`, `get_drift` возвращают
-hardcoded `{"rules":[]}` с `// TODO` (`:262, 292, 304, 316`).
-
-`ReconcileReason::ApiRequest` объявлен (`events.rs:85`) и **никогда не используется**.
-
-**Решение:** API должен зависеть от `balansir-control`, держать
-`Arc<dyn DesiredProvider>` + триггерить `Coordinator::reconcile(ApiRequest)`.
-
-### 3.4 [MEDIUM] Re-export фасадная утечка common-символов
-`reconciliation/mod.rs:2-4` реэкспортирует `balansir_common::diff`, `plan`,
-`ActualRule`, `ActualState` под namespace daemon'а. `tests/stress.rs:9` импортирует
-`balansir_daemon::reconciliation::diff::StateDiff` — потребитель не понимает, что
-тип живёт в `common`. Убрать re-export, импортировать из `balansir_common`.
-
-### 3.5 [MEDIUM] `Rollback` trait не в `traits.rs`
-Определён в `coordinator.rs:93`, рядом с потребителем, а не с пятью братьями в
-`traits.rs`. Перенести вместе с `NoopRollback`.
-
----
-
-## 4. Hardware/kernel vs pure policy — карта daemon crate
-
-```
-HARDWARE / KERNEL-TOUCHING          PURE POLICY / LOGIC
-----------------------------------  ----------------------------------
-netlink.rs:1-178   (rtnetlink)      policy/mod.rs:1-187
-wireguard.rs:1-190 (ip + /sys)      policy/matcher.rs:1-313
-amneziawg.rs:1-248 (lsmod + ip)     policy/rules.rs:1-190
-xray.rs:1-204      (child + pgrep)  policy/fast_match.rs:1-172
-hysteria.rs:1-374  (child + pkill) health.rs:1-182
-b4.rs:1-275        (child + pkill)  reconciliation/mod.rs:1-377 (prod)
-dns.rs:1-196       (ss)             reconciliation/bootstrap.rs:1-128
-driver.rs:5-49     (trait defs)     main.rs:1-111 (IPC loop only)
-```
-
-`reconciliation/mod.rs` чистый (нет `Command`, нет `ip`, нет `/sys`) — вся
-kernel-работа спрятана за `ExecutorAdapter`. Это **сильное место архитектуры**.
-
----
-
-## 5. God-files / God-structs
-
-### Files > 400 строк
-| Lines | File | Вердикт |
-|------:|------|---------|
-| 481 | `balansir-daemon/src/reconciliation/mod.rs` | Flag. Содержит `Reconciler`, `Config`, `ExecutorAdapter`, `DaemonDesiredProvider`, `DaemonRunner` (3 trait impls), `TracingEventSink`, `DummyExecutorAdapter` + 3 теста. Разбить: `reconciler.rs` / `adapters.rs` / `sinks.rs` / `dummy.rs`. |
-| 445 | `balansir-control/src/coordinator.rs` | Пограничный. FSM + Config + Coordinator + Rollback trait + 6 тестов. Перенести `Rollback` в `traits.rs`, тесты в `tests/coordinator.rs`. |
-
-God-structs **не найдено** — у всех struct'ов cohesive fields. `Coordinator::Config`
-держит 7 порт-trait-objects — это размер гексагона, естественен.
-
-### Прочие структурные запахи
-- `ReconcileReason::ApiRequest` (`events.rs:85`) объявлен — нигде не используется.
-- `Reconciler::from_state_store` (`mod.rs:107`) дублирует `bootstrap::bootstrap` (`bootstrap.rs:8`) — проверить на dead code.
-- `XrayDriver` имеет `Drop` (`xray.rs:116`), `Hysteria2Driver`/`B4Driver` — **нет**: дочерний процесс утечит, если `stop()` не вызвали (cleanup через `pkill -f` fragile).
-- `DaemonRunner::execute` `_ => {}` проглатывает `CreateDriver`/`DropDriver` молча.
-
----
-
-## 6. Сильные места (следует сохранить)
-
-1. **Гексагональный `balansir-control`** — Coordinator видит только порты. Daemon можно
-   заменить на Kubernetes controller, реализовав те же 6 трейтов.
-2. **Строгая DAG зависимостей** — циклов нет, common — leaf.
-3. **Драйверы = lifecycle-only** — ни одного inter-driver решения; выбор только через
-   `Action::Forward`. Принцип "policy > mechanism" выдержан в коде.
-4. **Executor изолирован** — нет `use balansir_daemon`/`control`, только DTO из `common`.
-5. **Нулевые `unsafe`/`sh -c`/`expect`** в production-коде. Один production `unsafe`
-   (`ipc.rs:72` getpeereid) — корректен и typed-mapped.
-6. **CI полный**: fmt + clippy `-D warnings` + tests + матрица stable/nightly +
-   кросс-сборка x86_64/aarch64/riscv64 + release по тегу.
-7. **typed errors** (`thiserror`) в control plane и `balansir_common::Error`.
-
----
-
-## 7. Рекомендуемые приоритеты (см. ROADMAP.md)
-
-- **S1**Secutiry-runtime (Critical ×6): сокет в `/run/balansir/`, права 0600, секреты
-  в `/run/balansir/` 0600, fsync StateStore, hardening executor systemd.
-- **A1** API → control: подключить `Coordinator::reconcile(ApiRequest)`.
-- **A2** `DaemonRunner` split + `Rollback` настоящий (через executor IPC undo).
-- **A3** Policy engine ↔ Health: `evaluate(ctx, health_view)` + `rule.fallback`.
-- **Q1** Async drivers: `tokio::process::Command` + `tokio::fs`.
+Правило: **новое kernel-касание — только через executor Op**. Daemon никогда
+не вызывает `ip`/`nft` напрямую.
