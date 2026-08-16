@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use balansir_common::{Capabilities, DriverError, DriverId, HealthStatus};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,7 +22,16 @@ const FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
 /// not re-write TTLs; 30s is a safe floor for typical A/AAAA records).
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
-/// DNS forwarder configuration
+/// DNS forwarder configuration.
+///
+/// The forwarder is the single LAN DNS listener (mission Pi-hole/AdGuard
+/// role). A query whose domain (or any parent suffix) matches `blocklist` is
+/// answered locally with NXDOMAIN and never sent upstream; `allowlist`
+/// overrides the blocklist for a domain and all of its subdomains. Resolution
+/// for every allowed domain goes through `upstreams` with round-robin
+/// failover, and each forwarded response feeds the shared `DnsRegistry` — the
+/// same policy-plane observation truth the flow compiler and B4 read. There is
+/// no second DNS listener/classifier/registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsForwarderConfig {
     /// Listen address
@@ -37,6 +46,12 @@ pub struct DnsForwarderConfig {
     pub cache_size: usize,
     /// Enable DNS logging
     pub log_queries: bool,
+    /// Blocklist: domains (and their subdomains) answered with NXDOMAIN.
+    #[serde(default)]
+    pub blocklist: Vec<String>,
+    /// Allowlist: domains (and their subdomains) that override the blocklist.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
 }
 
 impl Default for DnsForwarderConfig {
@@ -48,6 +63,8 @@ impl Default for DnsForwarderConfig {
             dot: false,
             cache_size: 10000,
             log_queries: false,
+            blocklist: Vec::new(),
+            allowlist: Vec::new(),
         }
     }
 }
@@ -106,6 +123,78 @@ async fn forward_query(query: &[u8], upstream: SocketAddr) -> Option<Vec<u8>> {
     }
 }
 
+/// DNS filtering decision for a queried domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainDecision {
+    /// Resolve through the upstreams as usual.
+    Pass,
+    /// Answer locally with NXDOMAIN; never send the query upstream.
+    Block,
+}
+
+/// Classify a query domain against the blocklist/allowlist.
+///
+/// A list entry matches the domain itself and every subdomain (suffix match),
+/// so a single `example.com` entry covers `a.example.com` and `x.y.example.com`.
+/// The allowlist wins over the blocklist at every depth: `ads.example.com` in
+/// the allowlist unblocks that exact domain even when `example.com` is blocked.
+fn classify_domain(
+    domain: &str,
+    block: &HashSet<String>,
+    allow: &HashSet<String>,
+) -> DomainDecision {
+    let lower = domain.trim_end_matches('.').to_ascii_lowercase();
+    let mut labels: Vec<&str> = lower.split('.').collect();
+    // Check the fully-qualified name first (most specific), then each parent.
+    while !labels.is_empty() {
+        let candidate = labels.join(".");
+        if allow.contains(&candidate) {
+            return DomainDecision::Pass;
+        }
+        if block.contains(&candidate) {
+            return DomainDecision::Block;
+        }
+        labels.remove(0);
+    }
+    DomainDecision::Pass
+}
+
+/// Build a minimal NXDOMAIN response mirroring the query's header (echo the
+/// query id, set QR + NXDOMAIN, zero answers) so DNS clients see a normal,
+/// cacheable negative answer with no upstream round-trip.
+fn nxdomain_response(query: &[u8]) -> Vec<u8> {
+    let mut resp = query.to_vec();
+    if resp.len() >= 2 {
+        resp[0] = query[0];
+        resp[1] = query[1];
+    }
+    if resp.len() >= 4 {
+        // QR=1, opcode preserved, RD preserved; RCODE=3 (NXDOMAIN).
+        resp[2] = (query[2] & 0x78) | 0x80;
+        resp[3] = (query[3] & 0x07) | 0x03;
+    }
+    // ANCOUNT = NSCOUNT = ARCOUNT = 0.
+    for i in 6..12 {
+        if resp.len() > i {
+            resp[i] = 0;
+        }
+    }
+    resp
+}
+
+/// DNS filtering sets shared by the forward loop (blocklist/allowlist).
+#[derive(Clone)]
+struct DnsFilterSets {
+    block: std::sync::Arc<HashSet<String>>,
+    allow: std::sync::Arc<HashSet<String>>,
+}
+
+impl DnsFilterSets {
+    fn classify(&self, domain: &str) -> DomainDecision {
+        classify_domain(domain, &self.block, &self.allow)
+    }
+}
+
 /// UDP DNS forwarding loop. Answers queries from `socket`, failing over
 /// across `upstreams` in round-robin order, and caches responses.
 ///
@@ -113,7 +202,8 @@ async fn forward_query(query: &[u8], upstream: SocketAddr) -> Option<Vec<u8>> {
 /// policy plane), every response forwarded from an upstream is parsed and its
 /// A/AAAA answer set is recorded — so real DNS traffic feeds the flow
 /// compiler and the B4 observer. Cached responses are not re-parsed (the
-/// cache TTL bounds registry freshness).
+/// cache TTL bounds registry freshness). Blocked domains are answered with
+/// NXDOMAIN without an upstream round-trip and never reach the registry.
 async fn forward_loop(
     socket: UdpSocket,
     upstreams: Vec<SocketAddr>,
@@ -121,6 +211,7 @@ async fn forward_loop(
     cache_size: usize,
     log_queries: bool,
     registry: Option<Arc<DnsRegistry>>,
+    filter: DnsFilterSets,
 ) {
     let mut round_robin = 0usize;
     let mut buf = vec![0u8; 4096];
@@ -135,6 +226,20 @@ async fn forward_loop(
         }
         if log_queries {
             tracing::debug!(from = %peer, bytes = n, "dns query");
+        }
+
+        // DNS filtering: blocklist/allowlist decide locally, before any
+        // upstream contact (a blocked query never leaks to a resolver).
+        let decision = crate::dns_plane::query_name(&query)
+            .map(|domain| filter.classify(&domain))
+            .unwrap_or(DomainDecision::Pass);
+        if log_queries {
+            tracing::debug!(domain = ?crate::dns_plane::query_name(&query), decision = ?decision, "dns filter");
+        }
+        if decision == DomainDecision::Block {
+            let response = nxdomain_response(&query);
+            let _ = socket.send_to(&response, peer).await;
+            continue;
         }
 
         let response = match cache.get(&query) {
@@ -244,6 +349,24 @@ impl ComponentDriver for DnsForwarderDriver {
 
         let cache = DnsCache::default();
         let registry = self.registry.clone();
+        let filter = DnsFilterSets {
+            block: std::sync::Arc::new(
+                self.config
+                    .blocklist
+                    .iter()
+                    .map(|d| d.trim_end_matches('.').to_ascii_lowercase())
+                    .filter(|d| !d.is_empty())
+                    .collect(),
+            ),
+            allow: std::sync::Arc::new(
+                self.config
+                    .allowlist
+                    .iter()
+                    .map(|d| d.trim_end_matches('.').to_ascii_lowercase())
+                    .filter(|d| !d.is_empty())
+                    .collect(),
+            ),
+        };
         let task = tokio::spawn(forward_loop(
             socket,
             upstreams,
@@ -251,6 +374,7 @@ impl ComponentDriver for DnsForwarderDriver {
             self.config.cache_size,
             self.config.log_queries,
             registry,
+            filter,
         ));
 
         self.task = Some(task);
@@ -517,6 +641,164 @@ mod tests {
         assert!(cache.get(b"q").is_none());
         cache.put(b"q".to_vec(), b"r".to_vec(), 1);
         assert_eq!(cache.get(b"q"), Some(b"r".to_vec()));
+    }
+
+    fn sets(
+        block: &[&str],
+        allow: &[&str],
+    ) -> (
+        std::sync::Arc<HashSet<String>>,
+        std::sync::Arc<HashSet<String>>,
+    ) {
+        (
+            std::sync::Arc::new(block.iter().map(|s| s.to_string()).collect()),
+            std::sync::Arc::new(allow.iter().map(|s| s.to_string()).collect()),
+        )
+    }
+
+    #[test]
+    fn classify_block_exact_and_subdomains() {
+        let (block, allow) = sets(&["ads.example.com"], &[]);
+        assert_eq!(
+            classify_domain("ads.example.com", &block, &allow),
+            DomainDecision::Block
+        );
+        assert_eq!(
+            classify_domain("x.ads.example.com", &block, &allow),
+            DomainDecision::Block
+        );
+        assert_eq!(
+            classify_domain("example.com", &block, &allow),
+            DomainDecision::Pass
+        );
+    }
+
+    #[test]
+    fn classify_allowlist_overrides_blocklist() {
+        let (block, allow) = sets(&["example.com"], &["safe.example.com"]);
+        assert_eq!(
+            classify_domain("example.com", &block, &allow),
+            DomainDecision::Block
+        );
+        assert_eq!(
+            classify_domain("safe.example.com", &block, &allow),
+            DomainDecision::Pass
+        );
+        assert_eq!(
+            classify_domain("deep.safe.example.com", &block, &allow),
+            DomainDecision::Pass
+        );
+    }
+
+    #[test]
+    fn classify_unmatched_passes() {
+        let (block, allow) = sets(&[], &[]);
+        assert_eq!(
+            classify_domain("youtube.com", &block, &allow),
+            DomainDecision::Pass
+        );
+    }
+
+    #[test]
+    fn nxdomain_echoes_id_and_rcode() {
+        let query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00";
+        let resp = nxdomain_response(query);
+        assert_eq!(resp[0], 0x12);
+        assert_eq!(resp[1], 0x34);
+        assert_eq!(resp[2] & 0x80, 0x80); // QR=1
+        assert_eq!(resp[3] & 0x0f, 0x03); // NXDOMAIN
+        assert_eq!(&resp[6..8], &[0, 0]); // ANCOUNT=0
+    }
+
+    #[tokio::test]
+    async fn blocked_domain_answered_locally_without_upstream() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let upstream = mock_upstream(hits.clone());
+        let registry = DnsRegistry::new();
+        let mut driver = DnsForwarderDriver::new(
+            DriverId::DnsForwarder,
+            DnsForwarderConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                upstreams: vec![upstream],
+                blocklist: vec!["ads.example.com".into()],
+                ..DnsForwarderConfig::default()
+            },
+        );
+        driver.attach_registry(std::sync::Arc::new(registry.clone()));
+        let local = {
+            driver.start().await.expect("start");
+            driver.local_addr().expect("bound")
+        };
+
+        let q = {
+            let mut v = Vec::new();
+            v.extend_from_slice(&0xABCDu16.to_be_bytes());
+            v.extend_from_slice(&0x0100u16.to_be_bytes());
+            v.extend_from_slice(&1u16.to_be_bytes());
+            v.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+            v.extend_from_slice(b"\x03ads\x07example\x03com\x00");
+            v.extend_from_slice(&1u16.to_be_bytes());
+            v.extend_from_slice(&1u16.to_be_bytes());
+            v
+        };
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(&q, local).await.unwrap();
+        let mut buf = [0u8; 4096];
+        let n = tokio::time::timeout(Duration::from_secs(3), client.recv(&mut buf))
+            .await
+            .expect("response")
+            .expect("recv");
+        let resp = &buf[..n];
+        assert_eq!(resp[0], 0xAB);
+        assert_eq!(resp[1], 0xCD);
+        assert_eq!(resp[3] & 0x0f, 0x03); // NXDOMAIN
+                                          // Never touched the upstream, never polluted the policy registry.
+        assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(registry.resolve("ads.example.com").is_none());
+        driver.stop().await.expect("stop");
+    }
+
+    #[tokio::test]
+    async fn allowlist_unblocks_a_subdomain() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let upstream = mock_upstream(hits.clone());
+        let mut driver = DnsForwarderDriver::new(
+            DriverId::DnsForwarder,
+            DnsForwarderConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                upstreams: vec![upstream],
+                blocklist: vec!["example.com".into()],
+                allowlist: vec!["safe.example.com".into()],
+                ..DnsForwarderConfig::default()
+            },
+        );
+        let local = {
+            driver.start().await.expect("start");
+            driver.local_addr().expect("bound")
+        };
+        let q = {
+            let mut v = Vec::new();
+            v.extend_from_slice(&0x1111u16.to_be_bytes());
+            v.extend_from_slice(&0x0100u16.to_be_bytes());
+            v.extend_from_slice(&1u16.to_be_bytes());
+            v.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+            v.extend_from_slice(b"\x04safe\x07example\x03com\x00");
+            v.extend_from_slice(&1u16.to_be_bytes());
+            v.extend_from_slice(&1u16.to_be_bytes());
+            v
+        };
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(&q, local).await.unwrap();
+        let mut buf = [0u8; 4096];
+        let n = tokio::time::timeout(Duration::from_secs(3), client.recv(&mut buf))
+            .await
+            .expect("response")
+            .expect("recv");
+        let resp = &buf[..n];
+        // Forwarded upstream (opaque mock answer), not a local NXDOMAIN.
+        assert_eq!(resp, &[0xAB, 0xCD]);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 1);
+        driver.stop().await.expect("stop");
     }
 
     #[test]
