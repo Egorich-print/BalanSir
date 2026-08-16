@@ -187,6 +187,159 @@ impl NftablesExecutor {
             .remove_rule_by_comment(DPI_RULE_TAG)
             .map_err(|e| balansir_common::Error::Fatal(format!("remove DPI rules: {e}")))
     }
+
+    /// Tag applied to every UPnP-installed DNAT rule so the set is removable
+    /// as a whole (`RemoveAll`) and individual mappings by their comment.
+    pub const UPNP_RULE_TAG: &'static str = "balansir:upnp";
+
+    /// Name of the `nat prerouting` chain UPnP DNAT rules live in.
+    pub const UPNP_PREROUTING_CHAIN: &'static str = "prerouting";
+
+    /// Validate the parameters of an UPnP port mapping before touching the
+    /// kernel. Returns an error string on any violation.
+    fn validate_upnp_mapping(
+        external_port: u16,
+        proto: &str,
+        internal_ip: &str,
+        internal_port: u16,
+    ) -> Result<()> {
+        use std::net::IpAddr;
+        if external_port == 0 || internal_port == 0 {
+            return Err(balansir_common::Error::Misconfiguration(
+                "UPnP: port 0 is not a valid mapping".into(),
+            ));
+        }
+        let Ok(addr) = internal_ip.parse::<IpAddr>() else {
+            return Err(balansir_common::Error::Misconfiguration(format!(
+                "UPnP: invalid internal IP {internal_ip}"
+            )));
+        };
+        // Reject private-address abuse: an UPnP mapping may only target a
+        // non-loopback, non-multicast, non-unspecified address.
+        let ok = match addr {
+            IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_multicast() && !v4.is_unspecified(),
+            IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_multicast() && !v6.is_unspecified(),
+        };
+        if !ok {
+            return Err(balansir_common::Error::Misconfiguration(format!(
+                "UPnP: refused mapping to unusable internal IP {internal_ip}"
+            )));
+        }
+        let proto = proto.to_ascii_lowercase();
+        if proto != "tcp" && proto != "udp" {
+            return Err(balansir_common::Error::Misconfiguration(format!(
+                "UPnP: unsupported proto {proto}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn upnp_comment(external_port: u16, proto: &str) -> String {
+        format!("{}:{external_port}:{proto}", Self::UPNP_RULE_TAG)
+    }
+
+    /// Install or remove a single DNAT mapping in `nat prerouting`.
+    ///
+    /// Every rule carries a `balansir:upnp:<port>:<proto>` comment so mapping
+    /// updates replace rather than duplicate, and `RemoveAll` can clean the
+    /// whole UPnP set.
+    pub async fn upnp_op(
+        &self,
+        op: &balansir_common::UpnpOp,
+    ) -> balansir_common::Result<balansir_common::UpnpOpResult> {
+        use crate::nftables::{NftProto, NftRuleSpec, NftVerdict};
+        use balansir_common::UpnpOp;
+        match op {
+            UpnpOp::AddPortMapping {
+                external_port,
+                proto,
+                internal_ip,
+                internal_port,
+                wan_interface,
+            } => {
+                Self::validate_upnp_mapping(*external_port, proto, internal_ip, *internal_port)?;
+                let proto = proto.to_ascii_lowercase();
+                // Ensure the `nat prerouting` chain exists (idempotent), then
+                // drop any prior mapping for the same port+proto.
+                self.backend.ensure_hooked_chain(
+                    Self::UPNP_PREROUTING_CHAIN,
+                    &["type", "nat", "hook", "prerouting", "priority", "0", ";"],
+                )?;
+                self.backend.remove_rule_by_comment_in_chain(
+                    Self::UPNP_PREROUTING_CHAIN,
+                    &Self::upnp_comment(*external_port, &proto),
+                )?;
+                let spec = NftRuleSpec {
+                    proto: Some(if proto == "tcp" {
+                        NftProto::Tcp
+                    } else {
+                        NftProto::Udp
+                    }),
+                    src_cidr: None,
+                    dst_cidr: None,
+                    sport: None,
+                    dport: Some(*external_port),
+                    ct_state: None,
+                    iifname: Some(wan_interface.clone()),
+                    oifname: None,
+                    verdict: NftVerdict::Dnat {
+                        addr: internal_ip.parse::<std::net::Ipv4Addr>().map_err(|e| {
+                            balansir_common::Error::Misconfiguration(format!(
+                                "UPnP: internal IP {internal_ip} is not IPv4: {e}"
+                            ))
+                        })?,
+                        port: *internal_port,
+                    },
+                    mark: None,
+                    comment: Some(Self::upnp_comment(*external_port, &proto)),
+                };
+                self.backend
+                    .add_rule_to_chain(Self::UPNP_PREROUTING_CHAIN, &spec)?;
+                Ok(balansir_common::UpnpOpResult {
+                    installed: self.count_upnp_rules()?,
+                    detail: format!(
+                        "{proto} {wan_interface}:{external_port} -> {internal_ip}:{internal_port}"
+                    ),
+                })
+            }
+            UpnpOp::RemovePortMapping {
+                external_port,
+                proto,
+                ..
+            } => {
+                let proto = proto.to_ascii_lowercase();
+                self.backend.remove_rule_by_comment_in_chain(
+                    Self::UPNP_PREROUTING_CHAIN,
+                    &Self::upnp_comment(*external_port, &proto),
+                )?;
+                Ok(balansir_common::UpnpOpResult {
+                    installed: self.count_upnp_rules()?,
+                    detail: format!("removed {proto}:{external_port}"),
+                })
+            }
+            UpnpOp::RemoveAll => {
+                self.backend.remove_rule_by_comment_in_chain(
+                    Self::UPNP_PREROUTING_CHAIN,
+                    Self::UPNP_RULE_TAG,
+                )?;
+                Ok(balansir_common::UpnpOpResult {
+                    installed: 0,
+                    detail: "all UPnP mappings removed".into(),
+                })
+            }
+        }
+    }
+
+    fn count_upnp_rules(&self) -> balansir_common::Result<u32> {
+        let rules = self
+            .backend
+            .list_chain(Self::UPNP_PREROUTING_CHAIN)
+            .map_err(|e| balansir_common::Error::Fatal(format!("UPnP chain list: {e}")))?;
+        Ok(rules
+            .iter()
+            .filter(|line| line.contains(Self::UPNP_RULE_TAG))
+            .count() as u32)
+    }
 }
 
 /// Stable semantic fingerprint of a rule request (A1, ADR-015).
@@ -403,6 +556,10 @@ impl Executor for NftablesExecutor {
     async fn dpi_op(&self, op: &balansir_common::DpiOp) -> Result<balansir_common::DpiOpResult> {
         NftablesExecutor::dpi_op(self, op).await
     }
+
+    async fn upnp_op(&self, op: &balansir_common::UpnpOp) -> Result<balansir_common::UpnpOpResult> {
+        NftablesExecutor::upnp_op(self, op).await
+    }
 }
 
 /// Allowed executor operations. Anything not in this set is rejected before
@@ -425,6 +582,7 @@ fn is_allowlisted(msg_type: MsgType) -> bool {
             | MsgType::TailscaleOp
             | MsgType::DpiOp
             | MsgType::GatewayOp
+            | MsgType::UpnpOp
     )
 }
 
@@ -683,10 +841,7 @@ pub async fn dispatch(msg: &IpcMessage, services: &ExecutorServices) -> IpcMessa
         MsgType::GatewayOp => {
             let Ok(op) = postcard::from_bytes::<balansir_common::gateway::GatewayOp>(&msg.payload)
             else {
-                return IpcMessage::response_error(
-                    msg.correlation_id,
-                    "invalid GatewayOp payload",
-                );
+                return IpcMessage::response_error(msg.correlation_id, "invalid GatewayOp payload");
             };
             use balansir_common::gateway::GatewayOp as Op;
             match op {
@@ -702,6 +857,18 @@ pub async fn dispatch(msg: &IpcMessage, services: &ExecutorServices) -> IpcMessa
                     Ok(status) => data_response(msg.correlation_id, &status),
                     Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
                 },
+            }
+        }
+        // UPnP/IGD port mappings: the daemon runs the IGD control point; the
+        // executor applies the DNAT `nat prerouting` rules (single nftables
+        // owner guarantee).
+        MsgType::UpnpOp => {
+            let Ok(op) = postcard::from_bytes::<balansir_common::UpnpOp>(&msg.payload) else {
+                return IpcMessage::response_error(msg.correlation_id, "invalid UpnpOp payload");
+            };
+            match executor.upnp_op(&op).await {
+                Ok(result) => data_response(msg.correlation_id, &result),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
             }
         }
         _ => IpcMessage::response_error(msg.correlation_id, "operation not allowed"),
@@ -1108,5 +1275,43 @@ mod tests {
         // Same id, different action -> different fingerprint ("same id != same rule").
         base.action = balansir_common::Action::Allow;
         assert_ne!(rule_fingerprint(&base), fp);
+    }
+
+    /// UPnP mapping validation is strict: port 0, unusable internal IPs and
+    /// unsupported protocols are all rejected before any kernel call.
+    #[test]
+    fn upnp_mapping_validation_rejects_abuse() {
+        use crate::service::NftablesExecutor as E;
+        // Port 0.
+        assert!(E::validate_upnp_mapping(0, "tcp", "192.168.3.10", 80).is_err());
+        // Loopback target.
+        assert!(E::validate_upnp_mapping(8080, "tcp", "127.0.0.1", 80).is_err());
+        // Multicast target.
+        assert!(E::validate_upnp_mapping(8080, "tcp", "224.0.0.1", 80).is_err());
+        // Unspecified target.
+        assert!(E::validate_upnp_mapping(8080, "tcp", "0.0.0.0", 80).is_err());
+        // Unsupported protocol.
+        assert!(E::validate_upnp_mapping(8080, "icmp", "192.168.3.10", 80).is_err());
+        // Garbage IP.
+        assert!(E::validate_upnp_mapping(8080, "tcp", "not-an-ip", 80).is_err());
+        // Valid mapping passes (case-insensitive proto).
+        assert!(E::validate_upnp_mapping(8080, "TCP", "192.168.3.10", 80).is_ok());
+    }
+
+    /// The UpnpOp message is allowlisted and dispatched (a DummyExecutor
+    /// returns Unsupported, but the op is not rejected at the allowlist).
+    #[tokio::test]
+    async fn upnp_op_is_allowlisted_and_dispatched() {
+        let services = dummy_services();
+        let op = balansir_common::UpnpOp::RemoveAll;
+        let payload = postcard::to_allocvec(&op).unwrap();
+        let resp = dispatch(&message(MsgType::UpnpOp, payload), &services).await;
+        // The op reached dispatch (it was not rejected at the allowlist): the
+        // error is the DummyExecutor's Unsupported, not "operation not allowed".
+        assert_eq!(resp.msg_type, MsgType::ResponseError);
+        assert!(
+            !String::from_utf8_lossy(&resp.payload).contains("operation not allowed"),
+            "UpnpOp must be allowlisted; the error must come from dispatch"
+        );
     }
 }

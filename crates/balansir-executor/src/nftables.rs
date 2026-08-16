@@ -122,14 +122,7 @@ impl NftablesBackend {
         }
         spec.push_str(" }");
         self.create_if_absent(
-            [
-                "add",
-                "chain",
-                "inet",
-                &self.table_name,
-                name,
-                &spec,
-            ],
+            ["add", "chain", "inet", &self.table_name, name, &spec],
             "chain",
         )
     }
@@ -197,14 +190,7 @@ impl NftablesBackend {
     ) -> Result<Option<String>> {
         validate_identifier(chain)?;
         let output = Command::new(nft_bin()?)
-            .args([
-                "-a",
-                "list",
-                "chain",
-                "inet",
-                &self.table_name,
-                chain,
-            ])
+            .args(["-a", "list", "chain", "inet", &self.table_name, chain])
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -454,6 +440,12 @@ pub enum NftVerdict {
     },
     /// NAT: masquerade the source on egress (gateway datapath).
     Masquerade,
+    /// NAT: destination redirect to an internal host:port (UPnP/IGD port
+    /// mapping). Rendered in the `nat prerouting` chain.
+    Dnat {
+        addr: std::net::Ipv4Addr,
+        port: u16,
+    },
 }
 
 impl fmt::Display for NftVerdict {
@@ -469,6 +461,7 @@ impl fmt::Display for NftVerdict {
             // is the "never break the network" guarantee for DPI interception.
             NftVerdict::Queue { num } => return write!(f, "queue num {num} bypass"),
             NftVerdict::Masquerade => "masquerade",
+            NftVerdict::Dnat { addr, port } => return write!(f, "dnat to {addr}:{port}"),
         })
     }
 }
@@ -572,7 +565,16 @@ impl NftRuleSpec {
             args.push("set".to_string());
             args.push(format!("{mark}"));
         }
-        args.push(self.verdict.to_string());
+        match &self.verdict {
+            // `dnat to <ip>:<port>` is three tokens; the generic
+            // `verdict.to_string()` below only handles single-word verdicts.
+            NftVerdict::Dnat { addr, port } => {
+                args.push("dnat".to_string());
+                args.push("to".to_string());
+                args.push(format!("{addr}:{port}"));
+            }
+            _ => args.push(self.verdict.to_string()),
+        }
         if let Some(comment) = &self.comment {
             args.push("comment".to_string());
             args.push(format!("\"{comment}\""));
@@ -836,6 +838,46 @@ mod tests {
                 "dport",
                 "53",
                 "accept",
+            ]
+        );
+    }
+
+    /// UPnP DNAT rule renders `dnat to <ip>:<port>` (three tokens) with the
+    /// iifname matcher and the UPnP comment tag.
+    #[test]
+    fn dnat_verdict_renders_full_statement() {
+        let spec = NftRuleSpec {
+            proto: Some(NftProto::Tcp),
+            src_cidr: None,
+            dst_cidr: None,
+            sport: None,
+            dport: Some(8080),
+            ct_state: None,
+            iifname: Some("eth1".to_string()),
+            oifname: None,
+            verdict: NftVerdict::Dnat {
+                addr: "192.168.3.10".parse().unwrap(),
+                port: 80,
+            },
+            mark: None,
+            comment: Some("balansir:upnp:8080:tcp".to_string()),
+        };
+        assert_eq!(
+            spec.render(),
+            vec![
+                "meta",
+                "l4proto",
+                "tcp",
+                "iifname",
+                "\"eth1\"",
+                "th",
+                "dport",
+                "8080",
+                "dnat",
+                "to",
+                "192.168.3.10:80",
+                "comment",
+                "\"balansir:upnp:8080:tcp\"",
             ]
         );
     }

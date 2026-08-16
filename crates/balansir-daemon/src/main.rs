@@ -322,9 +322,7 @@ async fn main() -> Result<()> {
                                 let h = handle.clone();
                                 std::sync::Arc::new(
                                     balansir_daemon::vpn_manager::PoolXrayConsumer::new(
-                                        move |profile: Option<
-                                            &balansir_vpn::VpnProfile,
-                                        >| {
+                                        move |profile: Option<&balansir_vpn::VpnProfile>| {
                                             let h = h.clone();
                                             let profile = profile.cloned();
                                             tokio::spawn(async move {
@@ -460,7 +458,7 @@ async fn main() -> Result<()> {
 /// that guesses WAN/LAN must not run. WAN MAC is resolved in order: explicit
 /// `wan_mac`, then auto-learned L2 peer on the LAN port; when neither is
 /// available the MAC is left untouched with a warning (never a guess).
-async fn apply_network_config(executor: &ExecutorClient) {
+async fn apply_network_config(executor: &Arc<ExecutorClient>) {
     use balansir_daemon::network_config::{learn_lan_peer_mac, NetworkConfig};
 
     let config = match NetworkConfig::load() {
@@ -503,20 +501,24 @@ async fn apply_network_config(executor: &ExecutorClient) {
             .map(|i| i.link_up)
             .unwrap_or(false);
         if !up {
-            warn!(role, interface = name, "Gateway port is down (carrier absent); check cabling");
+            warn!(
+                role,
+                interface = name,
+                "Gateway port is down (carrier absent); check cabling"
+            );
         }
     }
 
     if !config.cloning_enabled() {
-        info!(wan, lan, "Gateway roles configured; WAN MAC cloning disabled");
+        info!(
+            wan,
+            lan, "Gateway roles configured; WAN MAC cloning disabled"
+        );
     } else {
         // Resolve the WAN MAC to clone: explicit config wins, then the
         // auto-learned L2 peer on the LAN port (the router). No result → warn
         // and do not change.
-        let mac = config
-            .wan_mac
-            .clone()
-            .or_else(|| learn_lan_peer_mac(lan));
+        let mac = config.wan_mac.clone().or_else(|| learn_lan_peer_mac(lan));
         let Some(mac) = mac else {
             warn!(
                 wan,
@@ -557,6 +559,41 @@ async fn apply_network_config(executor: &ExecutorClient) {
             error!("Gateway datapath apply failed: {e}");
             std::process::exit(1);
         }
+    }
+
+    // UPnP/IGD: SSDP + SOAP control point on the LAN. The IGD is LAN-only
+    // (source-checked against lan_subnet); mappings are applied as DNAT rules
+    // through the executor. WAN UPnP is blocked by the management firewall
+    // (input policy drop) and by the IGD's own LAN-subnet source check.
+    let lan_ip = interfaces
+        .iter()
+        .find(|i| i.name == lan)
+        .and_then(|i| i.ipv4.first().cloned())
+        .and_then(|ip| ip.parse::<std::net::IpAddr>().ok());
+    match lan_ip {
+        Some(lan_ip) => {
+            let upnp_port = std::env::var("BALANSIR_UPNP_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3721);
+            let upnp = std::sync::Arc::new(balansir_daemon::upnp::UpnpManager::new(
+                Some(executor.clone()),
+                lan_ip,
+                &config.lan_subnet,
+                wan,
+                upnp_port,
+            ));
+            let upnp_task = std::sync::Arc::clone(&upnp);
+            tokio::spawn(async move {
+                upnp_task.run().await;
+            });
+            info!(
+                lan_ip = %lan_ip,
+                port = upnp_port,
+                "UPnP/IGD started on LAN"
+            );
+        }
+        None => warn!("UPnP/IGD disabled: no IPv4 address found for LAN interface {lan}"),
     }
 }
 

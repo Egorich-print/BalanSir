@@ -31,3 +31,10 @@
 # wan_mac = "90:98:38:52:AE:79"
 #
 # Set clone_mac = false to disable cloning while keeping the roles.
+#
+# UPnP/IGD: the daemon runs an IGD control point (SSDP + SOAP, LAN-only,
+# source-checked against lan_subnet above) on the LAN IP of `lan_interface`.
+# Port mappings requested by LAN clients are applied as DNAT rules in the
+# executor's nat prerouting chain. WAN-side UPnP is blocked by the management
+# firewall and by the IGD's own LAN-subnet check.
+# BALANSIR_UPNP_PORT overrides the SOAP control port (default 3721).

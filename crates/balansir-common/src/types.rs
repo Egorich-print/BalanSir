@@ -554,6 +554,45 @@ pub struct DpiOpResult {
     pub detail: String,
 }
 
+/// UPnP/IGD port-mapping operation (`MsgType::UpnpOp`).
+///
+/// The daemon runs the IGD control point (SSDP + SOAP on the LAN); the actual
+/// NAT mapping is applied by the privileged executor as a `nat prerouting`
+/// DNAT rule — the daemon never touches netfilter itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UpnpOp {
+    /// Install a DNAT port mapping (idempotent per external port+proto).
+    AddPortMapping {
+        /// External (WAN) port to forward.
+        external_port: u16,
+        /// Protocol: `"tcp"` or `"udp"` (lowercase).
+        proto: String,
+        /// Internal destination address on the LAN.
+        internal_ip: String,
+        /// Internal destination port.
+        internal_port: u16,
+        /// WAN interface the incoming packets arrive on.
+        wan_interface: String,
+    },
+    /// Remove the DNAT port mapping for external port+proto.
+    RemovePortMapping {
+        external_port: u16,
+        proto: String,
+        wan_interface: String,
+    },
+    /// Remove every UPnP-installed mapping (`balansir:upnp` tag).
+    RemoveAll,
+}
+
+/// Result of an UPnP port-mapping operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpnpOpResult {
+    /// Number of UPnP mappings currently installed after the operation.
+    pub installed: u32,
+    /// Human-readable detail.
+    pub detail: String,
+}
+
 #[cfg(test)]
 mod driver_id_tests {
     use super::DriverId;

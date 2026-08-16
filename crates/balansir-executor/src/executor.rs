@@ -94,6 +94,18 @@ pub trait Executor: Send + Sync {
             "dpi_op not implemented by this executor".into(),
         ))
     }
+
+    /// Apply an UPnP/IGD port-mapping operation (install/remove DNAT rules in
+    /// `nat prerouting`). Default returns Unsupported for mechanisms that do
+    /// not manage NAT mappings.
+    async fn upnp_op(
+        &self,
+        _op: &balansir_common::UpnpOp,
+    ) -> Result<balansir_common::UpnpOpResult> {
+        Err(balansir_common::error::Error::Unsupported(
+            "upnp_op not implemented by this executor".into(),
+        ))
+    }
 }
 
 /// Dummy executor for testing

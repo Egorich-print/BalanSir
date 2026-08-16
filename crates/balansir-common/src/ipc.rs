@@ -69,6 +69,10 @@ pub enum MsgType {
     // the management firewall. Payloads are postcard `GatewayOp` /
     // `GatewayResult` / `GatewayStatus`.
     GatewayOp,
+    // UPnP/IGD port mappings: daemon runs the IGD control point (SSDP/SOAP on
+    // LAN); the executor installs the DNAT `nat prerouting` rules. Payloads are
+    // postcard `UpnpOp` / `UpnpOpResult`.
+    UpnpOp,
     ResponseOk,
     ResponseError,
     ResponseData,

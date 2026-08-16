@@ -19,7 +19,7 @@ use balansir_common::network::{
     InterfaceInfo, InterfaceOp, InterfaceResult, TailscaleOp, TailscaleResult, TailscaleStatus,
 };
 use balansir_common::qos::{AppliedQdisc, QosCapabilities, QosOp, QosResult};
-use balansir_common::{ActionRequest, ActionResult, PathMtu, Result};
+use balansir_common::{ActionRequest, ActionResult, PathMtu, Result, UpnpOp, UpnpOpResult};
 
 use crate::reconciliation::reconciler::ExecutorAdapter;
 
@@ -200,6 +200,57 @@ impl ExecutorClient {
         let payload = Self::encode(&balansir_common::gateway::GatewayOp::Status)?;
         let resp = self
             .typed_request(MsgType::GatewayOp, payload, "GatewayOp")
+            .await?;
+        Self::decode(&resp)
+    }
+
+    /// Install an UPnP/IGD DNAT port mapping in the executor's `nat prerouting`
+    /// chain. The daemon runs the IGD control point (SSDP/SOAP); the executor
+    /// owns the kernel rules.
+    pub async fn upnp_add(
+        &self,
+        external_port: u16,
+        proto: &str,
+        internal_ip: &str,
+        internal_port: u16,
+        wan_interface: &str,
+    ) -> Result<UpnpOpResult> {
+        let payload = Self::encode(&UpnpOp::AddPortMapping {
+            external_port,
+            proto: proto.to_string(),
+            internal_ip: internal_ip.to_string(),
+            internal_port,
+            wan_interface: wan_interface.to_string(),
+        })?;
+        let resp = self
+            .typed_request(MsgType::UpnpOp, payload, "UpnpOp")
+            .await?;
+        Self::decode(&resp)
+    }
+
+    /// Remove an UPnP DNAT port mapping.
+    pub async fn upnp_remove(
+        &self,
+        external_port: u16,
+        proto: &str,
+        wan_interface: &str,
+    ) -> Result<UpnpOpResult> {
+        let payload = Self::encode(&UpnpOp::RemovePortMapping {
+            external_port,
+            proto: proto.to_string(),
+            wan_interface: wan_interface.to_string(),
+        })?;
+        let resp = self
+            .typed_request(MsgType::UpnpOp, payload, "UpnpOp")
+            .await?;
+        Self::decode(&resp)
+    }
+
+    /// Remove every UPnP-installed mapping.
+    pub async fn upnp_remove_all(&self) -> Result<UpnpOpResult> {
+        let payload = Self::encode(&UpnpOp::RemoveAll)?;
+        let resp = self
+            .typed_request(MsgType::UpnpOp, payload, "UpnpOp")
             .await?;
         Self::decode(&resp)
     }

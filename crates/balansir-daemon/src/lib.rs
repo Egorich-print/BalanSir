@@ -23,6 +23,7 @@ pub mod server;
 pub mod startup;
 pub mod subsystems;
 pub mod system_stats;
+pub mod upnp;
 pub mod vpn_manager;
 pub mod wan_identity;
 #[cfg(feature = "wireguard")]
