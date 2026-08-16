@@ -81,27 +81,23 @@ impl NftablesBackend {
         // forward chain carries the policy + DPI rules; the gateway adds the
         // input / nat hooks on demand (see gateway.rs). Default policy `accept`
         // keeps existing behavior: an explicit policy rule is what restricts.
+        //
+        // nftables ≤1.1.4 (Buildroot 2026.05) does not support `policy` inside
+        // the chain creation command. Create the chain first, then set policy.
         self.create_if_absent(
             [
-                "add",
-                "chain",
-                "inet",
-                &self.table_name,
-                &self.chain_name,
-                "{",
-                "type",
-                "filter",
-                "hook",
-                "forward",
-                "priority",
-                "0",
-                "policy",
-                "accept",
-                ";",
-                "}",
+                "add", "chain", "inet", &self.table_name, &self.chain_name,
+                "{", "type", "filter", "hook", "forward", "priority", "0", ";", "}",
             ],
             "chain",
         )?;
+        // Set forward chain policy to accept (idempotent).
+        let _ = Command::new(nft_bin()?)
+            .args([
+                "chain", "inet", &self.table_name, &self.chain_name,
+                "{", "policy", "accept", ";", "}",
+            ])
+            .output();
         Ok(())
     }
 
