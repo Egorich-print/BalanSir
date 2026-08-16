@@ -15,6 +15,7 @@
   import Policy from './views/Policy.svelte';
   import Events from './views/Events.svelte';
   import Diagnostics from './views/Diagnostics.svelte';
+  import System from './views/System.svelte';
 
   export let view = 'dashboard';
 
@@ -44,6 +45,7 @@
     { id: 'xray', label: 'Xray', component: Xray },
     { id: 'vpn', label: 'VPN Pool', component: VpnPool },
     { id: 'tailscale', label: 'Tailscale', component: Tailscale },
+    { id: 'system', label: 'System', component: System },
     { id: 'events', label: 'Events', component: Events },
     { id: 'diagnostics', label: 'Diagnostics', component: Diagnostics },
   ];

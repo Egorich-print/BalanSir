@@ -21,6 +21,17 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Filesystem usage information.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FilesystemInfo {
+    pub mount_point: String,
+    pub total_mb: u64,
+    pub used_mb: u64,
+    pub available_mb: u64,
+    pub usage_percent: f64,
+    pub fstype: String,
+}
+
 /// QoS view: what the daemon intends vs. what the kernel reports.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QosSnapshot {
@@ -213,6 +224,9 @@ pub struct SystemStats {
     pub load5: f64,
     pub load15: f64,
     pub uptime_secs: u64,
+    /// Filesystem usage for mounted filesystems (excluding virtual FS).
+    #[serde(default)]
+    pub filesystems: Vec<FilesystemInfo>,
 }
 
 /// Interface throughput derived from consecutive counter samples (bits/sec).

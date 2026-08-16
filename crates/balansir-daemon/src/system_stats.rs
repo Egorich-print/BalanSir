@@ -5,6 +5,9 @@
 //! history. CPU utilization is computed from deltas between the previous
 //! and current `/proc/stat` samples (the caller keeps the previous sample).
 
+use balansir_common::subsystems::FilesystemInfo;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::time::Duration;
 
 /// A CPU time sample (`/proc/stat` first line).
@@ -99,6 +102,7 @@ pub fn system_stats(
         Some(prev) => cpu_percent(prev, &cur),
         None => 0.0,
     };
+    let filesystems = read_filesystems().unwrap_or_default();
     let stats = balansir_common::subsystems::SystemStats {
         cpu_percent: cpu.round(),
         mem_used_mb: mem_used,
@@ -107,6 +111,7 @@ pub fn system_stats(
         load5: l5,
         load15: l15,
         uptime_secs: up,
+        filesystems,
     };
     Some((stats, cur))
 }
@@ -130,57 +135,144 @@ pub fn rate_bps(prev: u64, cur: u64, elapsed: Duration) -> u64 {
     ((delta as u128) * 8000 / elapsed_ms) as u64
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Read filesystem usage from `/proc/mounts` using `statfs`.
+pub fn read_filesystems() -> Option<Vec<FilesystemInfo>> {
+    let raw = std::fs::read_to_string("/proc/mounts").ok()?;
+    let mut filesystems = Vec::new();
 
-    #[test]
-    fn cpu_percent_is_reasonable() {
-        let prev = CpuSample {
-            idle: 1000,
-            total: 2000,
-        };
-        let cur = CpuSample {
-            idle: 1100,
-            total: 2200,
-        };
-        // used = 100, total delta = 200 → 50%
-        let pct = cpu_percent(&prev, &cur);
-        assert!((pct - 50.0).abs() < 0.01);
-
-        // No progress → 0% (not NaN).
-        assert_eq!(cpu_percent(&prev, &prev), 0.0);
-    }
-
-    #[test]
-    fn cpu_percent_handles_wrap() {
-        let prev = CpuSample {
-            idle: u64::MAX - 10,
-            total: u64::MAX,
-        };
-        let cur = CpuSample { idle: 5, total: 20 };
-        // saturating deltas keep the result finite.
-        let pct = cpu_percent(&prev, &cur);
-        assert!(pct.is_finite() && (0.0..=100.0).contains(&pct));
-    }
-
-    #[test]
-    fn rate_computation() {
-        let elapsed = Duration::from_secs(2);
-        // 125000 bytes in 2s → 500000 bits/s
-        assert_eq!(rate_bps(0, 125_000, elapsed), 500_000);
-        assert_eq!(rate_bps(100, 50, elapsed), 0); // counter reset → 0
-        assert_eq!(rate_bps(1000, 1000, Duration::ZERO), 0);
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn proc_readers_work_on_linux() {
-        // These may fail in restricted sandboxes without /proc — probe gently.
-        if let (Some(mem), Some(load), Some(up)) = (mem_used_mb(), load_averages(), uptime_secs()) {
-            assert!(mem.0 <= mem.1);
-            assert!(up > 0);
-            assert!(load.0.is_finite());
+    for line in raw.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
         }
+        let _device = parts[0];
+        let mount_point = parts[1];
+        let fstype = parts[2];
+
+        // Skip virtual filesystems
+        let skip_fstypes = [
+            "proc",
+            "sysfs",
+            "devtmpfs",
+            "devpts",
+            "tmpfs",
+            "cgroup",
+            "cgroup2",
+            "autofs",
+            "pstore",
+            "efivarfs",
+            "hugetlbfs",
+            "mqueue",
+            "debugfs",
+            "tracefs",
+            "configfs",
+            "fusectl",
+            "rpc_pipefs",
+            "nfsd",
+            "binfmt_misc",
+            "nsfs",
+            "overlay",
+            "squashfs",
+        ];
+        if skip_fstypes.iter().any(|&fs| fs == fstype) {
+            continue;
+        }
+
+        let mount_point = parts[1];
+        // Skip mount points under /sys, /proc, /run, /dev (except root /dev)
+        if mount_point.starts_with("/sys") || mount_point.starts_with("/proc") {
+            continue;
+        }
+        if mount_point.starts_with("/run") && !mount_point.starts_with("/run/media") {
+            continue;
+        }
+        if mount_point.starts_with("/dev") && mount_point != "/dev" {
+            continue;
+        }
+
+        // Use statfs to get filesystem usage
+        let mount_point_cstr = std::ffi::CString::new(mount_point).ok()?;
+        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+        unsafe {
+            if libc::statfs(mount_point_cstr.as_ptr(), &mut stat) != 0 {
+                continue;
+            }
+        }
+
+        // statfs returns blocks, not bytes. Convert to MB.
+        let block_size = stat.f_bsize as u64;
+        let total_blocks = stat.f_blocks as u64;
+        let free_blocks = stat.f_bavail as u64; // available to non-root
+        let total_blocks = stat.f_blocks as u64;
+
+        let total_mb = total_blocks.saturating_mul(stat.f_bsize as u64) / 1_048_576;
+        let free_mb = stat.f_bavail as u64 * stat.f_bsize as u64 / 1_048_576;
+        let used_mb = total_mb.saturating_sub(free_mb);
+        let usage_percent = if total_mb > 0 {
+            ((total_mb - free_mb) as f64 / total_mb as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        filesystems.push(FilesystemInfo {
+            mount_point: mount_point.to_string(),
+            total_mb,
+            used_mb,
+            available_mb: free_mb,
+            usage_percent: usage_percent as f64,
+            fstype: fstype.to_string(),
+        });
+    }
+
+    Some(filesystems)
+}
+
+#[test]
+fn cpu_percent_is_reasonable() {
+    let prev = CpuSample {
+        idle: 1000,
+        total: 2000,
+    };
+    let cur = CpuSample {
+        idle: 1100,
+        total: 2200,
+    };
+    // used = 100, total delta = 200 → 50%
+    let pct = cpu_percent(&prev, &cur);
+    assert!((pct - 50.0).abs() < 0.01);
+
+    // No progress → 0% (not NaN).
+    assert_eq!(cpu_percent(&prev, &prev), 0.0);
+}
+
+#[test]
+fn cpu_percent_handles_wrap() {
+    let prev = CpuSample {
+        idle: u64::MAX - 10,
+        total: u64::MAX,
+    };
+    let cur = CpuSample { idle: 5, total: 20 };
+    // saturating deltas keep the result finite.
+    let pct = cpu_percent(&prev, &cur);
+    assert!(pct.is_finite() && (0.0..=100.0).contains(&pct));
+}
+
+#[test]
+fn rate_computation() {
+    let elapsed = Duration::from_secs(2);
+    // 125000 bytes in 2s → 500000 bits/s
+    assert_eq!(rate_bps(0, 125_000, elapsed), 500_000);
+    assert_eq!(rate_bps(100, 50, elapsed), 0); // counter reset → 0
+    assert_eq!(rate_bps(1000, 1000, Duration::ZERO), 0);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn proc_readers_work_on_linux() {
+    // These may fail in restricted sandboxes without /proc — probe gently.
+    if let (Some(mem), Some(load), Some(up)) = (mem_used_mb(), load_averages(), uptime_secs()) {
+        assert!(mem.0 <= mem.1);
+        assert!(up > 0);
+        assert!(load.0.is_finite());
     }
 }
