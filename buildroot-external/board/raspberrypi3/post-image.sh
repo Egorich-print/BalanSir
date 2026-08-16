@@ -117,7 +117,9 @@ trap 'rm -rf "${ROOTPATH_TMP}"' EXIT
 ROOTPATH_TMP="$(mktemp -d)"
 rm -rf "${GENIMAGE_TMP}"
 
-genimage \
+# Use host genimage from Buildroot output
+GENIMAGE="${HOST_DIR:-/home/builder/br-qemu/host}/bin/genimage"
+"${GENIMAGE}" \
     --rootpath "${ROOTPATH_TMP}"   \
     --tmppath "${GENIMAGE_TMP}"    \
     --inputpath "${BINARIES_DIR}"  \
