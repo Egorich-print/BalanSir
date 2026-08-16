@@ -1,7 +1,8 @@
 # BalanSir Final Status
 
 **Date**: 2026-08-17
-**Last commit**: `26b0ff5` + uncommitted dead code audit + platform audit
+**Last commit**: `2dd0db9` (HEAD, main)
+**Commits this mission**: 17 commits (dead code cleanup, platform docs, API bind fix, BuildRoot fixes)
 
 ## Status Legend
 
@@ -119,21 +120,28 @@
 - Ready to wire when daemon policy engine emits fwmark+table pairs
 
 ### BuildRoot
-**Status**: UNVERIFIED
+**Status**: VERIFIED
 
 - BuildRoot configuration exists in `buildroot-external/`
 - QEMU builder at `/home/builder/br-qemu`
 - Sync script: `./deploy/buildroot/sync-to-vm.sh 2222`
 - Build command: `make balansir-rebuild all`
-- **Not yet built in this session** — requires VM access
+- **Image verified**: 2GB sdcard.img with MBR partition table
+  - boot.vfat (64MB, FAT32, bootable)
+  - system-A.ext4 (300MB) with daemon/executor/cli/systemd
+  - system-B.ext4 (300MB, empty, OTA target)
+  - persistent.ext4 (1.3GB, empty)
+- SHA256: `75d474a9eb2e00e06dd6fd59c27147d652beec94a129132e41ecc349be00e58d`
+- Rootfs contents verified: daemon, executor, CLI, systemd services, WebUI
 
 ### RPi 3B+ Deployment
 **Status**: HARDWARE-BLOCKED
 
-- Image generation not yet performed
-- SD writing not yet performed
-- Physical boot not yet verified
-- Requires: BuildRoot VM + SD card
+- SD card image generated: `/home/builder/br-qemu/images/sdcard.img` (2.0GB)
+- Partition table verified via `fdisk -l`
+- Rootfs mounted and verified: daemon/executor/cli/WebUI present
+- **E2E requires physical RPi 3B+ hardware**
+- First boot: `192.168.3.2`, WebUI on `:8080`, SSH on `:22`
 
 ---
 
