@@ -196,8 +196,10 @@ pub fn read_filesystems() -> Option<Vec<FilesystemInfo>> {
         }
 
         // statfs returns blocks, not bytes. Convert to MB.
-        let total_mb = stat.f_blocks.saturating_mul(stat.f_bsize) / 1_048_576;
-        let free_mb = stat.f_bavail * stat.f_bsize / 1_048_576;
+        // f_bsize is i64 on Linux, u64 on macOS; always cast to u64.
+        let bsize = stat.f_bsize as u64;
+        let total_mb = stat.f_blocks.saturating_mul(bsize) / 1_048_576;
+        let free_mb = stat.f_bavail.saturating_mul(bsize) / 1_048_576;
         let used_mb = total_mb.saturating_sub(free_mb);
         let usage_percent = if total_mb > 0 {
             ((total_mb - free_mb) as f64 / total_mb as f64) * 100.0
@@ -210,7 +212,7 @@ pub fn read_filesystems() -> Option<Vec<FilesystemInfo>> {
             total_mb,
             used_mb,
             available_mb: free_mb,
-            usage_percent: usage_percent as f64,
+            usage_percent,
             fstype: fstype.to_string(),
         });
     }
