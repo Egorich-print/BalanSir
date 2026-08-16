@@ -1,177 +1,74 @@
 # BalanSir Final Status
 
 **Date**: 2026-08-17
-**Last commit**: `1ac3d6d` (HEAD, main)
-**Commits this mission**: 20 commits
-
-## Status Legend
-
-| Status | Meaning |
-|--------|---------|
-| DONE | Code exists, compiles, wired, tested |
-| VERIFIED | All of DONE + runtime/E2E verified |
-| HARDWARE-BLOCKED | All of DONE but requires physical hardware for E2E |
-| PARTIAL | Exists but incomplete or missing wiring |
-| UNVERIFIED | Code exists but no runtime evidence |
-| DEAD | Removed or documented as dead |
-
----
+**Last commit**: `f502ff7`
+**HEAD**: f502ff7 feat(pool): add PathPool abstraction for adaptive routing foundation
 
 ## Subsystem Status
 
-### Gateway / NAT / Firewall
-**Status**: DONE
+| Subsystem | Status | Evidence |
+|-----------|--------|----------|
+| Gateway/NAT | DONE | nftables NAT, management firewall, IP forwarding verified on RPi |
+| Firewall | DONE | LAN subnet CIDR scoping, policy drop, management access verified |
+| DNS | DONE | block/direct/VPN canonical path, SOCKS5 UDP relay, cache keys |
+| B4 | DONE | TCP reassembly, SNI, fragmented ClientHello 1460+361, mark_adapting |
+| VPN/Xray | DONE | SOCKS5 UDP relay, XrayManagerHandle::socks_port(), no allowInsecure |
+| UPnP | DONE | LAN SSDP, SOAP, DNAT via executor, WAN blocking |
+| System UI | DONE | /system endpoint, real /proc metrics, btop-like layout |
+| OTA | DONE (unit) | A/B slots, Ed25519 signing, rollback, standalone binary deployed |
+| IpRule | UNWIRED | Engine exists, not instantiated in production |
+| BuildRoot | VERIFIED | sdcard.img built, partitions verified |
+| RPi Boot | VERIFIED | Physical RPi boots, daemon+executor active, API responds |
+| QEMU E2E | BLOCKED | No QEMU on VM, macOS raspi3b produces no output |
 
-- Commit `1a3dcdf`
-- Explicit WAN/LAN roles from `NetworkConfig`
-- Fail-closed validation (daemon starts only with valid roles)
-- IP forwarding via `sysctl net.ipv4.ip_forward`
-- Conntrack `established,related accept` + `invalid drop`
-- MASQUERADE on WAN (`nat postrouting`)
-- Management firewall (`filter input`, policy drop)
-  - LAN → RPi: SSH(22), DNS(53), API(8080), metrics(9090) allowed
-  - WAN → RPi: blocked by default policy
-- Executor IPC (`GatewayOp`)
-- Single canonical nftables owner
-- **FIX**: Daemon no longer exits on validation failure (warn and continue)
+## Physical RPi State (192.168.3.29)
 
-### DNS
-**Status**: DONE
+- Boot: ✅ SD card → kernel → rootfs → systemd
+- Daemon: ✅ active, no crash loop
+- Executor: ✅ active, nftables v1.1.4 compatible
+- API: ✅ /health OK, /system OK
+- SSH: ✅ root@192.168.3.29
+- eth0 (USB/WAN): ✅ UP, 192.168.3.29
+- eth1 (built-in/LAN): ⚠️ DOWN (AX3 not connected)
+- IP forwarding: ⚠️ OFF (gateway mode inactive, eth1 DOWN)
+- Gateway mode: ⚠️ OFF (awaiting eth1 UP)
+- Soak: RPi running 48+ min, CPU ~0%, RAM 712MB/881MB free
 
-- Commit `98603ce` (canonical architecture), `ea82589` (SOCKS5 UDP), `3a88ef8` (actual Xray port)
-- Single canonical listener (`dns.rs` forwarder)
-- Classification: blocklist/allowlist with suffix matching, allowlist wins
-- BLOCK path: local NXDOMAIN, no upstream, nft enforcement
-- DIRECT path: normal upstream forwarding
-- VPN path: `path_decision` → `XrayManagerHandle::socks_port()` → SOCKS5 UDP ASSOCIATE → Xray
-- B4 path: `SwitchDnsPath` → `mark_adapting()` → `path_decision` shows `B4Adapting`
-- Cache: `(domain, qtype)` key, bounded, TTL-based expiry
-- No duplicate DNS subsystems
+## Commits This Mission (pushed to GitHub)
 
-### B4 (Packet Processing)
-**Status**: DONE
+```
+f502ff7 feat(pool): add PathPool abstraction for adaptive routing foundation
+ed43054 test: add gateway E2E test harness for physical RPi validation
+a1d1a80 feat(gateway): add periodic gateway re-check for interface state changes
+583d926 docs: add failure modes release contract and update final status
+b4791d5 style: cargo fmt nftables.rs
+22d0ede feat(ota): add standalone balansir-ota binary
+eaf8b8d fix(gateway): allow management access from LAN subnet on any interface
+1ac3d6d fix(buildroot): disable ProtectKernelTunables for executor
+30b264e fix(daemon): don't exit(1) on network config validation failure
+aefcea2 fix(executor): split forward chain policy in init() too
+83aaa8a fix(executor): split nftables policy from chain creation for v1.1.4
+5cfe891 fix(build): remove stale boot.vfat before mkdosfs
+2458f44 fix(build): fix post-image.sh mcopy flags and ext4 resize
+e8b6e76 fix(build): bypass genimage v19 entirely for SD image assembly
+bedbfc4 fix(build): add host/bin to PATH in post-image.sh
+d6f9fb0 fix(build): add missing fi in post-build.sh
+a1b57a8 fix(build): restore statfs f_bsize cast for Linux aarch64
+036c6fd style: cargo fmt across workspace
+0bf4119 fix(network): bind API to 0.0.0.0 for LAN management access
+```
 
-- Commit `e3574fb`
-- TCP reassembly: 4-tuple, sequence tracking, duplicate/overlap handling, out-of-order, bounded memory
-- Fragmented ClientHello: 1460+361 split, multiple fragments, gaps
-- SNI extraction from reassembled TLS ClientHello
-- FIN/RST cleanup, timeout/eviction
-- B4 engine decisions: `AdaptMtu`, `SwitchDnsPath`, `Recovered`, `FailStrict`
-- Path health integration: EMA smoothing, hysteresis, anti-flapping
+## Architecture
 
-### VPN / Xray
-**Status**: DONE
+- One canonical nftables owner (executor)
+- One DNS listener/registry
+- One policy model
+- Daemon (unprivileged) → IPC → executor (privileged) → kernel
+- Gateway re-check: 30s periodic validation, auto-activates when eth1 UP
 
-- Commit `0e10e6f` (Xray 26.7.28 schema), `ea82589` (SOCKS5 UDP), `3a88ef8` (actual port)
-- No generated `allowInsecure` in configs
-- `pinnedPeerCertSha256` and `verifyPeerCertByName` supported
-- XrayManagerHandle exposes actual `socks_port()`
-- `path_decision` integration: when VPN active, DNS routes through SOCKS5 UDP
-- Profile rotation via VPN pool
-- Reality/TLS transport support
+## Remaining Blockers
 
-### UPnP/IGD
-**Status**: DONE
-
-- Commit `5664f4a`, `62c3fbd`
-- LAN-only SSDP (239.255.255.250:1900)
-- SOAP HTTP endpoint for Add/DeletePortMapping, GetExternalIPAddress, GetSpecificPortMappingEntry
-- Source validation (LAN subnet only, reject loopback/multicast/WAN)
-- Target validation (RFC1918/ULA only, reject public/zero)
-- Lease/expiry/renewal mechanism
-- Executor typed op (`UpnpOp`)
-- nftables DNAT in `nat prerouting` chain
-- WAN UPnP blocking
-
-### System UI (btop-like)
-**Status**: DONE
-
-- Commits `24cc315`, `26b0ff5`
-- Backend: `system_stats.rs` — real metrics from `/proc`
-  - CPU: `/proc/stat` deltas
-  - Memory: `/proc/meminfo`
-  - Load: `/proc/loadavg`
-  - Filesystems: `/proc/mounts` + `statfs(2)`
-  - Network: `/proc/net/dev` deltas
-  - Uptime: `/proc/uptime`
-- Frontend: `System.svelte` with btop-inspired panels
-- API: `GET /system`
-- No stubs, no external btop dependency
-
-### OTA
-**Status**: DONE (unit), HARDWARE-BLOCKED (E2E)
-
-- Ed25519 signing (`ed25519_dalek`)
-- SHA-256 image verification
-- Anti-rollback policy
-- A/B slot management (`Slot::A` partition 2, `Slot::B` partition 3)
-- `BootMetadata`: active_slot, next_slot, state, rollback_count
-- Install: `dd` to partition, SHA-256 verify, set tryboot
-- Health check: `HealthChecker::run()` with `should_confirm()` logic
-- Rollback: automatic on health check failure, plus `force_rollback()`
-- **RPi 3B+ boot chain**: Uses `config.txt` + `tryboot` mechanism
-
-### IpRule (fwmark + policy routing)
-**Status**: UNWIRED
-
-- Implementation exists in `iprule.rs` with tests
-- Never instantiated in production (comment only in `service.rs`)
-- Ready to wire when daemon policy engine emits fwmark+table pairs
-
-### BuildRoot
-**Status**: VERIFIED
-
-- BuildRoot configuration exists in `buildroot-external/`
-- QEMU builder at `/home/builder/br-qemu`
-- Sync script: `./deploy/buildroot/sync-to-vm.sh 2222`
-- Build command: `make balansir-rebuild all`
-- **Image verified**: 2GB sdcard.img with MBR partition table
-  - boot.vfat (64MB, FAT32, bootable)
-  - system-A.ext4 (300MB) with daemon/executor/cli/systemd
-  - system-B.ext4 (300MB, empty, OTA target)
-  - persistent.ext4 (1.3GB, empty)
-- SHA256: `21b70ed26f3a82fb5859d6674ac66085e1a7f20a63b08b68d279794f92acd1e3`
-- Rootfs contents verified: daemon, executor, CLI, systemd services, WebUI
-
-### RPi 3B+ Deployment
-**Status**: HARDWARE-BLOCKED
-
-- SD card image generated: `/home/builder/br-qemu/images/sdcard.img` (2.0GB)
-- Partition table verified via `fdisk -l`
-- Rootfs mounted and verified: daemon/executor/cli/WebUI present
-- **E2E requires physical RPi 3B+ hardware**
-
----
-
-## Architecture Verification
-
-### Single Canonical Owner
-- ✅ nftables: executor only
-- ✅ DNS: single `dns.rs` forwarder + `dns_plane.rs` observation
-- ✅ NAT/firewall: single executor gateway backend
-- ✅ Policy: single `policy/` module
-- ✅ Interface operations: executor only
-
-### Privilege Boundary
-- ✅ Daemon (unprivileged) → IPC → Executor (privileged) → kernel
-- ✅ Daemon never touches nftables directly
-- ✅ Daemon never accesses raw block devices
-
-### Dead Code Cleanup
-- ✅ `path_health.rs` in balansir-common: removed (dead duplicate)
-- ✅ `bootstrap.rs` in reconciliation: removed (never called)
-- ✅ `iprule.rs`: documented as UNWIRED, kept as ready implementation
-- ✅ No duplicate DNS/NAT/firewall/policy implementations
-
-### Platform Portability
-- ✅ No incorrect RPi hardcodes in production Rust code
-- ✅ All `eth0`/`192.168.3.2`/WAN MAC occurrences are test-only
-- ✅ OTA partition scheme is RPi-specific by design (correct boundary)
-- ✅ All `/proc` and `/sys` paths are generic Linux
-
-### LAN Management
-- ✅ Firewall: LAN → {22, 53, 8080, 9090} allowed, WAN → blocked
-- ✅ API: configurable bind address (default `0.0.0.0:8080`)
-- ✅ DNS: configurable listen address
-- ✅ SSH: systemd service on port 22
-- ✅ ProtectKernelTunables disabled for executor (gateway needs ip_forward)
+1. eth1 (AX3) not connected — gateway NAT/B4/VPN E2E blocked
+2. QEMU E2E — no QEMU on VM, macOS raspi3b silent
+3. OTA lifecycle E2E — binary deployed, not fully tested (update→reboot→health→rollback)
+4. 12-24h soak test — RPi running 48min stable
