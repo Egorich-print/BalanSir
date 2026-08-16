@@ -91,6 +91,8 @@ rm -rf "${GENIMAGE_TMP}"
 
 # Use host genimage from Buildroot output
 GENIMAGE="${HOST_DIR:-/home/builder/br-qemu/host}/bin/genimage"
+# Ensure host tools (mcopy, mkdosfs, etc.) are on PATH
+export PATH="${HOST_DIR:-/home/builder/br-qemu/host}/bin:${PATH}"
 "${GENIMAGE}" \
     --rootpath "${ROOTPATH_TMP}"   \
     --tmppath "${GENIMAGE_TMP}"    \
