@@ -47,39 +47,42 @@ echo ">> creating boot.vfat (${BOOT_SIZE_MB}MB)"
 BOOT_SECTORS=$((BOOT_SIZE_MB * 2048))
 mkdosfs -F 32 -n boot -C "${BOOT_IMG}" "${BOOT_SECTORS}"
 
-# Copy boot files
+# Copy boot files (no -s flag: it's for directories, not files)
 MTOOLS_SKIP_CHECK=1
 export MTOOLS_SKIP_CHECK
 for i in "${BINARIES_DIR}"/*.dtb; do
-    [ -f "$i" ] && mcopy -sp -i "${BOOT_IMG}" "$i" "::$(basename "$i")"
+    [ -f "$i" ] && mcopy -p -i "${BOOT_IMG}" "$i" "::$(basename "$i")"
 done
 for i in "${BINARIES_DIR}"/rpi-firmware/*; do
-    [ -f "$i" ] && mcopy -sp -i "${BOOT_IMG}" "$i" "::$(basename "$i")"
+    [ -d "$i" ] && mcopy -sp -i "${BOOT_IMG}" "$i" "::$(basename "$i")" || \
+    [ -f "$i" ] && mcopy -p -i "${BOOT_IMG}" "$i" "::$(basename "$i")"
 done
 KERNEL=$(sed -n 's/^kernel=//p' "${BINARIES_DIR}/rpi-firmware/config.txt")
-mcopy -sp -i "${BOOT_IMG}" "${BINARIES_DIR}/${KERNEL}" "::${KERNEL}"
+mcopy -p -i "${BOOT_IMG}" "${BINARIES_DIR}/${KERNEL}" "::${KERNEL}"
 
 # Copy cmdline-A.txt as default cmdline.txt
 cp "${BOARD_DIR}/cmdline-A.txt" "${BINARIES_DIR}/cmdline.txt"
-mcopy -sp -i "${BOOT_IMG}" "${BINARIES_DIR}/cmdline.txt" "::cmdline.txt"
+mcopy -p -i "${BOOT_IMG}" "${BINARIES_DIR}/cmdline.txt" "::cmdline.txt"
 
 echo "   boot.vfat: $(ls -lh "${BOOT_IMG}" | awk '{print $5}')"
 
 # --- 2. System-A (ext4, from rootfs) ---
 echo ">> creating system-A.ext4 (${SYSTEM_SIZE_MB}MB)"
-cp "${BINARIES_DIR}/rootfs.ext4" "${SYS_A_IMG}"
-# Resize to target size if needed
-resize2fs -f "${SYS_A_IMG}" "$((SYSTEM_SIZE_MB * 1024))k" 2>/dev/null || \
-    e2fsck -f -y "${SYS_A_IMG}" 2>/dev/null || true
+cp "${BINARIES_DIR}/rootfs.ext2" "${SYS_A_IMG}"
+# Truncate to target partition size first, then resize filesystem
+truncate -s "${SYSTEM_SIZE_MB}M" "${SYS_A_IMG}"
+# Ensure filesystem is clean before resize
+e2fsck -f -y "${SYS_A_IMG}" 2>/dev/null || true
+resize2fs -f "${SYS_A_IMG}" 2>/dev/null || true
 
 # --- 3. System-B (ext4, empty) ---
 echo ">> creating system-B.ext4 (${SYSTEM_SIZE_MB}MB)"
-truncate -s "${SYSTEM_SIZE_MB}M" "${SYS_B_IMG}"
+dd if=/dev/zero of="${SYS_B_IMG}" bs=1M count="${SYSTEM_SIZE_MB}" status=none
 mkfs.ext4 -F -L system-B "${SYS_B_IMG}" 2>/dev/null
 
 # --- 4. Persistent (ext4, empty) ---
 echo ">> creating persistent.ext4 (${PERSISTENT_SIZE_MB}MB)"
-truncate -s "${PERSISTENT_SIZE_MB}M" "${PERSIST_IMG}"
+dd if=/dev/zero of="${PERSIST_IMG}" bs=1M count="${PERSISTENT_SIZE_MB}" status=none
 mkfs.ext4 -F -L persistent "${PERSIST_IMG}" 2>/dev/null
 
 # --- 5. Assemble sdcard.img ---
