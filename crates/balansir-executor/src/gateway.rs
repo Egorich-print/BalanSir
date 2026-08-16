@@ -207,6 +207,10 @@ impl NftablesGatewayBackend {
         self.backend.add_rule_to_chain("input", &lo)?;
 
         // 3. LAN subnet → admin ports.
+        // iifname is intentionally omitted: when the LAN interface is DOWN
+        // (e.g. AX3 not connected), management access must still work through
+        // the WAN interface from LAN-subnet addresses. The LAN subnet CIDR
+        // alone is sufficient to scope management access.
         for port in balansir_common::gateway::DEFAULT_MGMT_PORTS {
             // DNS: allow TCP and UDP. Other ports: TCP only.
             let protos: &[Option<NftProto>] = if *port == 53 {
@@ -222,7 +226,7 @@ impl NftablesGatewayBackend {
                     sport: None,
                     dport: Some(*port),
                     ct_state: None,
-                    iifname: Some(config.lan_interface.clone()),
+                    iifname: None,
                     oifname: None,
                     verdict: NftVerdict::Accept,
                     mark: None,
