@@ -183,6 +183,11 @@ impl NftablesBackend {
     }
 
     /// Find a handle by comment in an arbitrary chain.
+    ///
+    /// A chain that does not exist (e.g. `prerouting` before the first UPnP
+    /// `AddPortMapping`) is treated as empty — `nft` reports it with
+    /// "No such file or directory", and removing a rule from a chain that was
+    /// never created is a legitimate no-op.
     pub fn find_handle_by_comment_in_chain(
         &self,
         chain: &str,
@@ -194,6 +199,10 @@ impl NftablesBackend {
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("No such file or directory") {
+                debug!("nft chain {chain} does not exist; treating as empty");
+                return Ok(None);
+            }
             return Err(balansir_common::Error::Fatal(format!(
                 "nft list chain {chain} failed: {stderr}"
             )));
