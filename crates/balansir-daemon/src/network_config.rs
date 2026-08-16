@@ -58,6 +58,14 @@ pub struct NetworkConfig {
     /// Whether WAN MAC cloning is enabled at all. Default true when roles are
     /// configured.
     pub clone_mac: Option<bool>,
+    /// LAN subnet CIDR used by the management firewall and NAT (default
+    /// `192.168.3.0/24` per the target topology).
+    #[serde(default = "default_lan_subnet")]
+    pub lan_subnet: String,
+}
+
+fn default_lan_subnet() -> String {
+    "192.168.3.0/24".to_string()
 }
 
 impl NetworkConfig {
@@ -148,8 +156,20 @@ impl NetworkConfig {
             }
         }
 
+        // The LAN subnet must parse as a CIDR (used for NAT + management
+        // firewall); fail-closed rather than installing a bogus rule.
+        if parse_cidr(&self.lan_subnet).is_none() {
+            return Err(format!("network config: invalid lan_subnet {}", self.lan_subnet));
+        }
+
         Ok(())
     }
+}
+
+/// Validate a CIDR string (`addr/prefix`); returns the addr if valid.
+pub fn parse_cidr(cidr: &str) -> Option<std::net::IpAddr> {
+    let addr = cidr.trim().rsplit_once('/').map(|(a, _)| a).unwrap_or(cidr);
+    addr.parse::<std::net::IpAddr>().ok()
 }
 
 /// An interface counts as Ethernet-like when it is a physical L2 carrier we can

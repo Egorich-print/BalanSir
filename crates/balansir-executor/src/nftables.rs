@@ -71,16 +71,178 @@ impl NftablesBackend {
         args
     }
 
-    /// Create the table and chain once, tolerating "already exists" (the
+    /// Create the table and chains once, tolerating "already exists" (the
     /// object is present from a previous run) but failing loudly on any other
     /// error — a missing mechanism must not be a silent no-op.
     pub fn init(&self) -> Result<()> {
         self.create_if_absent(["add", "table", "inet", &self.table_name], "table")?;
+        // Base chains must be attached to kernel hooks or the rules they hold
+        // never see a packet (a regular chain is only reachable via jump). The
+        // forward chain carries the policy + DPI rules; the gateway adds the
+        // input / nat hooks on demand (see gateway.rs). Default policy `accept`
+        // keeps existing behavior: an explicit policy rule is what restricts.
         self.create_if_absent(
-            ["add", "chain", "inet", &self.table_name, &self.chain_name],
+            [
+                "add",
+                "chain",
+                "inet",
+                &self.table_name,
+                &self.chain_name,
+                "{",
+                "type",
+                "filter",
+                "hook",
+                "forward",
+                "priority",
+                "0",
+                "policy",
+                "accept",
+                ";",
+                "}",
+            ],
             "chain",
         )?;
         Ok(())
+    }
+
+    /// Create (idempotently) a base chain attached to a kernel hook. Used by
+    /// the gateway datapath to attach `filter input` and `nat postrouting`.
+    ///
+    /// `hook_args` is the middle of the chain spec, e.g.
+    /// `&["type","filter","hook","input","priority","0","policy","drop",";"]`.
+    /// The whole `{ type filter hook input priority 0 policy drop; }` group is
+    /// passed as one argument so `nft` parses it as a unit (mirroring how the
+    /// forward chain is created in `init`).
+    pub fn ensure_hooked_chain(&self, name: &str, hook_args: &[&str]) -> Result<()> {
+        validate_identifier(name)?;
+        let mut spec = "{".to_string();
+        for part in hook_args {
+            spec.push(' ');
+            spec.push_str(part);
+        }
+        spec.push_str(" }");
+        self.create_if_absent(
+            [
+                "add",
+                "chain",
+                "inet",
+                &self.table_name,
+                name,
+                &spec,
+            ],
+            "chain",
+        )
+    }
+
+    /// Add a rule to an arbitrary chain in this table (not just the default
+    /// `forward` chain). Chain names are validated before interpolation.
+    pub fn add_rule_to_chain(&self, chain: &str, spec: &NftRuleSpec) -> Result<()> {
+        validate_identifier(chain)?;
+        let mut args = vec![
+            "add".to_string(),
+            "rule".to_string(),
+            "inet".to_string(),
+            self.table_name.clone(),
+            chain.to_string(),
+        ];
+        args.extend(spec.render());
+        let output = Command::new(nft_bin()?).args(args).output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(balansir_common::Error::Fatal(format!(
+                "nft add rule to {chain} failed: {stderr}"
+            )));
+        }
+        debug!("Added nftables rule to {chain}: {}", spec);
+        Ok(())
+    }
+
+    /// Remove a rule by comment from an arbitrary chain (handle-based).
+    pub fn remove_rule_by_comment_in_chain(&self, chain: &str, comment: &str) -> Result<()> {
+        validate_identifier(chain)?;
+        let handle = self.find_handle_by_comment_in_chain(chain, comment)?;
+        let Some(handle) = handle else {
+            debug!(
+                "nft rule comment {:?} not present in {chain}, nothing to remove",
+                comment
+            );
+            return Ok(());
+        };
+        let output = Command::new(nft_bin()?)
+            .args([
+                "delete",
+                "rule",
+                "inet",
+                &self.table_name,
+                chain,
+                "handle",
+                &handle,
+            ])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(balansir_common::Error::Fatal(format!(
+                "nft delete rule in {chain} failed: {stderr}"
+            )));
+        }
+        info!(chain, comment, handle, "Removed nftables rule by handle");
+        Ok(())
+    }
+
+    /// Find a handle by comment in an arbitrary chain.
+    pub fn find_handle_by_comment_in_chain(
+        &self,
+        chain: &str,
+        comment: &str,
+    ) -> Result<Option<String>> {
+        validate_identifier(chain)?;
+        let output = Command::new(nft_bin()?)
+            .args([
+                "-a",
+                "list",
+                "chain",
+                "inet",
+                &self.table_name,
+                chain,
+            ])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(balansir_common::Error::Fatal(format!(
+                "nft list chain {chain} failed: {stderr}"
+            )));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(handle) = parse_handle_for_comment(line, comment) {
+                return Ok(Some(handle));
+            }
+        }
+        Ok(None)
+    }
+
+    /// List the rendered rules present in an arbitrary chain.
+    pub fn list_chain(&self, chain: &str) -> Result<Vec<String>> {
+        validate_identifier(chain)?;
+        let output = Command::new(nft_bin()?)
+            .args(["list", "chain", "inet", &self.table_name, chain])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(balansir_common::Error::Fatal(format!(
+                "nft list chain {chain} failed: {stderr}"
+            )));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.lines().map(|l| l.trim().to_string()).collect())
+    }
+
+    /// Whether a comment-tagged rule exists in the given chain.
+    pub fn has_comment_in_chain(&self, chain: &str, comment: &str) -> bool {
+        self.find_handle_by_comment_in_chain(chain, comment)
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     fn create_if_absent<const N: usize>(&self, args: [&str; N], what: &str) -> Result<()> {
@@ -290,6 +452,8 @@ pub enum NftVerdict {
     Queue {
         num: u16,
     },
+    /// NAT: masquerade the source on egress (gateway datapath).
+    Masquerade,
 }
 
 impl fmt::Display for NftVerdict {
@@ -304,6 +468,7 @@ impl fmt::Display for NftVerdict {
             // no one is waiting, *unless* NF_VERDICT_FLAG_QUEUE_BYPASS). This
             // is the "never break the network" guarantee for DPI interception.
             NftVerdict::Queue { num } => return write!(f, "queue num {num} bypass"),
+            NftVerdict::Masquerade => "masquerade",
         })
     }
 }
@@ -323,6 +488,12 @@ pub struct NftRuleSpec {
     pub sport: Option<u16>,
     /// Destination port.
     pub dport: Option<u16>,
+    /// `ct state` matcher, e.g. `Some("established,related")`.
+    pub ct_state: Option<String>,
+    /// `iifname` matcher (interface the packet arrived on), e.g. the LAN iface.
+    pub iifname: Option<String>,
+    /// `oifname` matcher (interface the packet leaves on), e.g. the WAN iface.
+    pub oifname: Option<String>,
     pub verdict: NftVerdict,
     /// Firewall mark set by `meta mark set N` when the rule matches.
     pub mark: Option<u32>,
@@ -339,6 +510,9 @@ impl NftRuleSpec {
             dst_cidr: None,
             sport: None,
             dport: None,
+            ct_state: None,
+            iifname: None,
+            oifname: None,
             verdict,
             mark: None,
             comment: None,
@@ -357,7 +531,7 @@ impl NftRuleSpec {
 
     /// Render the rule into nft arguments (without the base add-rule prefix).
     pub fn render(&self) -> Vec<String> {
-        let mut args = Vec::with_capacity(12);
+        let mut args = Vec::with_capacity(16);
         if let Some(proto) = self.proto {
             args.push("meta".to_string());
             args.push("l4proto".to_string());
@@ -369,6 +543,14 @@ impl NftRuleSpec {
         if let Some(cidr) = &self.dst_cidr {
             Self::push_addr_matcher(&mut args, "daddr", cidr);
         }
+        if let Some(iifname) = &self.iifname {
+            args.push("iifname".to_string());
+            args.push(format!("\"{iifname}\""));
+        }
+        if let Some(oifname) = &self.oifname {
+            args.push("oifname".to_string());
+            args.push(format!("\"{oifname}\""));
+        }
         if let Some(port) = self.sport {
             args.push("th".to_string());
             args.push("sport".to_string());
@@ -378,6 +560,11 @@ impl NftRuleSpec {
             args.push("th".to_string());
             args.push("dport".to_string());
             args.push(port.to_string());
+        }
+        if let Some(state) = &self.ct_state {
+            args.push("ct".to_string());
+            args.push("state".to_string());
+            args.push(state.clone());
         }
         if let Some(mark) = self.mark {
             args.push("meta".to_string());
@@ -437,6 +624,9 @@ mod tests {
             dst_cidr: None,
             sport: None,
             dport: Some(443),
+            ct_state: None,
+            iifname: None,
+            oifname: None,
             verdict: NftVerdict::Accept,
             mark: None,
             comment: None,
@@ -464,6 +654,9 @@ mod tests {
             src_cidr: Some("192.168.1.0/24".to_string()),
             dst_cidr: None,
             sport: None,
+            ct_state: None,
+            iifname: None,
+            oifname: None,
             verdict: NftVerdict::Drop,
             proto: None,
             dport: None,
@@ -490,6 +683,9 @@ mod tests {
             dst_cidr: None,
             sport: None,
             dport: Some(53),
+            ct_state: None,
+            iifname: None,
+            oifname: None,
             verdict: NftVerdict::Accept,
             mark: None,
             comment: None,
@@ -522,6 +718,9 @@ mod tests {
             dst_cidr: None,
             sport: None,
             dport: Some(443),
+            ct_state: None,
+            iifname: None,
+            oifname: None,
             verdict: NftVerdict::Drop,
             mark: Some(0x10),
             comment: Some("balansir:7".to_string()),
@@ -578,6 +777,9 @@ mod tests {
             dst_cidr: Some("203.0.113.5/32".to_string()),
             sport: Some(40000),
             dport: Some(443),
+            ct_state: None,
+            iifname: None,
+            oifname: None,
             verdict: NftVerdict::Drop,
             mark: None,
             comment: None,
@@ -611,6 +813,9 @@ mod tests {
             dst_cidr: Some("2001:db8::5/128".to_string()),
             sport: None,
             dport: Some(53),
+            ct_state: None,
+            iifname: None,
+            oifname: None,
             verdict: NftVerdict::Accept,
             mark: None,
             comment: None,

@@ -509,32 +509,54 @@ async fn apply_network_config(executor: &ExecutorClient) {
 
     if !config.cloning_enabled() {
         info!(wan, lan, "Gateway roles configured; WAN MAC cloning disabled");
-        return;
+    } else {
+        // Resolve the WAN MAC to clone: explicit config wins, then the
+        // auto-learned L2 peer on the LAN port (the router). No result → warn
+        // and do not change.
+        let mac = config
+            .wan_mac
+            .clone()
+            .or_else(|| learn_lan_peer_mac(lan));
+        let Some(mac) = mac else {
+            warn!(
+                wan,
+                lan,
+                "WAN MAC cloning enabled but no wan_mac configured and no LAN peer MAC learned; leaving WAN MAC unchanged"
+            );
+            return;
+        };
+
+        match executor.interface_set_mac(wan, &mac).await {
+            Ok(result) => info!(
+                wan,
+                cloned_mac = result.current_mac.as_deref().unwrap_or_default(),
+                hardware = result.hardware_mac.as_deref().unwrap_or_default(),
+                "WAN MAC cloned"
+            ),
+            Err(e) => warn!("WAN MAC cloning on {wan} failed: {e}"),
+        }
     }
 
-    // Resolve the WAN MAC to clone: explicit config wins, then the auto-learned
-    // L2 peer on the LAN port (the router). No result → warn and do not change.
-    let mac = config
-        .wan_mac
-        .clone()
-        .or_else(|| learn_lan_peer_mac(lan));
-    let Some(mac) = mac else {
-        warn!(
-            wan,
-            lan,
-            "WAN MAC cloning enabled but no wan_mac configured and no LAN peer MAC learned; leaving WAN MAC unchanged"
-        );
-        return;
+    // Gateway datapath: NAT, IP forwarding, conntrack and the management
+    // firewall. This is a real datapath (not an IPC declaration): the executor
+    // renders and applies nftables MASQUERADE + conntrack + input rules and
+    // sets net.ipv4.ip_forward. A failure is fatal — a gateway without NAT or
+    // with management exposed to WAN must not run.
+    let gateway_cfg = balansir_common::gateway::GatewayConfig {
+        wan_interface: wan.to_string(),
+        lan_interface: lan.to_string(),
+        lan_subnet: config.lan_subnet.clone(),
     };
-
-    match executor.interface_set_mac(wan, &mac).await {
-        Ok(result) => info!(
-            wan,
-            cloned_mac = result.current_mac.as_deref().unwrap_or_default(),
-            hardware = result.hardware_mac.as_deref().unwrap_or_default(),
-            "WAN MAC cloned"
-        ),
-        Err(e) => warn!("WAN MAC cloning on {wan} failed: {e}"),
+    if let Err(e) = gateway_cfg.validate() {
+        error!("{e}");
+        std::process::exit(1);
+    }
+    match executor.gateway_apply(&gateway_cfg).await {
+        Ok(result) => info!("Gateway datapath applied: {}", result.detail),
+        Err(e) => {
+            error!("Gateway datapath apply failed: {e}");
+            std::process::exit(1);
+        }
     }
 }
 

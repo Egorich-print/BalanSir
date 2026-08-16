@@ -17,6 +17,11 @@
 # wan_interface = "enx00e04c680224"
 # lan_interface = "eth0"
 #
+# LAN subnet (CIDR) used by NAT and the management firewall. The RPi is the
+# single L3 gateway: clients sit behind eth0 in this subnet. Default
+# 192.168.3.0/24 (target topology; AX3 runs in AP/bridge mode, no NAT).
+# lan_subnet = "192.168.3.0/24"
+#
 # WAN MAC cloning: the daemon clones the router's WAN MAC onto the WAN port so
 # the provider keeps seeing the device it expects. Resolution order:
 #   1. explicit wan_mac (below);

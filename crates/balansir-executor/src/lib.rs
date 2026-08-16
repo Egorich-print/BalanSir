@@ -1,4 +1,5 @@
 pub mod executor;
+pub mod gateway;
 pub mod interface;
 pub mod iprule;
 pub mod nftables;

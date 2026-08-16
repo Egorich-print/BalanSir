@@ -65,6 +65,10 @@ pub enum MsgType {
     // or remove the NFQUEUE interception rules (rendered with the `bypass`
     // keyword so a leftover rule can never blackhole traffic).
     DpiOp,
+    // Gateway datapath: NAT (MASQUERADE/SNAT), IP forwarding, conntrack and
+    // the management firewall. Payloads are postcard `GatewayOp` /
+    // `GatewayResult` / `GatewayStatus`.
+    GatewayOp,
     ResponseOk,
     ResponseError,
     ResponseData,

@@ -246,6 +246,7 @@ mod tests {
             verdict: NftVerdict::Drop,
             mark: Some(0x10),
             comment: Some("balansir:42".to_string()),
+            ..NftRuleSpec::new(NftVerdict::Drop)
         };
         backend.add_rule(&spec).unwrap();
 

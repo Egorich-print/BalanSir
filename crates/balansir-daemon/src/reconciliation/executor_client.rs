@@ -13,6 +13,7 @@
 //! never used as a command journal.
 
 use async_trait::async_trait;
+use balansir_common::gateway::{GatewayConfig, GatewayResult, GatewayStatus};
 use balansir_common::ipc::{IpcClientConnection, IpcMessage, MsgType};
 use balansir_common::network::{
     InterfaceInfo, InterfaceOp, InterfaceResult, TailscaleOp, TailscaleResult, TailscaleStatus,
@@ -171,6 +172,34 @@ impl ExecutorClient {
         let payload = Self::encode(&op)?;
         let resp = self
             .typed_request(MsgType::InterfaceOp, payload, "InterfaceOp")
+            .await?;
+        Self::decode(&resp)
+    }
+
+    /// Apply the gateway datapath (NAT, IP forwarding, conntrack, management
+    /// firewall). The executor renders the real nftables/sysctl rules.
+    pub async fn gateway_apply(&self, cfg: &GatewayConfig) -> Result<GatewayResult> {
+        let payload = Self::encode(&balansir_common::gateway::GatewayOp::Apply(cfg.clone()))?;
+        let resp = self
+            .typed_request(MsgType::GatewayOp, payload, "GatewayOp")
+            .await?;
+        Self::decode(&resp)
+    }
+
+    /// Remove the gateway datapath the executor installed.
+    pub async fn gateway_remove(&self) -> Result<GatewayResult> {
+        let payload = Self::encode(&balansir_common::gateway::GatewayOp::Remove)?;
+        let resp = self
+            .typed_request(MsgType::GatewayOp, payload, "GatewayOp")
+            .await?;
+        Self::decode(&resp)
+    }
+
+    /// Report the currently applied gateway datapath state.
+    pub async fn gateway_status(&self) -> Result<GatewayStatus> {
+        let payload = Self::encode(&balansir_common::gateway::GatewayOp::Status)?;
+        let resp = self
+            .typed_request(MsgType::GatewayOp, payload, "GatewayOp")
             .await?;
         Self::decode(&resp)
     }

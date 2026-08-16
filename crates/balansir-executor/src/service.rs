@@ -29,6 +29,7 @@ pub struct ExecutorServices {
     pub qos: Box<dyn crate::qdisc::QosBackend>,
     pub interface: Box<dyn crate::interface::InterfaceBackend>,
     pub tailscale: Box<dyn crate::tailscale::TailscaleDriver>,
+    pub gateway: Box<dyn crate::gateway::GatewayBackend>,
 }
 
 impl ExecutorServices {
@@ -43,7 +44,13 @@ impl ExecutorServices {
             qos,
             interface,
             tailscale,
+            gateway: Box::new(crate::gateway::RecordOnlyGatewayBackend::default()),
         }
+    }
+
+    pub fn with_gateway(mut self, gateway: Box<dyn crate::gateway::GatewayBackend>) -> Self {
+        self.gateway = gateway;
+        self
     }
 }
 
@@ -143,6 +150,9 @@ impl NftablesExecutor {
                         dst_cidr: None,
                         sport: None,
                         dport: Some(*port),
+                        ct_state: None,
+                        iifname: None,
+                        oifname: None,
                         verdict: NftVerdict::Queue { num: *queue_num },
                         mark: None,
                         comment: Some(DPI_RULE_TAG.to_string()),
@@ -227,8 +237,8 @@ fn to_nft_spec(request: &ActionRequest) -> Option<crate::nftables::NftRuleSpec> 
         sport: (request.src_port != 0).then_some(request.src_port),
         dport: (request.dst_port != 0).then_some(request.dst_port),
         verdict,
-        mark: None,
         comment: Some(rule_comment(request.trace.policy_id)),
+        ..NftRuleSpec::new(verdict)
     })
 }
 
@@ -251,6 +261,7 @@ fn to_mark_spec(request: &ActionRequest, fwmark: u32) -> crate::nftables::NftRul
         verdict: crate::nftables::NftVerdict::Accept,
         mark: Some(fwmark),
         comment: Some(rule_comment(request.trace.policy_id)),
+        ..NftRuleSpec::new(crate::nftables::NftVerdict::Accept)
     }
 }
 
@@ -413,6 +424,7 @@ fn is_allowlisted(msg_type: MsgType) -> bool {
             | MsgType::InterfaceOp
             | MsgType::TailscaleOp
             | MsgType::DpiOp
+            | MsgType::GatewayOp
     )
 }
 
@@ -665,6 +677,33 @@ pub async fn dispatch(msg: &IpcMessage, services: &ExecutorServices) -> IpcMessa
                 Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
             }
         }
+        // Gateway datapath: NAT, IP forwarding, conntrack, management firewall.
+        // The executor owns all gateway kernel state; the daemon only declares
+        // the desired topology.
+        MsgType::GatewayOp => {
+            let Ok(op) = postcard::from_bytes::<balansir_common::gateway::GatewayOp>(&msg.payload)
+            else {
+                return IpcMessage::response_error(
+                    msg.correlation_id,
+                    "invalid GatewayOp payload",
+                );
+            };
+            use balansir_common::gateway::GatewayOp as Op;
+            match op {
+                Op::Apply(cfg) => match services.gateway.apply(&cfg).await {
+                    Ok(result) => data_response(msg.correlation_id, &result),
+                    Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+                },
+                Op::Remove => match services.gateway.remove().await {
+                    Ok(result) => data_response(msg.correlation_id, &result),
+                    Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+                },
+                Op::Status => match services.gateway.status().await {
+                    Ok(status) => data_response(msg.correlation_id, &status),
+                    Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+                },
+            }
+        }
         _ => IpcMessage::response_error(msg.correlation_id, "operation not allowed"),
     }
 }
@@ -890,6 +929,43 @@ mod tests {
         )
         .await;
         assert_eq!(response.msg_type, MsgType::ResponseError);
+    }
+
+    /// Gateway datapath: the typed op is allowlisted and dispatched. The test
+    /// bundle uses the record-only backend (no kernel state), so Apply reports
+    /// success and Status reflects what was recorded.
+    #[tokio::test]
+    async fn gateway_op_apply_and_status() {
+        let services = dummy_services();
+        let cfg = balansir_common::gateway::GatewayConfig {
+            wan_interface: "eth1".into(),
+            lan_interface: "eth0".into(),
+            lan_subnet: "192.168.3.0/24".into(),
+        };
+        let op = balansir_common::gateway::GatewayOp::Apply(cfg);
+        let payload = postcard::to_allocvec(&op).unwrap();
+        let resp = dispatch(&message(MsgType::GatewayOp, payload), &services).await;
+        assert_eq!(resp.msg_type, MsgType::ResponseData);
+        let result: balansir_common::gateway::GatewayResult =
+            postcard::from_bytes(&resp.payload).unwrap();
+        assert!(result.ok);
+
+        // Status reports the applied topology back.
+        let op = balansir_common::gateway::GatewayOp::Status;
+        let payload = postcard::to_allocvec(&op).unwrap();
+        let resp = dispatch(&message(MsgType::GatewayOp, payload), &services).await;
+        let status: balansir_common::gateway::GatewayStatus =
+            postcard::from_bytes(&resp.payload).unwrap();
+        assert!(status.enabled);
+        assert_eq!(status.wan_interface.as_deref(), Some("eth1"));
+
+        // Remove tears it down.
+        let op = balansir_common::gateway::GatewayOp::Remove;
+        let payload = postcard::to_allocvec(&op).unwrap();
+        let resp = dispatch(&message(MsgType::GatewayOp, payload), &services).await;
+        let result: balansir_common::gateway::GatewayResult =
+            postcard::from_bytes(&resp.payload).unwrap();
+        assert!(result.ok);
     }
 
     #[tokio::test]

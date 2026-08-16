@@ -111,7 +111,17 @@ async fn main() -> Result<()> {
             }
         };
 
-    let services = std::sync::Arc::new(ExecutorServices::new(executor, qos, interface, tailscale));
+    // Gateway datapath: the only component allowed to touch ip_forward and the
+    // nftables nat/input hooks. It shares the same table as the rule executor
+    // (one canonical nftables owner) but manages its own tagged rules.
+    let gateway_backend = Box::new(balansir_executor::gateway::NftablesGatewayBackend::new(
+        NftablesBackend::new("balansir", "forward")
+            .map_err(|e| Error::Misconfiguration(format!("gateway nftables backend: {e}")))?,
+    ));
+
+    let services = std::sync::Arc::new(
+        ExecutorServices::new(executor, qos, interface, tailscale).with_gateway(gateway_backend),
+    );
 
     loop {
         match listener.accept().await {

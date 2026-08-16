@@ -1,6 +1,7 @@
 pub mod diff;
 pub mod error;
 pub mod event_bus;
+pub mod gateway;
 pub mod ipc;
 pub mod metrics;
 pub mod network;
