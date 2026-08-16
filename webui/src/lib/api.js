@@ -104,6 +104,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ routes, exit_node: exitNode }),
     }),
+
+  system: () => req('/system'),
 };
 
 export function subsystemEventUrl() {

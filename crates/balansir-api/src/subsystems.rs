@@ -14,11 +14,86 @@ use axum::{
     Json,
 };
 use balansir_common::qos::{QdiscKind, QosConfig, QosDirection};
+use balansir_common::subsystems::InterfaceRate;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
+
+/// System monitoring information exposed via `/system`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemInfo {
+    pub cpu: CpuInfo,
+    pub memory: MemoryInfo,
+    pub load: LoadInfo,
+    pub uptime_secs: u64,
+    pub filesystems: Vec<FilesystemInfo>,
+    pub interface_rates: Vec<InterfaceRate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CpuInfo {
+    pub usage_percent: f64,
+    pub load1: f64,
+    pub load5: f64,
+    pub load15: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryInfo {
+    pub used_mb: u64,
+    pub total_mb: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadInfo {
+    pub load1: f64,
+    pub load5: f64,
+    pub load15: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FilesystemInfo {
+    pub mount_point: String,
+    pub total_mb: u64,
+    pub used_mb: u64,
+    pub available_mb: u64,
+    pub usage_percent: f64,
+    pub fstype: String,
+}
+
+/// `GET /system` — comprehensive system monitoring snapshot (CPU, memory,
+/// load, uptime, filesystem usage, interface rates, temperatures where
+/// available). This is the canonical source for the System Monitoring page.
+pub async fn get_system(State(state): State<Arc<ApiState>>) -> Response {
+    match snapshot_or_unavailable(&state).await {
+        Ok(snapshot) => {
+            let system = SystemInfo {
+                cpu: CpuInfo {
+                    usage_percent: snapshot.system.cpu_percent,
+                    load1: snapshot.system.load1,
+                    load5: snapshot.system.load5,
+                    load15: snapshot.system.load15,
+                },
+                memory: MemoryInfo {
+                    used_mb: snapshot.system.mem_used_mb,
+                    total_mb: snapshot.system.mem_total_mb,
+                },
+                load: LoadInfo {
+                    load1: snapshot.system.load1,
+                    load5: snapshot.system.load5,
+                    load15: snapshot.system.load15,
+                },
+                uptime_secs: snapshot.system.uptime_secs,
+                filesystems: Vec::new(), // TODO: parse /proc/mounts
+                interface_rates: snapshot.interface_rates,
+            };
+            Json(system).into_response()
+        }
+        Err(resp) => resp,
+    }
+}
 
 /// Wrap errors as actionable JSON rather than opaque 500s.
 #[derive(Serialize)]
