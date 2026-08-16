@@ -86,16 +86,35 @@ impl NftablesBackend {
         // the chain creation command. Create the chain first, then set policy.
         self.create_if_absent(
             [
-                "add", "chain", "inet", &self.table_name, &self.chain_name,
-                "{", "type", "filter", "hook", "forward", "priority", "0", ";", "}",
+                "add",
+                "chain",
+                "inet",
+                &self.table_name,
+                &self.chain_name,
+                "{",
+                "type",
+                "filter",
+                "hook",
+                "forward",
+                "priority",
+                "0",
+                ";",
+                "}",
             ],
             "chain",
         )?;
         // Set forward chain policy to accept (idempotent).
         let _ = Command::new(nft_bin()?)
             .args([
-                "chain", "inet", &self.table_name, &self.chain_name,
-                "{", "policy", "accept", ";", "}",
+                "chain",
+                "inet",
+                &self.table_name,
+                &self.chain_name,
+                "{",
+                "policy",
+                "accept",
+                ";",
+                "}",
             ])
             .output();
         Ok(())
@@ -143,8 +162,15 @@ impl NftablesBackend {
         if let Some(pol) = policy {
             let output = Command::new(nft_bin()?)
                 .args([
-                    "chain", "inet", &self.table_name, name,
-                    "{", "policy", pol, ";", "}",
+                    "chain",
+                    "inet",
+                    &self.table_name,
+                    name,
+                    "{",
+                    "policy",
+                    pol,
+                    ";",
+                    "}",
                 ])
                 .output()?;
             if !output.status.success() {
