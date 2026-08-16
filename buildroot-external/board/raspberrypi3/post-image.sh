@@ -48,7 +48,13 @@ FILES+=( "${KERNEL}" )
 cp "${BOARD_DIR}/cmdline-A.txt" "${BINARIES_DIR}/cmdline.txt"
 FILES+=( "cmdline.txt" )
 
-# Write genimage config
+# Copy rootfs as system-A (the initially active slot).
+# system-B and persistent start empty (genimage creates them at target size).
+cp "${BINARIES_DIR}/rootfs.ext4" "${BINARIES_DIR}/system-A.src"
+
+# Write genimage config for boot, system-B, persistent.
+# system-A is pre-built from rootfs.ext4; we assemble the final sdcard.img
+# ourselves with dd (genimage v19 doesn't support 'base' for ext4).
 GENIMAGE_CFG="${BOARD_DIR}/genimage-ota.cfg"
 {
     echo "image boot.vfat {"
@@ -63,14 +69,6 @@ GENIMAGE_CFG="${BOARD_DIR}/genimage-ota.cfg"
     echo "	size = ${BOOT_SIZE_MB}M"
     echo "}"
     echo ""
-    echo "image system-A.ext4 {"
-    echo "	ext4 {"
-    echo "		base = \"rootfs.ext4\""
-    echo "	}"
-    echo ""
-    echo "	size = ${SYSTEM_SIZE_MB}M"
-    echo "}"
-    echo ""
     echo "image system-B.ext4 {"
     echo "	ext4 {"
     echo "	}"
@@ -83,32 +81,6 @@ GENIMAGE_CFG="${BOARD_DIR}/genimage-ota.cfg"
     echo "	}"
     echo ""
     echo "	size = ${PERSISTENT_SIZE_MB}M"
-    echo "}"
-    echo ""
-    echo "image sdcard.img {"
-    echo "	hdimage {"
-    echo "	}"
-    echo ""
-    echo "	partition boot {"
-    echo "		partition-type = 0xC"
-    echo "		bootable = \"true\""
-    echo "		image = \"boot.vfat\""
-    echo "	}"
-    echo ""
-    echo "	partition system-A {"
-    echo "		partition-type = 0x83"
-    echo "		image = \"system-A.ext4\""
-    echo "	}"
-    echo ""
-    echo "	partition system-B {"
-    echo "		partition-type = 0x83"
-    echo "		image = \"system-B.ext4\""
-    echo "	}"
-    echo ""
-    echo "	partition persistent {"
-    echo "		partition-type = 0x83"
-    echo "		image = \"persistent.ext4\""
-    echo "	}"
     echo "}"
 } > "${GENIMAGE_CFG}"
 
@@ -126,4 +98,65 @@ GENIMAGE="${HOST_DIR:-/home/builder/br-qemu/host}/bin/genimage"
     --outputpath "${BINARIES_DIR}" \
     --config "${GENIMAGE_CFG}"
 
-exit $?
+# Assemble sdcard.img with dd.
+# Layout: boot.vfat | system-A.ext4 | system-B.ext4 | persistent.ext4
+IMG="${BINARIES_DIR}/sdcard.img"
+BOOT="${BINARIES_DIR}/boot.vfat"
+SYS_A="${BINARIES_DIR}/system-A.src"
+SYS_B="${BINARIES_DIR}/system-B.ext4"
+PERSIST="${BINARIES_DIR}/persistent.ext4"
+
+# Verify all parts exist
+for f in "${BOOT}" "${SYS_A}" "${SYS_B}" "${PERSIST}"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR: missing image part: $f" >&2
+        exit 1
+    fi
+done
+
+# Create sdcard.img
+dd if=/dev/zero of="${IMG}" bs=1M count="${SD_SIZE_MB}" status=none
+
+# Write MBR partition table
+# Partition layout (all sectors are 512 bytes):
+#   p1: boot       type=0x0C (FAT32 LBA)  bootable
+#   p2: system-A   type=0x83 (Linux)
+#   p3: system-B   type=0x83 (Linux)
+#   p4: persistent type=0x83 (Linux)
+#   p1 start=2048 (1MB), size=BOOT_SIZE_MB*2048 sectors
+#   p2 start after p1, size=SYSTEM_SIZE_MB*2048 sectors
+#   p3 start after p2, size=SYSTEM_SIZE_MB*2048 sectors
+#   p4 start after p3, rest
+
+SEC_PER_MB=2048
+P1_START=2048
+P1_SIZE=$((BOOT_SIZE_MB * SEC_PER_MB))
+P2_START=$((P1_START + P1_SIZE))
+P2_SIZE=$((SYSTEM_SIZE_MB * SEC_PER_MB))
+P3_START=$((P2_START + P2_SIZE))
+P3_SIZE=$((SYSTEM_SIZE_MB * SEC_PER_MB))
+P4_START=$((P3_START + P3_SIZE))
+P4_SIZE=$(((SD_SIZE_MB - BOOT_SIZE_MB - SYSTEM_SIZE_MB * 2) * SEC_PER_MB))
+
+# Write partition table
+sfdisk --quiet "${IMG}" << EOF
+label: dos
+label-id: 0xBALANS1R
+unit: sectors
+
+${IMG}1 : start=${P1_START}, size=${P1_SIZE}, type=c, bootable
+${IMG}2 : start=${P2_START}, size=${P2_SIZE}, type=83
+${IMG}3 : start=${P3_START}, size=${P3_SIZE}, type=83
+${IMG}4 : start=${P4_START}, size=${P4_SIZE}, type=83
+EOF
+
+# Write partition images
+dd if="${BOOT}"   of="${IMG}" bs=512 seek=${P1_START} count=${P1_SIZE} conv=notrunc status=none
+dd if="${SYS_A}"  of="${IMG}" bs=512 seek=${P2_START} count=${P2_SIZE} conv=notrunc status=none
+dd if="${SYS_B}"  of="${IMG}" bs=512 seek=${P3_START} count=${P3_SIZE} conv=notrunc status=none
+dd if="${PERSIST}" of="${IMG}" bs=512 seek=${P4_START} count=${P4_SIZE} conv=notrunc status=none
+
+echo ">> sdcard.img assembled: ${IMG}"
+ls -lh "${IMG}"
+
+exit 0
