@@ -4,7 +4,10 @@
 //! managers own the shared snapshot and event bus, `ControlImpl` forwards
 //! operator actions through the same typed IPC boundary as the reconciler, and
 //! the axum router serves them read-only + action endpoints. Enable it with
-//! `BALANSIR_API_BIND=127.0.0.1:8080` (or `[api]` in the config file).
+//! `BALANSIR_API_BIND=0.0.0.0:8080` (or `[api]` in the config file).
+//! The management firewall (nftables filter input, policy drop) blocks WAN
+//! access to management ports; binding to 0.0.0.0 is safe because only LAN
+//! clients can reach the API port.
 
 use balansir_api::control::{ControlPlane, DesiredUpdater};
 use balansir_common::DesiredState;
@@ -36,7 +39,7 @@ pub fn api_bind() -> String {
             }
         }
     }
-    std::env::var("BALANSIR_API_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string())
+    std::env::var("BALANSIR_API_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string())
 }
 
 /// Start the HTTP/SSE server on `bind` (empty string disables the API) over

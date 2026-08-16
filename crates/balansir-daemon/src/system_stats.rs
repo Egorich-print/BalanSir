@@ -170,7 +170,7 @@ pub fn read_filesystems() -> Option<Vec<FilesystemInfo>> {
             "overlay",
             "squashfs",
         ];
-        if skip_fstypes.iter().any(|&fs| fs == fstype) {
+        if skip_fstypes.contains(&fstype) {
             continue;
         }
 
@@ -196,13 +196,8 @@ pub fn read_filesystems() -> Option<Vec<FilesystemInfo>> {
         }
 
         // statfs returns blocks, not bytes. Convert to MB.
-        let _block_size = stat.f_bsize as u64;
-        let _total_blocks = stat.f_blocks as u64;
-        let _free_blocks = stat.f_bavail as u64; // available to non-root
-        let total_blocks = stat.f_blocks as u64;
-
-        let total_mb = total_blocks.saturating_mul(stat.f_bsize as u64) / 1_048_576;
-        let free_mb = stat.f_bavail as u64 * stat.f_bsize as u64 / 1_048_576;
+        let total_mb = stat.f_blocks.saturating_mul(stat.f_bsize) / 1_048_576;
+        let free_mb = stat.f_bavail * stat.f_bsize / 1_048_576;
         let used_mb = total_mb.saturating_sub(free_mb);
         let usage_percent = if total_mb > 0 {
             ((total_mb - free_mb) as f64 / total_mb as f64) * 100.0
