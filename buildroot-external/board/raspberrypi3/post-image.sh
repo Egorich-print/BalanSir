@@ -46,6 +46,7 @@ SD_IMG="${BINARIES_DIR}/sdcard.img"
 echo ">> creating boot.vfat (${BOOT_SIZE_MB}MB)"
 # mkdosfs uses 1024-byte blocks, not 512-byte sectors
 BOOT_BLOCKS=$((BOOT_SIZE_MB * 1024))
+rm -f "${BOOT_IMG}"
 mkdosfs -F 32 -n boot -C "${BOOT_IMG}" "${BOOT_BLOCKS}"
 
 # Copy boot files
