@@ -119,21 +119,31 @@ impl UpdateVerifier {
         let key_bytes = base64::decode(key_b64)
             .map_err(|e| Error::Misconfiguration(format!("invalid base64 public key: {e}")))?;
         if key_bytes.len() != 32 {
-            return Err(Error::Misconfiguration("Ed25519 public key must be 32 bytes".into()));
+            return Err(Error::Misconfiguration(
+                "Ed25519 public key must be 32 bytes".into(),
+            ));
         }
         let verifying_key = VerifyingKey::from_bytes(&key_bytes.try_into().unwrap())
             .map_err(|e| Error::Misconfiguration(format!("invalid Ed25519 public key: {e}")))?;
-        Ok(Self { verifying_key, key_id })
+        Ok(Self {
+            verifying_key,
+            key_id,
+        })
     }
 
     /// Create a verifier from raw 32-byte Ed25519 public key.
     pub fn from_bytes(key_bytes: &[u8], key_id: KeyId) -> Result<Self> {
         if key_bytes.len() != 32 {
-            return Err(Error::Misconfiguration("Ed25519 public key must be 32 bytes".into()));
+            return Err(Error::Misconfiguration(
+                "Ed25519 public key must be 32 bytes".into(),
+            ));
         }
         let verifying_key = VerifyingKey::from_bytes(&key_bytes.try_into().unwrap())
             .map_err(|e| Error::Misconfiguration(format!("invalid Ed25519 public key: {e}")))?;
-        Ok(Self { verifying_key, key_id })
+        Ok(Self {
+            verifying_key,
+            key_id,
+        })
     }
 
     /// Verify an update manifest.
@@ -167,8 +177,11 @@ impl UpdateVerifier {
             .map_err(|e| Error::Misconfiguration(format!("invalid base64 signature: {e}")))?;
         let signature = Signature::from_bytes(&sig_bytes.try_into().unwrap());
 
-        self.verifying_key.verify(canonical.as_bytes(), &signature)
-            .map_err(|_| Error::Misconfiguration("manifest signature verification failed".into()))?;
+        self.verifying_key
+            .verify(canonical.as_bytes(), &signature)
+            .map_err(|_| {
+                Error::Misconfiguration("manifest signature verification failed".into())
+            })?;
 
         Ok(manifest)
     }
@@ -177,7 +190,8 @@ impl UpdateVerifier {
     ///
     /// Removes the signature field and ensures deterministic key ordering.
     fn canonicalize_manifest(&self, manifest_toml: &str) -> Result<String> {
-        let mut value: toml::Value = manifest_toml.parse()
+        let mut value: toml::Value = manifest_toml
+            .parse()
             .map_err(|e| Error::Misconfiguration(format!("manifest parse error: {e}")))?;
 
         // Remove signature field
@@ -216,11 +230,17 @@ pub async fn download_and_verify_image(
     image_info: &ImageInfo,
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Result<Vec<u8>> {
-    let response = client.get(&image_info.url).send().await
+    let response = client
+        .get(&image_info.url)
+        .send()
+        .await
         .map_err(|e| Error::Temporary(format!("download failed: {e}")))?;
 
     if !response.status().is_success() {
-        return Err(Error::Fatal(format!("download failed: HTTP {}", response.status())));
+        return Err(Error::Fatal(format!(
+            "download failed: HTTP {}",
+            response.status()
+        )));
     }
 
     let content_length = response.content_length().unwrap_or(image_info.size);
@@ -270,7 +290,11 @@ pub async fn download_and_verify_image(
             out
         }
         "none" => buffer,
-        other => return Err(Error::Misconfiguration(format!("unknown compression: {other}"))),
+        other => {
+            return Err(Error::Misconfiguration(format!(
+                "unknown compression: {other}"
+            )))
+        }
     };
 
     // Verify SHA-256
@@ -286,7 +310,8 @@ pub async fn download_and_verify_image(
     if decompressed.len() != image_info.size as usize {
         return Err(Error::Misconfiguration(format!(
             "decompressed size mismatch: expected {}, got {}",
-            image_info.size, decompressed.len()
+            image_info.size,
+            decompressed.len()
         )));
     }
 

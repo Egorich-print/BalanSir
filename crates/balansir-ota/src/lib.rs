@@ -3,11 +3,11 @@
 //! Provides signed OTA updates with A/B slot management, atomic boot selection,
 //! post-boot health checks, and automatic rollback.
 
-pub mod manifest;
-pub mod slot;
-pub mod health;
 pub mod daemon;
+pub mod health;
+pub mod manifest;
 pub mod migrate;
+pub mod slot;
 
 use balansir_common::Result;
 

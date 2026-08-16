@@ -560,7 +560,9 @@ mod tests {
         );
         // Xray ≥26: allowInsecure must never be emitted; pinning fields are.
         assert!(
-            out["streamSettings"]["tlsSettings"].get("allowInsecure").is_none(),
+            out["streamSettings"]["tlsSettings"]
+                .get("allowInsecure")
+                .is_none(),
             "allowInsecure must not appear in the generated config"
         );
         assert_eq!(

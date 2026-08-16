@@ -134,8 +134,7 @@ impl TcpReassembler {
                     return None;
                 }
             }
-            self.flows
-                .insert(key, Flow::new(tcp_seq, Instant::now()));
+            self.flows.insert(key, Flow::new(tcp_seq, Instant::now()));
         }
 
         // Process the segment. Deferred removal: any `drop_flow` decision is
@@ -327,7 +326,11 @@ mod tests {
         assert!(payload.len() > 1460, "test needs a fragmentable hello");
         let (a, b) = payload.split_at(1460);
 
-        assert_eq!(r.feed(key(), 0, a, false), None, "first fragment incomplete");
+        assert_eq!(
+            r.feed(key(), 0, a, false),
+            None,
+            "first fragment incomplete"
+        );
         assert_eq!(
             r.feed(key(), 1460, b, false),
             Some("frag.example.net".to_string()),
@@ -357,9 +360,15 @@ mod tests {
     fn duplicate_segment_ignored() {
         let mut r = TcpReassembler::new();
         let payload = client_hello_payload("dup.example.org", 0);
-        assert_eq!(r.feed(key(), 0, &payload, false), Some("dup.example.org".to_string()));
+        assert_eq!(
+            r.feed(key(), 0, &payload, false),
+            Some("dup.example.org".to_string())
+        );
         // Duplicate retransmission after decision: still classified.
-        assert_eq!(r.feed(key(), 0, &payload, false), Some("dup.example.org".to_string()));
+        assert_eq!(
+            r.feed(key(), 0, &payload, false),
+            Some("dup.example.org".to_string())
+        );
     }
 
     #[test]

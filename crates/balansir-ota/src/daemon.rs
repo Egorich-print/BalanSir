@@ -1,13 +1,13 @@
 //! OTA daemon: manages update discovery, download, verification, installation, and slot management.
 
+use crate::{health, manifest, slot};
 use balansir_common::{Error, Result};
-use crate::{manifest, slot, health};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::time::{Duration, interval};
-use tracing::{debug, info, warn, error};
+use tokio::time::{interval, Duration};
+use tracing::{debug, error, info, warn};
 
 /// OTA daemon configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,8 +134,7 @@ impl OtaDaemon {
     /// Create a new OTA daemon.
     pub fn new(config: OtaConfig) -> Result<Self> {
         // Load embedded public key
-        let key_b64 = std::fs::read_to_string(&config.public_key_path)
-            .map_err(|e| Error::Io(e))?;
+        let key_b64 = std::fs::read_to_string(&config.public_key_path).map_err(|e| Error::Io(e))?;
         let key_id = manifest::KeyId(config.key_id.clone());
         let verifier = manifest::UpdateVerifier::from_base64(&key_b64, key_id)?;
 
@@ -160,7 +159,9 @@ impl OtaDaemon {
         let health_checker = health::HealthChecker::new(config.health.clone());
 
         // Detect current slot
-        let current_slot = boot_partition.detect_current_slot().unwrap_or(slot::Slot::A);
+        let current_slot = boot_partition
+            .detect_current_slot()
+            .unwrap_or(slot::Slot::A);
 
         Ok(Self {
             config,
@@ -192,38 +193,55 @@ impl OtaDaemon {
     pub async fn check_updates(&self) -> Result<Option<manifest::VerifiedUpdate>> {
         self.set_status(UpdateStatus::Checking).await;
 
-        let manifest_url = format!("{}/{}/{}/manifest.toml",
+        let manifest_url = format!(
+            "{}/{}/{}/manifest.toml",
             self.config.server_url.trim_end_matches('/'),
             self.config.channel,
-            self.config.target_device);
+            self.config.target_device
+        );
 
         info!("Checking for updates at {}", manifest_url);
 
-        let response = self.http_client.get(&manifest_url)
+        let response = self
+            .http_client
+            .get(&manifest_url)
             .send()
             .await
             .map_err(|e| Error::Temporary(format!("manifest download failed: {e}")))?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            info!("No update manifest found for {}/{}",
-                self.config.channel, self.config.target_device);
+            info!(
+                "No update manifest found for {}/{}",
+                self.config.channel, self.config.target_device
+            );
             return Ok(None);
         }
 
         if !response.status().is_success() {
-            return Err(Error::Fatal(format!("manifest download failed: HTTP {}", response.status())));
+            return Err(Error::Fatal(format!(
+                "manifest download failed: HTTP {}",
+                response.status()
+            )));
         }
 
-        let manifest_text = response.text().await
+        let manifest_text = response
+            .text()
+            .await
             .map_err(|e| Error::Temporary(format!("manifest read failed: {e}")))?;
 
         // Verify manifest
         let verified = manifest::VerifiedUpdate::verify(&self.verifier, &manifest_text)?;
 
         // Check version
-        if version_compare(&verified.manifest.firmware_version, &self.config.current_version) <= 0 {
-            info!("No newer version available (current: {}, manifest: {})",
-                self.config.current_version, verified.manifest.firmware_version);
+        if version_compare(
+            &verified.manifest.firmware_version,
+            &self.config.current_version,
+        ) <= 0
+        {
+            info!(
+                "No newer version available (current: {}, manifest: {})",
+                self.config.current_version, verified.manifest.firmware_version
+            );
             return Ok(None);
         }
 
@@ -240,8 +258,10 @@ impl OtaDaemon {
             return Err(Error::Misconfiguration("target device mismatch".into()));
         }
 
-        info!("Update available: {} -> {}",
-            self.config.current_version, verified.manifest.firmware_version);
+        info!(
+            "Update available: {} -> {}",
+            self.config.current_version, verified.manifest.firmware_version
+        );
 
         self.update_state(|s| {
             s.status = UpdateStatus::UpdateAvailable {
@@ -249,14 +269,19 @@ impl OtaDaemon {
             };
             s.available_version = Some(verified.manifest.firmware_version.clone());
             s.last_check = Some(current_timestamp());
-        }).await;
+        })
+        .await;
 
         Ok(Some(verified))
     }
 
     /// Download and verify the firmware image.
     pub async fn download_and_verify(&self, update: &manifest::VerifiedUpdate) -> Result<Vec<u8>> {
-        self.set_status(UpdateStatus::Downloading { progress: 0, total: 0 }).await;
+        self.set_status(UpdateStatus::Downloading {
+            progress: 0,
+            total: 0,
+        })
+        .await;
 
         let image_info = &update.manifest.image;
         let mut progress = 0u64;
@@ -266,11 +291,17 @@ impl OtaDaemon {
         let url = image_info.url.clone();
         let expected_size = image_info.size;
 
-        let response = client.get(&url).send().await
+        let response = client
+            .get(&url)
+            .send()
+            .await
             .map_err(|e| Error::Temporary(format!("image download failed: {e}")))?;
 
         if !response.status().is_success() {
-            return Err(Error::Fatal(format!("image download failed: HTTP {}", response.status())));
+            return Err(Error::Fatal(format!(
+                "image download failed: HTTP {}",
+                response.status()
+            )));
         }
 
         let mut stream = response.bytes_stream();
@@ -286,7 +317,8 @@ impl OtaDaemon {
             let new_progress = (downloaded * 100) / total;
             if new_progress != progress {
                 progress = new_progress;
-                self.set_status(UpdateStatus::Downloading { progress, total }).await;
+                self.set_status(UpdateStatus::Downloading { progress, total })
+                    .await;
                 debug!("Download progress: {}%", progress);
             }
         }
@@ -317,7 +349,11 @@ impl OtaDaemon {
                 out
             }
             "none" => buffer,
-            other => return Err(Error::Misconfiguration(format!("unknown compression: {other}"))),
+            other => {
+                return Err(Error::Misconfiguration(format!(
+                    "unknown compression: {other}"
+                )))
+            }
         };
 
         // Verify SHA-256
@@ -334,7 +370,8 @@ impl OtaDaemon {
         if decompressed.len() != expected_size as usize {
             return Err(Error::Misconfiguration(format!(
                 "decompressed size mismatch: expected {}, got {}",
-                expected_size, decompressed.len()
+                expected_size,
+                decompressed.len()
             )));
         }
 
@@ -344,7 +381,10 @@ impl OtaDaemon {
 
     /// Install the verified image to the inactive slot.
     pub async fn install(&self, image: Vec<u8>, target_slot: slot::Slot) -> Result<()> {
-        self.set_status(UpdateStatus::Installing { slot: target_slot.to_string() }).await;
+        self.set_status(UpdateStatus::Installing {
+            slot: target_slot.to_string(),
+        })
+        .await;
 
         // Determine target partition
         let target_partition = format!("/dev/mmcblk0p{}", target_slot.partition_number());
@@ -352,11 +392,18 @@ impl OtaDaemon {
 
         // Check if partition exists
         if !std::path::Path::new(&target_partition).exists() {
-            return Err(Error::Fatal(format!("target partition {} not found", target_partition)));
+            return Err(Error::Fatal(format!(
+                "target partition {} not found",
+                target_partition
+            )));
         }
 
         // Write image directly to partition (streaming to avoid RAM issues)
-        info!("Writing image to {} ({} bytes)", target_partition, image.len());
+        info!(
+            "Writing image to {} ({} bytes)",
+            target_partition,
+            image.len()
+        );
 
         // Use dd for efficient block writing
         use std::process::Command;
@@ -372,11 +419,13 @@ impl OtaDaemon {
         use std::io::Write;
         {
             let stdin = dd.stdin.as_mut().unwrap();
-            stdin.write_all(&image)
+            stdin
+                .write_all(&image)
                 .map_err(|e| Error::Fatal(format!("write image: {e}")))?;
         }
 
-        let output = dd.wait_with_output()
+        let output = dd
+            .wait_with_output()
             .map_err(|e| Error::Fatal(format!("dd wait: {e}")))?;
 
         if !output.status.success() {
@@ -420,8 +469,10 @@ impl OtaDaemon {
             meta.active_slot.other()
         };
 
-        info!("Preparing update to slot {} (version {})",
-            target_slot, update.manifest.firmware_version);
+        info!(
+            "Preparing update to slot {} (version {})",
+            target_slot, update.manifest.firmware_version
+        );
 
         // Download and verify
         let image = self.download_and_verify(&update).await?;
@@ -444,7 +495,8 @@ impl OtaDaemon {
                 slot: target_slot.to_string(),
                 pending_reboot: true,
             };
-        }).await;
+        })
+        .await;
 
         // Reboot if configured
         if self.config.auto_reboot {
@@ -489,24 +541,34 @@ impl OtaDaemon {
                 s.current_version = report.firmware_version;
                 s.last_update = Some(current_timestamp());
                 s.rollback_count = meta.rollback_count;
-            }).await;
+            })
+            .await;
             Ok(true)
         } else {
             warn!("Health check FAILED, initiating rollback");
             let mut meta = self.slot_manager.write().await;
-            meta.fail_boot(format!("Health check failed: {} critical failures",
-                report.checks.iter().filter(|c| c.critical && !c.passed).count()))?;
+            meta.fail_boot(format!(
+                "Health check failed: {} critical failures",
+                report
+                    .checks
+                    .iter()
+                    .filter(|c| c.critical && !c.passed)
+                    .count()
+            ))?;
 
             // Switch back to previous slot
             self.boot_partition.switch_to_slot(meta.active_slot)?;
 
             let reason = "health check failed".to_string();
             self.update_state(|s| {
-                s.status = UpdateStatus::RolledBack { reason: reason.clone() };
+                s.status = UpdateStatus::RolledBack {
+                    reason: reason.clone(),
+                };
                 s.current_slot = meta.active_slot.to_string();
                 s.rollback_count = meta.rollback_count;
                 s.last_error = Some(reason);
-            }).await;
+            })
+            .await;
 
             // Reboot to rollback
             if self.config.auto_reboot {
@@ -526,11 +588,14 @@ impl OtaDaemon {
         self.boot_partition.switch_to_slot(meta.active_slot)?;
 
         self.update_state(|s| {
-            s.status = UpdateStatus::RolledBack { reason: reason.clone() };
+            s.status = UpdateStatus::RolledBack {
+                reason: reason.clone(),
+            };
             s.current_slot = meta.active_slot.to_string();
             s.rollback_count = meta.rollback_count;
             s.last_error = Some(reason);
-        }).await;
+        })
+        .await;
 
         if self.config.auto_reboot {
             self.reboot().await?;
@@ -547,7 +612,8 @@ impl OtaDaemon {
         // Initial check
         self.check_updates().await.ok();
 
-        let mut check_interval = interval(Duration::from_secs(self.config.check_interval_hours * 3600));
+        let mut check_interval =
+            interval(Duration::from_secs(self.config.check_interval_hours * 3600));
 
         while *self.running.read().await {
             check_interval.tick().await;
@@ -562,9 +628,12 @@ impl OtaDaemon {
                     if let Err(e) = self.prepare_update().await {
                         error!("Update preparation failed: {}", e);
                         self.update_state(|s| {
-                            s.status = UpdateStatus::Failed { reason: e.to_string() };
+                            s.status = UpdateStatus::Failed {
+                                reason: e.to_string(),
+                            };
                             s.last_error = Some(e.to_string());
-                        }).await;
+                        })
+                        .await;
                     }
                 }
                 Ok(None) => {
@@ -574,7 +643,8 @@ impl OtaDaemon {
                     warn!("Update check failed: {}", e);
                     self.update_state(|s| {
                         s.last_error = Some(e.to_string());
-                    }).await;
+                    })
+                    .await;
                 }
             }
         }
@@ -614,11 +684,7 @@ impl OtaDaemon {
 
 /// Simple version comparison (semver-like).
 fn version_compare(a: &str, b: &str) -> i32 {
-    let parse = |v: &str| -> Vec<u32> {
-        v.split('.')
-            .map(|s| s.parse().unwrap_or(0))
-            .collect()
-    };
+    let parse = |v: &str| -> Vec<u32> { v.split('.').map(|s| s.parse().unwrap_or(0)).collect() };
 
     let a_parts = parse(a);
     let b_parts = parse(b);
@@ -627,8 +693,12 @@ fn version_compare(a: &str, b: &str) -> i32 {
     for i in 0..max_len {
         let a = a_parts.get(i).copied().unwrap_or(0);
         let b = b_parts.get(i).copied().unwrap_or(0);
-        if a < b { return -1; }
-        if a > b { return 1; }
+        if a < b {
+            return -1;
+        }
+        if a > b {
+            return 1;
+        }
     }
     0
 }

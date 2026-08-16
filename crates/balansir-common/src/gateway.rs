@@ -54,16 +54,15 @@ fn validate_iface(name: &str, field: &str) -> Result<(), String> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     if !valid {
-        return Err(format!("gateway config: {field} has invalid characters: {name:?}"));
+        return Err(format!(
+            "gateway config: {field} has invalid characters: {name:?}"
+        ));
     }
     Ok(())
 }
 
 fn parse_cidr(cidr: &str) -> Result<std::net::IpAddr, String> {
-    let addr = cidr
-        .rsplit_once('/')
-        .map(|(a, _)| a)
-        .unwrap_or(cidr);
+    let addr = cidr.rsplit_once('/').map(|(a, _)| a).unwrap_or(cidr);
     addr.parse::<std::net::IpAddr>()
         .map_err(|_| format!("invalid CIDR: {cidr:?}"))
 }

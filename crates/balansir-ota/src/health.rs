@@ -3,8 +3,8 @@
 //! Validates critical gateway functionality after an OTA boot.
 //! Runs as a systemd service after multi-user.target.
 
-use balansir_common::{Error, Result};
 use crate::{manifest, slot};
+use balansir_common::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -184,8 +184,12 @@ impl HealthChecker {
         let start = Instant::now();
         let mut report = HealthReport::new(slot, firmware_version);
 
-        let critical_set: std::collections::HashSet<_> = self.config.critical_checks.iter().cloned().collect();
-        let all_checks: Vec<CheckName> = self.config.critical_checks.iter()
+        let critical_set: std::collections::HashSet<_> =
+            self.config.critical_checks.iter().cloned().collect();
+        let all_checks: Vec<CheckName> = self
+            .config
+            .critical_checks
+            .iter()
             .chain(self.config.optional_checks.iter())
             .cloned()
             .collect();
@@ -237,8 +241,10 @@ impl HealthChecker {
         }
 
         report.duration_ms = start.elapsed().as_millis() as u64;
-        info!("Health check complete: overall={} critical_failed={} duration={}ms",
-            report.overall_passed, report.critical_failed, report.duration_ms);
+        info!(
+            "Health check complete: overall={} critical_failed={} duration={}ms",
+            report.overall_passed, report.critical_failed, report.duration_ms
+        );
 
         Ok(report)
     }
@@ -271,11 +277,14 @@ impl HealthChecker {
 
     async fn check_ipc_connected(&self) -> Result<String> {
         // Try connecting to executor socket
-        let client = balansir_common::ipc::IpcClientConnection::connect(&self.executor_socket).await
+        let client = balansir_common::ipc::IpcClientConnection::connect(&self.executor_socket)
+            .await
             .map_err(|e| Error::Fatal(format!("connect executor: {e}")))?;
         // Send health check
         let mut conn = client;
-        let resp = conn.request(balansir_common::ipc::MsgType::HealthCheck, vec![]).await
+        let resp = conn
+            .request(balansir_common::ipc::MsgType::HealthCheck, vec![])
+            .await
             .map_err(|e| Error::Fatal(format!("health check request: {e}")))?;
         if resp.msg_type == balansir_common::ipc::MsgType::ResponseOk {
             Ok("IPC connection to executor OK".into())
@@ -320,7 +329,9 @@ impl HealthChecker {
                 Err(Error::Fatal(format!("LAN interface {} is down", lan)))
             }
         } else {
-            Err(Error::Misconfiguration("LAN interface not configured".into()))
+            Err(Error::Misconfiguration(
+                "LAN interface not configured".into(),
+            ))
         }
     }
 
@@ -337,7 +348,9 @@ impl HealthChecker {
                 Err(Error::Fatal(format!("WAN interface {} is down", wan)))
             }
         } else {
-            Err(Error::Misconfiguration("WAN interface not configured".into()))
+            Err(Error::Misconfiguration(
+                "WAN interface not configured".into(),
+            ))
         }
     }
 

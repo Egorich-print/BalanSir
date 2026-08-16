@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// Migration trait - implement for each schema version upgrade.
 pub trait ConfigMigration: Send + Sync {
@@ -48,8 +48,12 @@ impl MigrationRegistry {
     /// Register a migration.
     pub fn register<M: ConfigMigration + 'static>(&mut self, migration: M) {
         let key = (migration.from_version(), migration.to_version());
-        info!("Registered migration v{} -> v{}: {}",
-            migration.from_version(), migration.to_version(), migration.description());
+        info!(
+            "Registered migration v{} -> v{}: {}",
+            migration.from_version(),
+            migration.to_version(),
+            migration.description()
+        );
         self.migrations.insert(key, Box::new(migration));
     }
 
@@ -78,21 +82,35 @@ impl MigrationRegistry {
     }
 
     /// Apply migrations from version `from` to `to`.
-    pub fn apply(&self, from: u32, to: u32, mut config: serde_json::Value) -> Result<serde_json::Value> {
-        let path = self.find_path(from, to)
-            .ok_or_else(|| Error::Misconfiguration(format!("no migration path from v{} to v{}", from, to)))?;
+    pub fn apply(
+        &self,
+        from: u32,
+        to: u32,
+        mut config: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let path = self.find_path(from, to).ok_or_else(|| {
+            Error::Misconfiguration(format!("no migration path from v{} to v{}", from, to))
+        })?;
 
         for window in path.windows(2) {
             let from_v = window[0];
             let to_v = window[1];
             let key = (from_v, to_v);
             if let Some(migration) = self.migrations.get(&key) {
-                info!("Applying migration v{} -> v{}: {}", from_v, to_v, migration.description());
+                info!(
+                    "Applying migration v{} -> v{}: {}",
+                    from_v,
+                    to_v,
+                    migration.description()
+                );
                 config = migration.migrate(config)?;
                 migration.validate(&config)?;
                 info!("Migration v{} -> v{} completed", from_v, to_v);
             } else {
-                return Err(Error::Misconfiguration(format!("missing migration v{} -> v{}", from_v, to_v)));
+                return Err(Error::Misconfiguration(format!(
+                    "missing migration v{} -> v{}",
+                    from_v, to_v
+                )));
             }
         }
         Ok(config)
@@ -121,25 +139,32 @@ impl VersionedConfig {
     /// Load from file, applying migrations if needed.
     pub fn load(path: &Path, registry: &MigrationRegistry) -> Result<Self> {
         if !path.exists() {
-            return Err(Error::Misconfiguration(format!("config file not found: {}", path.display())));
+            return Err(Error::Misconfiguration(format!(
+                "config file not found: {}",
+                path.display()
+            )));
         }
 
-        let content = fs::read_to_string(path)
-            .map_err(|e| Error::Io(e))?;
+        let content = fs::read_to_string(path).map_err(|e| Error::Io(e))?;
 
         let mut vc: VersionedConfig = serde_json::from_str(&content)
             .map_err(|e| Error::Misconfiguration(format!("parse config: {e}")))?;
 
         if vc.version < CURRENT_SCHEMA_VERSION {
-            info!("Migrating config from v{} to v{}", vc.version, CURRENT_SCHEMA_VERSION);
+            info!(
+                "Migrating config from v{} to v{}",
+                vc.version, CURRENT_SCHEMA_VERSION
+            );
             vc.config = registry.apply(vc.version, CURRENT_SCHEMA_VERSION, vc.config)?;
             vc.version = CURRENT_SCHEMA_VERSION;
 
             // Write back migrated config
             vc.save(path)?;
         } else if vc.version > CURRENT_SCHEMA_VERSION {
-            warn!("Config version {} is newer than supported {}, skipping migration",
-                vc.version, CURRENT_SCHEMA_VERSION);
+            warn!(
+                "Config version {} is newer than supported {}, skipping migration",
+                vc.version, CURRENT_SCHEMA_VERSION
+            );
         }
 
         Ok(vc)
@@ -148,18 +173,15 @@ impl VersionedConfig {
     /// Save config atomically.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| Error::Io(e))?;
+            fs::create_dir_all(parent).map_err(|e| Error::Io(e))?;
         }
 
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| Error::Misconfiguration(format!("serialize config: {e}")))?;
 
         let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, content)
-            .map_err(|e| Error::Io(e))?;
-        fs::rename(&tmp, path)
-            .map_err(|e| Error::Io(e))?;
+        fs::write(&tmp, content).map_err(|e| Error::Io(e))?;
+        fs::rename(&tmp, path).map_err(|e| Error::Io(e))?;
 
         Ok(())
     }
@@ -205,8 +227,7 @@ impl MigrationRunner {
             return Ok(report);
         }
 
-        fs::create_dir_all(&self.backup_dir)
-            .map_err(|e| Error::Io(e))?;
+        fs::create_dir_all(&self.backup_dir).map_err(|e| Error::Io(e))?;
 
         for entry in fs::read_dir(&self.config_dir)? {
             let entry = entry?;
@@ -236,18 +257,17 @@ impl MigrationRunner {
 
     fn migrate_file(&self, path: &Path) -> Result<bool> {
         let content = fs::read_to_string(path)?;
-        let mut value: serde_json::Value = if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-            toml::from_str(&content)
-                .map_err(|e| Error::Misconfiguration(format!("parse TOML: {e}")))?
-        } else {
-            serde_json::from_str(&content)
-                .map_err(|e| Error::Misconfiguration(format!("parse JSON: {e}")))?
-        };
+        let mut value: serde_json::Value =
+            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                toml::from_str(&content)
+                    .map_err(|e| Error::Misconfiguration(format!("parse TOML: {e}")))?
+            } else {
+                serde_json::from_str(&content)
+                    .map_err(|e| Error::Misconfiguration(format!("parse JSON: {e}")))?
+            };
 
         // Extract version if present
-        let version = value.get("version")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
         if version == 0 {
             // No version field - assume legacy v0, add version and skip
@@ -260,17 +280,24 @@ impl MigrationRunner {
         }
 
         // Backup original
-        let backup_path = self.backup_dir.join(format!("{}.v{}.bak",
-            path.file_name().unwrap().to_string_lossy(), version));
-        fs::copy(path, &backup_path)
-            .map_err(|e| Error::Io(e))?;
+        let backup_path = self.backup_dir.join(format!(
+            "{}.v{}.bak",
+            path.file_name().unwrap().to_string_lossy(),
+            version
+        ));
+        fs::copy(path, &backup_path).map_err(|e| Error::Io(e))?;
 
         // Apply migrations
-        value = self.registry.apply(version, CURRENT_SCHEMA_VERSION, value)?;
+        value = self
+            .registry
+            .apply(version, CURRENT_SCHEMA_VERSION, value)?;
 
         // Add version field
         if let Some(obj) = value.as_object_mut() {
-            obj.insert("version".into(), serde_json::Value::Number(CURRENT_SCHEMA_VERSION.into()));
+            obj.insert(
+                "version".into(),
+                serde_json::Value::Number(CURRENT_SCHEMA_VERSION.into()),
+            );
         }
 
         // Write new config
@@ -286,7 +313,12 @@ impl MigrationRunner {
         fs::write(&tmp, content)?;
         fs::rename(&tmp, path)?;
 
-        info!("Migrated {} from v{} to v{}", path.display(), version, CURRENT_SCHEMA_VERSION);
+        info!(
+            "Migrated {} from v{} to v{}",
+            path.display(),
+            version,
+            CURRENT_SCHEMA_VERSION
+        );
         Ok(true)
     }
 }

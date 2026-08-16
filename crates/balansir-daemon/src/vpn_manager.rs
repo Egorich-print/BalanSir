@@ -44,15 +44,11 @@ pub fn profile_to_xray_config(
 ) -> Result<XrayConfig, String> {
     let transport = match &profile.transport {
         Transport::Tcp => XrayTransport::Tcp,
-        Transport::WebSocket { path } => XrayTransport::WebSocket {
-            path: path.clone(),
-        },
+        Transport::WebSocket { path } => XrayTransport::WebSocket { path: path.clone() },
         Transport::Grpc { service_name } => XrayTransport::Grpc {
             service_name: service_name.clone(),
         },
-        Transport::HttpUpgrade { path } => XrayTransport::HttpUpgrade {
-            path: path.clone(),
-        },
+        Transport::HttpUpgrade { path } => XrayTransport::HttpUpgrade { path: path.clone() },
     };
     let security = match profile.security {
         Security::None => XraySecurity::None,
@@ -75,7 +71,10 @@ pub fn profile_to_xray_config(
                     .sni
                     .clone()
                     .unwrap_or_else(|| profile.server.clone()),
-                fingerprint: profile.fingerprint.clone().unwrap_or_else(|| "chrome".into()),
+                fingerprint: profile
+                    .fingerprint
+                    .clone()
+                    .unwrap_or_else(|| "chrome".into()),
                 public_key: pbk,
                 short_id: profile.reality_sid.clone().unwrap_or_default(),
                 spider_x: String::new(),
@@ -89,11 +88,7 @@ pub fn profile_to_xray_config(
         flow: profile.flow.clone(),
         transport,
         security,
-        name: Some(format!(
-            "{} @ {}",
-            profile.label,
-            profile.endpoint()
-        )),
+        name: Some(format!("{} @ {}", profile.label, profile.endpoint())),
         socks_port: fallback_socks,
         http_port: fallback_http,
     })
@@ -547,10 +542,7 @@ mod tests {
 
     impl XrayConsumer for RecordingConsumer {
         fn apply_selected(&self, profile: Option<&VpnProfile>) {
-            self.0
-                .lock()
-                .unwrap()
-                .push(profile.map(|p| p.endpoint()));
+            self.0.lock().unwrap().push(profile.map(|p| p.endpoint()));
         }
     }
 

@@ -102,7 +102,8 @@ impl NetworkConfig {
     /// Load a network config from a TOML file.
     pub fn from_file(path: &str) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
-        let file: NetworkConfigFile = toml::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))?;
+        let file: NetworkConfigFile =
+            toml::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))?;
         Ok(file.network)
     }
 
@@ -159,7 +160,10 @@ impl NetworkConfig {
         // The LAN subnet must parse as a CIDR (used for NAT + management
         // firewall); fail-closed rather than installing a bogus rule.
         if parse_cidr(&self.lan_subnet).is_none() {
-            return Err(format!("network config: invalid lan_subnet {}", self.lan_subnet));
+            return Err(format!(
+                "network config: invalid lan_subnet {}",
+                self.lan_subnet
+            ));
         }
 
         Ok(())
@@ -270,7 +274,10 @@ mod tests {
         };
         let interfaces = vec![iface("eth1", Some("ether"))];
         let err = cfg.validate(&interfaces).unwrap_err();
-        assert!(err.contains("lan_interface"), "error must name the gap: {err}");
+        assert!(
+            err.contains("lan_interface"),
+            "error must name the gap: {err}"
+        );
     }
 
     #[test]
@@ -293,7 +300,10 @@ mod tests {
         };
         let interfaces = vec![iface("eth0", Some("ether"))];
         let err = cfg.validate(&interfaces).unwrap_err();
-        assert!(err.contains("wan0"), "error must name the missing iface: {err}");
+        assert!(
+            err.contains("wan0"),
+            "error must name the missing iface: {err}"
+        );
     }
 
     #[test]
@@ -303,10 +313,7 @@ mod tests {
             lan_interface: Some("br0".into()),
             ..Default::default()
         };
-        let interfaces = vec![
-            iface("eth1", Some("ether")),
-            iface("br0", Some("bridge")),
-        ];
+        let interfaces = vec![iface("eth1", Some("ether")), iface("br0", Some("bridge"))];
         assert!(cfg.validate(&interfaces).is_err());
     }
 

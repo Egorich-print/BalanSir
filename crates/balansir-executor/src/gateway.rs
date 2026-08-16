@@ -81,7 +81,9 @@ impl NftablesGatewayBackend {
         )?;
         self.backend.ensure_hooked_chain(
             "input",
-            &["type", "filter", "hook", "input", "priority", "0", "policy", "drop", ";"],
+            &[
+                "type", "filter", "hook", "input", "priority", "0", "policy", "drop", ";",
+            ],
         )?;
         Ok(())
     }
@@ -108,7 +110,10 @@ impl NftablesGatewayBackend {
     /// rules are removed first, then added in order.
     fn apply_forward_conntrack(&self) -> Result<()> {
         self.remove_all_rules("forward", GATEWAY_FWD_TAG)?;
-        for (state, verdict) in [("established,related", NftVerdict::Accept), ("invalid", NftVerdict::Drop)] {
+        for (state, verdict) in [
+            ("established,related", NftVerdict::Accept),
+            ("invalid", NftVerdict::Drop),
+        ] {
             let spec = NftRuleSpec {
                 proto: None,
                 src_cidr: None,
@@ -233,7 +238,9 @@ impl NftablesGatewayBackend {
 #[async_trait]
 impl GatewayBackend for NftablesGatewayBackend {
     async fn apply(&self, config: &GatewayConfig) -> Result<GatewayResult> {
-        config.validate().map_err(balansir_common::Error::Misconfiguration)?;
+        config
+            .validate()
+            .map_err(balansir_common::Error::Misconfiguration)?;
         self.ensure_base_chains()?;
         self.set_ip_forward(true)?;
         self.apply_forward_conntrack()?;
@@ -285,7 +292,13 @@ impl GatewayBackend for NftablesGatewayBackend {
         let ip_fwd = self.ip_forward_enabled();
         let (wan, lan, subnet) = applied
             .as_ref()
-            .map(|c| (Some(c.wan_interface.clone()), Some(c.lan_interface.clone()), Some(c.lan_subnet.clone())))
+            .map(|c| {
+                (
+                    Some(c.wan_interface.clone()),
+                    Some(c.lan_interface.clone()),
+                    Some(c.lan_subnet.clone()),
+                )
+            })
             .unwrap_or((None, None, None));
         Ok(GatewayStatus {
             enabled: nat_present && ip_fwd,
@@ -313,7 +326,9 @@ pub struct RecordOnlyGatewayBackend {
 #[async_trait]
 impl GatewayBackend for RecordOnlyGatewayBackend {
     async fn apply(&self, config: &GatewayConfig) -> Result<GatewayResult> {
-        config.validate().map_err(balansir_common::Error::Misconfiguration)?;
+        config
+            .validate()
+            .map_err(balansir_common::Error::Misconfiguration)?;
         *self.applied.lock().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
         Ok(GatewayResult {
             ok: true,
@@ -370,7 +385,10 @@ mod tests {
         let status = backend.status().await.unwrap();
         assert!(status.enabled);
         assert_eq!(status.wan_interface.as_deref(), Some("eth1"));
-        assert_eq!(status.mgmt_ports, balansir_common::gateway::DEFAULT_MGMT_PORTS);
+        assert_eq!(
+            status.mgmt_ports,
+            balansir_common::gateway::DEFAULT_MGMT_PORTS
+        );
         let removed = backend.remove().await.unwrap();
         assert!(removed.ok);
         let status = backend.status().await.unwrap();
