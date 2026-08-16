@@ -44,25 +44,27 @@ SD_IMG="${BINARIES_DIR}/sdcard.img"
 
 # --- 1. Boot partition (vfat) ---
 echo ">> creating boot.vfat (${BOOT_SIZE_MB}MB)"
-BOOT_SECTORS=$((BOOT_SIZE_MB * 2048))
-mkdosfs -F 32 -n boot -C "${BOOT_IMG}" "${BOOT_SECTORS}"
+# mkdosfs uses 1024-byte blocks, not 512-byte sectors
+BOOT_BLOCKS=$((BOOT_SIZE_MB * 1024))
+mkdosfs -F 32 -n boot -C "${BOOT_IMG}" "${BOOT_BLOCKS}"
 
-# Copy boot files (no -s flag: it's for directories, not files)
+# Copy boot files
+# Use -o to overwrite existing files (mcopy returns 1 on duplicate)
 MTOOLS_SKIP_CHECK=1
 export MTOOLS_SKIP_CHECK
 for i in "${BINARIES_DIR}"/*.dtb; do
-    [ -f "$i" ] && mcopy -p -i "${BOOT_IMG}" "$i" "::$(basename "$i")"
+    [ -f "$i" ] && mcopy -o -i "${BOOT_IMG}" "$i" "::$(basename "$i")"
 done
 for i in "${BINARIES_DIR}"/rpi-firmware/*; do
-    [ -d "$i" ] && mcopy -sp -i "${BOOT_IMG}" "$i" "::$(basename "$i")" || \
-    [ -f "$i" ] && mcopy -p -i "${BOOT_IMG}" "$i" "::$(basename "$i")"
+    [ -d "$i" ] && mcopy -o -s -i "${BOOT_IMG}" "$i" "::$(basename "$i")" || \
+    [ -f "$i" ] && mcopy -o -i "${BOOT_IMG}" "$i" "::$(basename "$i")"
 done
 KERNEL=$(sed -n 's/^kernel=//p' "${BINARIES_DIR}/rpi-firmware/config.txt")
-mcopy -p -i "${BOOT_IMG}" "${BINARIES_DIR}/${KERNEL}" "::${KERNEL}"
+mcopy -o -i "${BOOT_IMG}" "${BINARIES_DIR}/${KERNEL}" "::${KERNEL}"
 
 # Copy cmdline-A.txt as default cmdline.txt
 cp "${BOARD_DIR}/cmdline-A.txt" "${BINARIES_DIR}/cmdline.txt"
-mcopy -p -i "${BOOT_IMG}" "${BINARIES_DIR}/cmdline.txt" "::cmdline.txt"
+mcopy -o -i "${BOOT_IMG}" "${BINARIES_DIR}/cmdline.txt" "::cmdline.txt"
 
 echo "   boot.vfat: $(ls -lh "${BOOT_IMG}" | awk '{print $5}')"
 
