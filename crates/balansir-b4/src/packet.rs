@@ -82,6 +82,38 @@ impl TcpPacket {
     pub fn is_empty(&self) -> bool {
         self.raw.is_empty()
     }
+
+    /// IPv4 source address (big-endian bytes 12..16 of the IP header).
+    pub fn src_ip(&self) -> [u8; 4] {
+        [self.raw[12], self.raw[13], self.raw[14], self.raw[15]]
+    }
+
+    /// IPv4 destination address (big-endian bytes 16..20 of the IP header).
+    pub fn dst_ip(&self) -> [u8; 4] {
+        [self.raw[16], self.raw[17], self.raw[18], self.raw[19]]
+    }
+
+    /// TCP sequence number of the first payload byte (bytes 4..8 of the TCP
+    /// header).
+    pub fn tcp_seq(&self) -> u32 {
+        u32::from_be_bytes([
+            self.raw[self.tcp_offset + 4],
+            self.raw[self.tcp_offset + 5],
+            self.raw[self.tcp_offset + 6],
+            self.raw[self.tcp_offset + 7],
+        ])
+    }
+
+    /// TCP flags byte (byte 13 of the TCP header). Lower bits are FIN/SYN/RST/
+    /// PSH/ACK/URG/ECE/CWR.
+    pub fn tcp_flags(&self) -> u8 {
+        self.raw[self.tcp_offset + 13]
+    }
+
+    /// The TCP payload (application data), i.e. everything after the TCP header.
+    pub fn tcp_payload(&self) -> &[u8] {
+        &self.raw[self.tcp_offset + self.tcp_header_len..]
+    }
 }
 
 /// TCP header option manipulation.

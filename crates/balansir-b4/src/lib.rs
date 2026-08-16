@@ -12,6 +12,7 @@ pub mod nfq;
 #[cfg(target_os = "linux")]
 pub mod nfqueue;
 pub mod packet;
+pub mod reassembly;
 pub mod strategies;
 
 pub use config::B4Config;

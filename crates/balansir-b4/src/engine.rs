@@ -90,7 +90,8 @@ impl B4Engine {
             // the engine is marked dead and the daemon surfaces it, while the
             // kernel FAIL_OPEN flag keeps traffic flowing.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                interception_loop(&queue, &running, &stats, &config, &ports)
+                let mut reassembler = crate::reassembly::TcpReassembler::new();
+                interception_loop(&queue, &running, &stats, &config, &ports, &mut reassembler)
             }));
             let outcome = match outcome {
                 Ok(()) => "stopped".to_string(),
@@ -153,6 +154,7 @@ fn interception_loop(
     stats: &Arc<AtomicU64Arr>,
     config: &EngineConfig,
     ports: &[u16],
+    reassembler: &mut crate::reassembly::TcpReassembler,
 ) {
     while running.load(Ordering::SeqCst) {
         let packet = match queue.recv_packet() {
@@ -210,9 +212,18 @@ fn interception_loop(
             continue;
         }
 
-        // Try to identify the destination host from TLS SNI.
-        let tcp_payload = &payload[tcp.tcp_offset + tcp.tcp_header_len..];
-        let host = extract_tls_sni(tcp_payload);
+        // Try to identify the destination host from TLS SNI. A ClientHello is
+        // often fragmented across two segments (e.g. 1460 + 361 bytes); the
+        // per-flow reassembler reconstructs just the head of the stream so the
+        // stateless SNI parser can run on the complete record.
+        let tcp_payload = tcp.tcp_payload();
+        let reassembled = reassembler.feed(
+            crate::reassembly::FlowKey::for_packet(&tcp),
+            tcp.tcp_seq(),
+            tcp_payload,
+            tcp.tcp_flags() & 0x11 != 0, // FIN or RST
+        );
+        let host = reassembled.or_else(|| extract_tls_sni(tcp_payload));
         tracing::debug!(
             dst_port = tcp.dst_port(),
             payload_len = tcp_payload.len(),
