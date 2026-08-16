@@ -2,7 +2,6 @@
 //! exposes the daemon-facing `Reconciler` API.
 
 pub mod adapters;
-pub mod bootstrap;
 pub mod dns_flow;
 pub mod dummy;
 pub mod error;
