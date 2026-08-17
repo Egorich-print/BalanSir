@@ -81,9 +81,15 @@ pub struct EngineConfig {
 }
 
 impl EngineConfig {
-    /// Resolve the profile for a hostname (default profile if none match).
+    /// Resolve the profile for a hostname: the first profile whose domain
+    /// list matches; if none matches, fall back to the first profile with an
+    /// empty domain list (the catch-all "default" set). A profile with empty
+    /// domains must never shadow a more specific one, regardless of order.
     pub fn profile_for(&self, host: &str) -> Option<&Profile> {
-        self.profiles.iter().find(|p| p.matches_host(host))
+        self.profiles
+            .iter()
+            .find(|p| !p.domains.is_empty() && p.matches_host(host))
+            .or_else(|| self.profiles.iter().find(|p| p.domains.is_empty()))
     }
 }
 
@@ -103,6 +109,44 @@ mod tests {
         assert!(p.matches_host("GOOGLEVIDEO.COM"));
         assert!(!p.matches_host("youtube.org"));
         assert!(!p.matches_host("notyoutube.com"));
+    }
+
+    #[test]
+    fn default_profile_is_catch_all_fallback() {
+        // The default set (empty domains) resolves for any host...
+        let cfg = EngineConfig {
+            profiles: vec![Profile {
+                name: "default".into(),
+                domains: vec![],
+                strategies: vec![],
+            }],
+        };
+        assert_eq!(
+            cfg.profile_for("anything.example").unwrap().name,
+            "default",
+            "empty-domain profile is the catch-all fallback"
+        );
+    }
+
+    #[test]
+    fn specific_profile_beats_default_regardless_of_order() {
+        // ...but never shadows a specific profile, even when listed first.
+        let cfg = EngineConfig {
+            profiles: vec![
+                Profile {
+                    name: "default".into(),
+                    domains: vec![],
+                    strategies: vec![],
+                },
+                Profile {
+                    name: "yt".into(),
+                    domains: vec!["youtube.com".into()],
+                    strategies: vec![],
+                },
+            ],
+        };
+        assert_eq!(cfg.profile_for("www.youtube.com").unwrap().name, "yt");
+        assert_eq!(cfg.profile_for("example.org").unwrap().name, "default");
     }
 
     #[test]
