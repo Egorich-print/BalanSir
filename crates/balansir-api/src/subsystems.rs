@@ -86,7 +86,7 @@ pub async fn get_system(State(state): State<Arc<ApiState>>) -> Response {
                     load15: snapshot.system.load15,
                 },
                 uptime_secs: snapshot.system.uptime_secs,
-                filesystems: Vec::new(), // TODO: parse /proc/mounts
+                filesystems: snapshot.system.filesystems,
                 interface_rates: snapshot.interface_rates,
             };
             Json(system).into_response()
