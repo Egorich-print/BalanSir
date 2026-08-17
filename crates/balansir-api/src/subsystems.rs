@@ -28,7 +28,7 @@ pub struct SystemInfo {
     pub memory: MemoryInfo,
     pub load: LoadInfo,
     pub uptime_secs: u64,
-    pub filesystems: Vec<FilesystemInfo>,
+    pub filesystems: Vec<balansir_common::subsystems::FilesystemInfo>,
     pub interface_rates: Vec<InterfaceRate>,
 }
 
@@ -53,15 +53,6 @@ pub struct LoadInfo {
     pub load15: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct FilesystemInfo {
-    pub mount_point: String,
-    pub total_mb: u64,
-    pub used_mb: u64,
-    pub available_mb: u64,
-    pub usage_percent: f64,
-    pub fstype: String,
-}
 
 /// `GET /system` — comprehensive system monitoring snapshot (CPU, memory,
 /// load, uptime, filesystem usage, interface rates, temperatures where

@@ -4,8 +4,46 @@
 //! by the API and WebUI. WAN identity support deliberately preserves the
 //! hardware MAC: the executor records it at first use and restores it on
 //! removal, so MAC cloning never destroys the original factory address.
+//!
+//! # Interface Roles
+//!
+//! BalanSir classifies each interface into a role (WAN, LAN, MANAGEMENT, UNKNOWN).
+//! Roles are determined by configuration, not by interface names — the core
+//! never assumes `eth0` = WAN or `eth1` = LAN.
 
 use serde::{Deserialize, Serialize};
+
+/// Network interface role — determined by configuration and observable
+/// properties, never by interface name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterfaceRole {
+    /// WAN (provider-facing) interface. NAT masquerade applied here.
+    Wan,
+    /// LAN (client-facing) interface. Management access scoped here.
+    Lan,
+    /// Management-only interface (e.g. Tailscale, debug console).
+    Management,
+    /// Unknown / not yet classified.
+    Unknown,
+}
+
+impl InterfaceRole {
+    pub fn label(&self) -> &'static str {
+        match self {
+            InterfaceRole::Wan => "WAN",
+            InterfaceRole::Lan => "LAN",
+            InterfaceRole::Management => "Mgmt",
+            InterfaceRole::Unknown => "Unknown",
+        }
+    }
+}
+
+impl Default for InterfaceRole {
+    fn default() -> Self {
+        InterfaceRole::Unknown
+    }
+}
 
 /// Snapshot of one kernel interface (netlink `RTM_GETLINK`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +52,10 @@ pub struct InterfaceInfo {
     pub index: i32,
     pub kind: Option<String>,
     pub mac: Option<String>,
+    /// Assigned role (WAN/LAN/Management/Unknown). Determined by
+    /// configuration or automatic detection, never by name.
+    #[serde(default)]
+    pub role: InterfaceRole,
     /// Factory (permanent) MAC from `IFLA_PERM_ADDRESS`, when the kernel
     /// exposes one. Never overwritten by MAC cloning.
     #[serde(default)]
