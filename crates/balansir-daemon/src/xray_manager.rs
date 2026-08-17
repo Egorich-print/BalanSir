@@ -8,6 +8,13 @@
 //! active endpoint degrades past a threshold — fails over to the next enabled
 //! endpoint. Selection is explainable: every switch records a reason.
 //!
+//! Two health classes (ADR-033) are kept strictly separate:
+//! - **L1** (per-profile remote reachability) lives in `VpnPool` and drives
+//!   selection — this manager never mutates it.
+//! - **L2** (active-driver/process liveness) lives here: `l2_watchdog`
+//!   supervises the *pool-driven* active runtime and applies a bounded
+//!   restart/recovery guard. L2 never feeds candidate ranking.
+//!
 //! Security model:
 //! - endpoints are validated (`XrayConfig::validate`) before any process start;
 //! - configs (containing the UUID secret) are written by the driver into
@@ -28,6 +35,7 @@ use balansir_common::path_health::{PathHealth, PathHealthConfig, PathSample, Pat
 use balansir_common::subsystems::{
     SharedSubsystemSnapshot, SubsystemEvent, XrayProfileView, XraySnapshot,
 };
+use balansir_common::HealthStatus;
 
 /// Build the path-health tracker config for Xray endpoints. `enter_degraded`
 /// is the existing `failover_threshold` (consecutive bad probes), so failover
@@ -198,6 +206,169 @@ fn next_enabled(current: &Option<String>, enabled: &[String]) -> Option<String> 
 /// deterministic fake driver instead of spawning real xray processes.
 type EndpointStarter = Arc<dyn Fn(XrayConfig) -> Box<dyn ComponentDriver + Send> + Send + Sync>;
 
+/// Bounded restart/recovery guard for the active driver (ADR-033 L2).
+/// Deliberately *not* a circuit breaker and *not* part of the pool health
+/// model: it owns the local runtime lifecycle only and never influences
+/// profile ranking/selection.
+#[derive(Debug, Clone)]
+pub struct L2RecoveryConfig {
+    /// Startup grace window after a driver start: `Unknown` (and other
+    /// non-Healthy results) are tolerated here — the driver is still coming
+    /// up. After the window closes, non-Healthy is treated as evidence.
+    pub grace_ms: u64,
+    /// Maximum driver restarts allowed within `window_ms`. When the budget is
+    /// spent, recovery is exhausted and the runtime is stopped (traffic
+    /// direct).
+    pub max_restarts: u32,
+    /// Rolling window over which `max_restarts` is counted. Restarts that
+    /// succeed push the window forward.
+    pub window_ms: u64,
+    /// Minimum delay between two restarts (backoff) so a wedged driver cannot
+    /// burn CPU restarting in a tight loop.
+    pub backoff_ms: u64,
+}
+
+impl Default for L2RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            grace_ms: 10_000,
+            max_restarts: 3,
+            window_ms: 60_000,
+            backoff_ms: 5_000,
+        }
+    }
+}
+
+/// One L2 recovery decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum L2Action {
+    /// Runtime healthy / within grace window: keep running, no restart.
+    None,
+    /// Non-Healthy observed but still within the startup grace window, or
+    /// inside the backoff gap: do nothing yet.
+    Grace,
+    /// Bounded restart of the *same* driver (never a profile switch).
+    Restart,
+    /// Restart budget exhausted: stop the runtime; coordinator observes no
+    /// active runtime.
+    Exhaust,
+}
+
+/// The bounded restart/recovery state machine for the active driver. Pure and
+/// deterministic (no IO) so the recovery semantics are unit-testable without
+/// a real Xray process.
+#[derive(Debug)]
+struct L2Recovery {
+    cfg: L2RecoveryConfig,
+    /// When the current driver instance was started (grace anchor).
+    started_ms: i64,
+    /// Consecutive non-Healthy observations after the grace window.
+    bad_count: u32,
+    /// Restarts performed inside the current window.
+    restarts_in_window: u32,
+    /// Start of the current restart-counting window.
+    window_start_ms: i64,
+    /// When the last restart happened (backoff anchor).
+    last_restart_ms: i64,
+    /// Recovery budget spent: runtime must stay stopped until a fresh start.
+    exhausted: bool,
+}
+
+impl L2Recovery {
+    fn new(cfg: L2RecoveryConfig) -> Self {
+        Self {
+            cfg,
+            started_ms: 0,
+            bad_count: 0,
+            restarts_in_window: 0,
+            window_start_ms: 0,
+            last_restart_ms: 0,
+            exhausted: false,
+        }
+    }
+
+    /// Record a driver start (grace anchor reset). A fresh start clears the
+    /// exhaustion flag — the runtime gets a new, bounded recovery budget.
+    fn on_start(&mut self, now_ms: i64) {
+        self.started_ms = now_ms;
+        self.bad_count = 0;
+        self.restarts_in_window = 0;
+        self.window_start_ms = 0;
+        // Far in the past so the first recovery is never backoff-blocked.
+        self.last_restart_ms = i64::MIN;
+        self.exhausted = false;
+    }
+
+    /// Record an L2 recovery restart of the *same* driver: refresh the grace
+    /// anchor and bad count, but keep the restart budget so bounded recovery
+    /// still applies across restarts inside one window.
+    fn on_restart(&mut self, now_ms: i64) {
+        self.started_ms = now_ms;
+        self.bad_count = 0;
+        self.last_restart_ms = now_ms;
+    }
+
+    /// Observe one L2 health result and decide the recovery action.
+    fn observe(&mut self, status: HealthStatus, now_ms: i64) -> L2Action {
+        if self.exhausted {
+            return L2Action::Exhaust;
+        }
+        let in_grace = now_ms.saturating_sub(self.started_ms).max(0) < self.cfg.grace_ms as i64;
+        match status {
+            HealthStatus::Healthy => {
+                self.bad_count = 0;
+                self.restarts_in_window = 0;
+                self.window_start_ms = 0;
+                L2Action::None
+            }
+            HealthStatus::Unknown => {
+                if in_grace {
+                    // Startup window: the driver is still coming up.
+                    L2Action::Grace
+                } else {
+                    // Past grace, `Unknown` is evidence (stuck, never Healthy).
+                    self.bad(now_ms)
+                }
+            }
+            HealthStatus::Degraded { .. } | HealthStatus::Unhealthy { .. } => {
+                if in_grace {
+                    // Still booting; a transient Degraded here is expected.
+                    L2Action::Grace
+                } else {
+                    self.bad(now_ms)
+                }
+            }
+        }
+    }
+
+    /// Non-Healthy observation outside the grace window: recovery evidence.
+    fn bad(&mut self, now_ms: i64) -> L2Action {
+        self.bad_count = self.bad_count.saturating_add(1);
+
+        // Backoff: do not restart faster than `backoff_ms` apart. A negative
+        // delta (clock skew / test clock) means "at or before the restart",
+        // clamp to 0 so a zero backoff still allows an immediate retry.
+        if now_ms.saturating_sub(self.last_restart_ms).max(0) < self.cfg.backoff_ms as i64 {
+            return L2Action::Grace;
+        }
+
+        // Rolling window: restart budget resets once the window elapses.
+        if now_ms.saturating_sub(self.window_start_ms) >= self.cfg.window_ms as i64 {
+            self.window_start_ms = now_ms;
+            self.restarts_in_window = 0;
+        }
+
+        if self.restarts_in_window >= self.cfg.max_restarts {
+            self.exhausted = true;
+            return L2Action::Exhaust;
+        }
+
+        self.restarts_in_window = self.restarts_in_window.saturating_add(1);
+        self.last_restart_ms = now_ms;
+        L2Action::Restart
+    }
+}
+
 /// Xray component manager.
 pub struct XrayManager {
     snapshot: SharedSubsystemSnapshot,
@@ -231,6 +402,16 @@ pub struct XrayManager {
     last_switch_ms: RwLock<i64>,
     driver: RwLock<Option<Box<dyn ComponentDriver + Send>>>,
     starter: EndpointStarter,
+    /// L2 bounded restart/recovery guard for the active driver (ADR-033).
+    /// Owns the local runtime lifecycle; never feeds selection.
+    l2: RwLock<L2Recovery>,
+    /// Pool-profile label whose L2 recovery was exhausted. The pool re-applying
+    /// the *same* label stays stopped (no restart loop); a different selection
+    /// or a fresh pool start clears the guard.
+    l2_exhausted_label: RwLock<Option<String>>,
+    /// Number of driver instances started since process launch (observability;
+    /// used by the watchdog to report restarts truthfully).
+    started_count: std::sync::atomic::AtomicU64,
 }
 
 impl XrayManager {
@@ -286,6 +467,9 @@ impl XrayManager {
             last_switch_ms: RwLock::new(0),
             driver: RwLock::new(None),
             starter,
+            l2: RwLock::new(L2Recovery::new(L2RecoveryConfig::default())),
+            l2_exhausted_label: RwLock::new(None),
+            started_count: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -347,6 +531,10 @@ impl XrayManager {
         driver.start().await.map_err(|e| e.to_string())?;
         *self.driver.write().await = Some(driver);
         *self.active.write().await = Some(idx);
+        *self.last_switch_ms.write().await = now_ms();
+        self.started_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.l2.write().await.on_start(now_ms());
         let name = self.endpoints[idx].name.clone();
         let _ = self.events.send(SubsystemEvent::XrayStarted {
             profile: name.clone(),
@@ -371,6 +559,10 @@ impl XrayManager {
         *self.pool_label.write().await = Some(label.clone());
         *self.switch_reason.write().await = Some(reason.clone());
         *self.last_switch_ms.write().await = now_ms();
+        self.started_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.l2.write().await.on_start(now_ms());
+        *self.l2_exhausted_label.write().await = None;
         let _ = self.events.send(SubsystemEvent::XrayStarted {
             profile: label.clone(),
         });
@@ -427,6 +619,13 @@ impl XrayManager {
             let running = self.driver.read().await.is_some();
             let running_label = self.active_label().await;
             if running && running_label.as_deref() == Some(label.as_str()) {
+                return Ok(());
+            }
+            // L2 recovery exhaustion guard: the pool re-selecting the *same*
+            // profile whose recovery budget was spent must not spin a restart
+            // loop. It stays stopped (traffic direct) until the pool selects a
+            // different profile or explicitly clears selection.
+            if *self.l2_exhausted_label.read().await == Some(label.clone()) {
                 return Ok(());
             }
             return self
@@ -576,6 +775,91 @@ impl XrayManager {
         }
     }
 
+    /// L2 watchdog (ADR-033): supervise the *active* runtime's local
+    /// liveness and apply the bounded restart/recovery guard. Only the
+    /// pool-driven driver is supervised here; static endpoints keep the
+    /// legacy `health_and_failover` L2 feed. Never influences selection.
+    async fn l2_watchdog(&self, now_ms: i64) {
+        let status = {
+            let guard = self.driver.read().await;
+            match guard.as_ref() {
+                Some(d) => d.health_check().await,
+                None => return,
+            }
+        };
+        // Skip the legacy static-endpoint supervision path: it already feeds
+        // L2 into the shared PathHealth model (per-endpoint failover). This
+        // watchdog is exclusively for pool-driven profiles.
+        if !*self.pool_driven.read().await {
+            return;
+        }
+
+        let action = {
+            let mut l2 = self.l2.write().await;
+            l2.observe(status, now_ms)
+        };
+        match action {
+            L2Action::None | L2Action::Grace => {}
+            L2Action::Restart => self.restart_active_driver().await,
+            L2Action::Exhaust => self.exhaust_recovery().await,
+        }
+    }
+
+    /// Bounded restart of the *same* active driver (L2 recovery). Restarts
+    /// the running runtime in place — never switches to another profile — so
+    /// an L2 failure cannot trigger profile rotation. On restart failure the
+    /// recovery loop continues with the state machine (next pass escalates).
+    async fn restart_active_driver(&self) {
+        let label = self.active_label().await;
+        let mut guard = self.driver.write().await;
+        match guard.as_mut() {
+            Some(driver) => {
+                match driver.restart().await {
+                    Ok(()) => {
+                        *self.last_switch_ms.write().await = now_ms();
+                        // Grace anchor refresh only: keep the bounded budget
+                        // so repeated failures accumulate toward exhaustion.
+                        self.l2.write().await.on_restart(now_ms());
+                        self.started_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        info!(
+                            "Xray: L2 recovery restarted active driver{label_clause}",
+                            label_clause = label
+                                .as_deref()
+                                .map(|l| format!(" '{l}'"))
+                                .unwrap_or_default()
+                        );
+                        let _ = self.events.send(SubsystemEvent::XrayStarted {
+                            profile: label.unwrap_or_else(|| "active".into()),
+                        });
+                    }
+                    Err(e) => {
+                        warn!("Xray: L2 restart failed: {e}");
+                        *self.last_error.write().await =
+                            Some(format!("L2 driver restart failed: {e}"));
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// L2 recovery budget exhausted: the active runtime is stopped (no active
+    /// runtime), the coordinator observes it via the snapshot, and the pool
+    /// label is guarded so a same-profile re-selection cannot spin a restart
+    /// loop. Traffic goes direct — the documented honesty rule.
+    async fn exhaust_recovery(&self) {
+        let label = self.active_label().await.unwrap_or_else(|| "active".into());
+        info!("Xray: L2 recovery exhausted for '{label}' — stopping runtime (traffic direct)");
+        self.stop_driver().await;
+        *self.l2_exhausted_label.write().await = Some(label.clone());
+        let _ = self.events.send(SubsystemEvent::XrayError {
+            detail: format!(
+                "L2 recovery exhausted: active runtime '{label}' stopped (traffic direct)"
+            ),
+        });
+    }
+
     async fn observe_snapshot(&self) -> XraySnapshot {
         let active = *self.active.read().await;
         let path_views = self
@@ -667,7 +951,15 @@ impl XrayManager {
                     }
                 }
                 if self.driver.read().await.is_some() {
-                    self.health_and_failover().await;
+                    let now = now_ms();
+                    if *self.pool_driven.read().await {
+                        // Pool-driven runtime: supervised by the L2 watchdog
+                        // (ADR-033) — bounded local recovery, never rotation.
+                        self.l2_watchdog(now).await;
+                    } else {
+                        // Static endpoints: legacy L2→PathHealth failover feed.
+                        self.health_and_failover().await;
+                    }
                 }
             }
             // Latency observability is independent of driver state (still useful
@@ -841,6 +1133,8 @@ priority = 20
 
     const FAKE_HEALTHY: u8 = 1;
     const FAKE_UNHEALTHY: u8 = 0;
+    const FAKE_DEGRADED: u8 = 2;
+    const FAKE_UNKNOWN: u8 = 3;
 
     /// Fake endpoint driver: `start` is a no-op (no xray process), health is
     /// read from the shared signal. Exactly what the failover tests need.
@@ -873,10 +1167,11 @@ priority = 20
             self.start().await
         }
         async fn health_check(&self) -> HealthStatus {
-            if self.health.0.load(std::sync::atomic::Ordering::Relaxed) == FAKE_HEALTHY {
-                HealthStatus::Healthy
-            } else {
-                HealthStatus::Unhealthy { reason: 1 }
+            match self.health.0.load(std::sync::atomic::Ordering::Relaxed) {
+                FAKE_HEALTHY => HealthStatus::Healthy,
+                FAKE_DEGRADED => HealthStatus::Degraded { reason: 2 },
+                FAKE_UNKNOWN => HealthStatus::Unknown,
+                _ => HealthStatus::Unhealthy { reason: 1 },
             }
         }
     }
@@ -1075,6 +1370,281 @@ priority = 20
         let err = manager.ensure_running().await.expect_err("must fail");
         assert!(err.contains("missing public key"), "err: {err}");
         assert!(manager.driver.read().await.is_none(), "nothing running");
+    }
+
+    /// Set a deterministic L2 recovery config on a manager (fast grace/backoff
+    /// so tests never wait real time).
+    async fn set_l2_config(
+        manager: &XrayManager,
+        grace_ms: u64,
+        max_restarts: u32,
+        window_ms: u64,
+        backoff_ms: u64,
+    ) {
+        let mut l2 = manager.l2.write().await;
+        l2.cfg = L2RecoveryConfig {
+            grace_ms,
+            max_restarts,
+            window_ms,
+            backoff_ms,
+        };
+    }
+
+    // ---- L2 watchdog (ADR-033) ----
+
+    /// ADR-033: `Unknown` during the startup grace window is tolerated (no
+    /// restart); once the driver reports `Healthy`, recovery converges.
+    #[test]
+    fn l2_unknown_within_grace_then_healthy() {
+        let mut l2 = L2Recovery::new(L2RecoveryConfig {
+            grace_ms: 10_000,
+            max_restarts: 2,
+            window_ms: 60_000,
+            backoff_ms: 5_000,
+        });
+        l2.on_start(1_000);
+        // Within grace: Unknown must not count as evidence.
+        assert_eq!(l2.observe(HealthStatus::Unknown, 2_000), L2Action::Grace);
+        assert_eq!(l2.bad_count, 0, "grace must not increment bad_count");
+        // Still within grace, still Unknown → still no restart.
+        assert_eq!(l2.observe(HealthStatus::Unknown, 3_000), L2Action::Grace);
+        // Driver comes up: Healthy converges, no restart.
+        assert_eq!(l2.observe(HealthStatus::Healthy, 4_000), L2Action::None);
+        assert_eq!(l2.restarts_in_window, 0);
+    }
+
+    /// ADR-033: `Unknown` *after* the grace window is evidence — a driver that
+    /// never reports Healthy is stuck and must be recovered.
+    #[test]
+    fn l2_unknown_after_grace_is_evidence() {
+        let mut l2 = L2Recovery::new(L2RecoveryConfig {
+            grace_ms: 10_000,
+            max_restarts: 2,
+            window_ms: 60_000,
+            backoff_ms: 0,
+        });
+        l2.on_start(1_000);
+        assert_eq!(l2.observe(HealthStatus::Unknown, 2_000), L2Action::Grace);
+        // Past grace (t=20s): Unknown is now evidence → bounded restart.
+        assert_eq!(l2.observe(HealthStatus::Unknown, 20_000), L2Action::Restart);
+        assert_eq!(l2.bad_count, 1);
+    }
+
+    /// ADR-033: a single health_check failure triggers bounded recovery; a
+    /// recovered driver is left running (no restart on Healthy).
+    #[test]
+    fn l2_single_failure_triggers_bounded_recovery() {
+        let mut l2 = L2Recovery::new(L2RecoveryConfig {
+            grace_ms: 0,
+            max_restarts: 3,
+            window_ms: 60_000,
+            backoff_ms: 0,
+        });
+        l2.on_start(1_000);
+        assert_eq!(
+            l2.observe(HealthStatus::Unhealthy { reason: 1 }, 2_000),
+            L2Action::Restart
+        );
+        assert_eq!(l2.restarts_in_window, 1);
+        // Recovers: no further restart, budget resets.
+        assert_eq!(l2.observe(HealthStatus::Healthy, 3_000), L2Action::None);
+        assert_eq!(l2.restarts_in_window, 0);
+    }
+
+    /// ADR-033: repeated failures consume the bounded restart budget, then
+    /// recovery exhausts (no infinite restart loop).
+    #[test]
+    fn l2_repeated_failures_hit_bounded_budget_then_exhaust() {
+        let mut l2 = L2Recovery::new(L2RecoveryConfig {
+            grace_ms: 0,
+            max_restarts: 2,
+            window_ms: 60_000,
+            backoff_ms: 0,
+        });
+        l2.on_start(1_000);
+        assert_eq!(
+            l2.observe(HealthStatus::Unhealthy { reason: 1 }, 2_000),
+            L2Action::Restart
+        );
+        assert_eq!(
+            l2.observe(HealthStatus::Unhealthy { reason: 1 }, 3_000),
+            L2Action::Restart
+        );
+        assert_eq!(
+            l2.observe(HealthStatus::Unhealthy { reason: 1 }, 4_000),
+            L2Action::Exhaust
+        );
+        assert!(l2.exhausted, "budget spent → exhausted");
+        // Once exhausted, no more restarts — the guard holds.
+        assert_eq!(
+            l2.observe(HealthStatus::Unhealthy { reason: 1 }, 5_000),
+            L2Action::Exhaust
+        );
+        // A fresh start resets the budget (bounded recovery per instance).
+        l2.on_start(6_000);
+        assert_eq!(
+            l2.observe(HealthStatus::Unhealthy { reason: 1 }, 7_000),
+            L2Action::Restart
+        );
+    }
+
+    /// ADR-033: backoff prevents a tight restart loop — a second failure
+    /// inside the backoff window must wait.
+    #[test]
+    fn l2_backoff_gaps_restarts() {
+        let mut l2 = L2Recovery::new(L2RecoveryConfig {
+            grace_ms: 0,
+            max_restarts: 3,
+            window_ms: 60_000,
+            backoff_ms: 5_000,
+        });
+        l2.on_start(1_000);
+        assert_eq!(
+            l2.observe(HealthStatus::Degraded { reason: 2 }, 2_000),
+            L2Action::Restart
+        );
+        // Next failure inside the 5s backoff → wait (Grace), not restart.
+        assert_eq!(
+            l2.observe(HealthStatus::Degraded { reason: 2 }, 3_000),
+            L2Action::Grace
+        );
+        // After backoff elapses → restart allowed again.
+        assert_eq!(
+            l2.observe(HealthStatus::Degraded { reason: 2 }, 8_000),
+            L2Action::Restart
+        );
+    }
+
+    /// ADR-033 invariant: L2 recovery *restarts the same driver*, never
+    /// switches to another profile. Healthy remote (L1 fine) + dead local Xray
+    /// must produce a same-driver restart and no profile rotation.
+    #[tokio::test]
+    async fn l2_healthy_remote_dead_local_restarts_same_driver_no_rotation() {
+        let cfg = sample_toml();
+        let health = FakeDriverHealth(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            FAKE_HEALTHY,
+        )));
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = manager_with_fakes(&cfg, health.clone(), started.clone());
+        set_l2_config(&manager, 0, 3, 60_000, 0).await;
+
+        // Pool selects a profile (L1 is healthy — the pool decision is fixed).
+        let profile = test_profile("us2.example.com", 8443);
+        manager.handle().apply_pool_profile(Some(profile)).await;
+        manager.ensure_running().await.expect("start pool profile");
+        assert!(manager.driver.read().await.is_some());
+        let label_before = manager.active_label().await;
+
+        // Local Xray dies while the remote endpoint stays reachable.
+        health
+            .0
+            .store(FAKE_UNHEALTHY, std::sync::atomic::Ordering::Relaxed);
+        manager.l2_watchdog(10_000).await;
+
+        // The SAME driver was restarted (started counter incremented), and the
+        // profile did NOT rotate (same pool label, still pool-driven).
+        assert_eq!(started.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(manager.active_label().await, label_before);
+        assert!(*manager.pool_driven.read().await);
+        assert!(manager.driver.read().await.is_some(), "still running");
+    }
+
+    /// ADR-033: L2 recovery exhausts only after the bounded budget — repeated
+    /// L2 failures eventually stop the runtime (traffic direct), and the pool
+    /// re-selecting the same profile stays stopped (no restart loop).
+    #[tokio::test]
+    async fn l2_recovery_exhaustion_stops_runtime_and_blocks_same_profile() {
+        let cfg = sample_toml();
+        let health = FakeDriverHealth(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            FAKE_HEALTHY,
+        )));
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = manager_with_fakes(&cfg, health.clone(), started.clone());
+        set_l2_config(&manager, 0, 2, 60_000, 0).await;
+
+        let profile = test_profile("us2.example.com", 8443);
+        manager.handle().apply_pool_profile(Some(profile)).await;
+        manager.ensure_running().await.expect("start");
+
+        // Two L2 failures exhaust the budget (max_restarts=2).
+        health
+            .0
+            .store(FAKE_UNHEALTHY, std::sync::atomic::Ordering::Relaxed);
+        manager.l2_watchdog(10_000).await;
+        manager.l2_watchdog(11_000).await;
+        manager.l2_watchdog(12_000).await;
+
+        // Budget exhausted: runtime stopped (no active runtime), guard set.
+        assert!(manager.driver.read().await.is_none(), "runtime stopped");
+        let label = "test @ us2.example.com:8443".to_string();
+        assert_eq!(
+            *manager.l2_exhausted_label.read().await,
+            Some(label.clone())
+        );
+
+        // Pool re-applies the SAME profile: must stay stopped (no loop).
+        let profile2 = test_profile("us2.example.com", 8443);
+        manager.handle().apply_pool_profile(Some(profile2)).await;
+        manager.ensure_running().await.expect("ensure_running ok");
+        assert!(
+            manager.driver.read().await.is_none(),
+            "same exhausted profile must stay stopped"
+        );
+
+        // A DIFFERENT profile selection clears the guard and starts fresh.
+        let other = test_profile("jp1.example.com", 443);
+        manager.handle().apply_pool_profile(Some(other)).await;
+        manager
+            .ensure_running()
+            .await
+            .expect("start different profile");
+        assert!(
+            manager.driver.read().await.is_some(),
+            "different profile starts"
+        );
+        assert_eq!(
+            *manager.l2_exhausted_label.read().await,
+            None,
+            "guard cleared on different selection"
+        );
+    }
+
+    /// ADR-033: L2 does not touch candidate profiles — pool selection (L1)
+    /// remains the only thing that changes the running profile.
+    #[tokio::test]
+    async fn l2_does_not_rotate_candidates() {
+        let cfg = sample_toml();
+        let health = FakeDriverHealth(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            FAKE_HEALTHY,
+        )));
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = manager_with_fakes(&cfg, health.clone(), started.clone());
+        set_l2_config(&manager, 0, 1, 60_000, 0).await;
+
+        let profile = test_profile("us2.example.com", 8443);
+        manager.handle().apply_pool_profile(Some(profile)).await;
+        manager.ensure_running().await.expect("start");
+        let label_before = manager.active_label().await;
+
+        // Static candidate endpoints exist (jp-1, us-2) but L2 must never
+        // switch to them.
+        health
+            .0
+            .store(FAKE_UNHEALTHY, std::sync::atomic::Ordering::Relaxed);
+        manager.l2_watchdog(10_000).await;
+        assert_eq!(manager.active_label().await, label_before);
+
+        // Budget exhausted (max_restarts=1) → runtime stops; still no
+        // rotation to any static candidate. active_label is None because
+        // nothing is running (the ADR-033 honesty rule), and no static
+        // endpoint was started.
+        manager.l2_watchdog(11_000).await;
+        assert!(manager.driver.read().await.is_none());
+        assert_eq!(
+            manager.active_label().await,
+            None,
+            "no active runtime after exhaustion, and no static profile started"
+        );
     }
 
     fn test_profile(server: &str, port: u16) -> VpnProfile {
