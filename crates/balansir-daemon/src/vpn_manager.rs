@@ -264,7 +264,7 @@ impl ProfileProbe for TcpConnectProbe {
         port: u16,
     ) -> Pin<Box<dyn Future<Output = PathSample> + Send + 'a>> {
         Box::pin(async move {
-            let addr = format!("{server}:{port}");
+            let addr = endpoint_addr(server, port);
             let start = std::time::Instant::now();
             match tokio::time::timeout(self.timeout, tokio::net::TcpStream::connect(&addr)).await {
                 Ok(Ok(_stream)) => PathSample {
@@ -276,6 +276,16 @@ impl ProfileProbe for TcpConnectProbe {
                 _ => PathSample::failure(),
             }
         })
+    }
+}
+
+/// Format `server:port` for socket resolution, bracketing bare IPv6 literals
+/// (`2001:db8::1` → `[2001:db8::1]:443`). Hostnames and IPv4 pass through.
+fn endpoint_addr(server: &str, port: u16) -> String {
+    if server.contains(':') && !server.starts_with('[') {
+        format!("[{server}]:{port}")
+    } else {
+        format!("{server}:{port}")
     }
 }
 
@@ -1019,6 +1029,18 @@ vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@b.example.com:443?security=none&typ
         assert_eq!(
             *seen.lock().unwrap(),
             vec![Some("s.example.com:443".to_string()), None]
+        );
+    }
+
+    #[test]
+    fn endpoint_addr_brackets_bare_ipv6_and_passes_others_through() {
+        assert_eq!(endpoint_addr("2001:db8::1", 443), "[2001:db8::1]:443");
+        assert_eq!(endpoint_addr("s.example.com", 443), "s.example.com:443");
+        assert_eq!(endpoint_addr("192.168.1.1", 443), "192.168.1.1:443");
+        assert_eq!(
+            endpoint_addr("[2001:db8::1]", 443),
+            "[2001:db8::1]:443",
+            "already-bracketed IPv6 must not be double-bracketed"
         );
     }
 }
