@@ -6,8 +6,9 @@
 //!   the daemon, never the privileged executor), validates + dedupes via the
 //!   importer, and atomically replaces the pool (keeps the known-good pool on
 //!   failure);
-//! * feeds per-profile health from passive/occasional probes through the
-//!   unified `PathSample` vocabulary into the pool;
+//! * feeds per-profile health from **real probes** (injected `ProfileProbe`;
+//!   production = bounded TCP connect) through the unified `PathSample`
+//!   vocabulary into the pool — never fake success samples;
 //! * runs selection + planned rotation on a cadence;
 //! * **consumes the pool decision and drives the Xray manager**: the Xray
 //!   manager no longer decides priority/health — it runs exactly the profile
@@ -19,6 +20,8 @@
 //! * profiles are validated before they ever reach the pool or the runtime;
 //! * no arbitrary command execution.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -120,6 +123,8 @@ pub struct VpnToml {
 pub struct PoolToml {
     pub min_dwell_secs: Option<u64>,
     pub failure_cooldown_secs: Option<u64>,
+    /// Anti-flap cooldown of the unified health trackers (default 10s).
+    pub health_cooldown_secs: Option<u64>,
     pub rotation_interval_secs: Option<u64>,
     pub better_threshold: Option<f64>,
     pub capacity_per_profile: Option<u32>,
@@ -136,7 +141,7 @@ impl VpnToml {
         PoolConfig {
             min_dwell: std::time::Duration::from_secs(p.min_dwell_secs.unwrap_or(120)),
             failure_cooldown: std::time::Duration::from_secs(p.failure_cooldown_secs.unwrap_or(60)),
-            health_cooldown: std::time::Duration::from_secs(10),
+            health_cooldown: std::time::Duration::from_secs(p.health_cooldown_secs.unwrap_or(10)),
             rotation_interval: std::time::Duration::from_secs(
                 p.rotation_interval_secs.unwrap_or(0),
             ),
@@ -220,6 +225,60 @@ where
     }
 }
 
+/// Health-probe seam (injected like `XrayConsumer`): production probes the
+/// profile's `server:port` with a bounded TCP connect and measures latency;
+/// tests inject a deterministic fake. The pool's health/rotation logic is
+/// only as honest as the samples it is fed — unconditionally feeding
+/// `PathSample::healthy()` would be a fake-success path that hides real
+/// outages from selection, so the probe is a required dependency, not an
+/// option.
+pub trait ProfileProbe: Send + Sync {
+    /// Probe one profile endpoint and return the unified health sample.
+    fn probe<'a>(
+        &'a self,
+        server: &'a str,
+        port: u16,
+    ) -> Pin<Box<dyn Future<Output = PathSample> + Send + 'a>>;
+}
+
+/// Production probe: bounded TCP connect to `server:port`. A successful
+/// connect yields `reachable` + measured latency; timeout/refused/DNS failure
+/// yields `PathSample::failure()`. Cheap enough for the RPi cadence and needs
+/// no extra services.
+pub struct TcpConnectProbe {
+    pub timeout: std::time::Duration,
+}
+
+impl Default for TcpConnectProbe {
+    fn default() -> Self {
+        Self {
+            timeout: std::time::Duration::from_secs(3),
+        }
+    }
+}
+
+impl ProfileProbe for TcpConnectProbe {
+    fn probe<'a>(
+        &'a self,
+        server: &'a str,
+        port: u16,
+    ) -> Pin<Box<dyn Future<Output = PathSample> + Send + 'a>> {
+        Box::pin(async move {
+            let addr = format!("{server}:{port}");
+            let start = std::time::Instant::now();
+            match tokio::time::timeout(self.timeout, tokio::net::TcpStream::connect(&addr)).await {
+                Ok(Ok(_stream)) => PathSample {
+                    latency_ms: Some(start.elapsed().as_millis() as f64),
+                    loss_pct: None,
+                    reachable: true,
+                    degraded_evidence: false,
+                },
+                _ => PathSample::failure(),
+            }
+        })
+    }
+}
+
 /// The VPN pool manager.
 pub struct VpnManager {
     config: VpnToml,
@@ -228,6 +287,7 @@ pub struct VpnManager {
     events: tokio::sync::broadcast::Sender<SubsystemEvent>,
     handle: VpnManagerHandle,
     consumer: Arc<dyn XrayConsumer>,
+    probe: Arc<dyn ProfileProbe>,
     last_error: RwLock<Option<String>>,
     last_refresh_reason: RwLock<Option<String>>,
 }
@@ -238,6 +298,23 @@ impl VpnManager {
         snapshot: SharedSubsystemSnapshot,
         events: tokio::sync::broadcast::Sender<SubsystemEvent>,
         consumer: Arc<dyn XrayConsumer>,
+    ) -> Result<Self, String> {
+        Self::new_with_probe(
+            config,
+            snapshot,
+            events,
+            consumer,
+            Arc::new(TcpConnectProbe::default()),
+        )
+    }
+
+    /// Full constructor with an injected health probe (tests / custom probers).
+    pub fn new_with_probe(
+        config: VpnToml,
+        snapshot: SharedSubsystemSnapshot,
+        events: tokio::sync::broadcast::Sender<SubsystemEvent>,
+        consumer: Arc<dyn XrayConsumer>,
+        probe: Arc<dyn ProfileProbe>,
     ) -> Result<Self, String> {
         let pool_cfg = config.pool_config();
         Ok(Self {
@@ -253,6 +330,7 @@ impl VpnManager {
                 unpin: Arc::new(AtomicBool::new(false)),
             },
             consumer,
+            probe,
             last_error: RwLock::new(None),
             last_refresh_reason: RwLock::new(None),
         })
@@ -428,7 +506,7 @@ impl VpnManager {
             }
 
             if (now - last_health) >= health_secs as i64 * 1000 {
-                self.health_cycle().await;
+                self.health_cycle(now).await;
                 last_health = now;
             }
 
@@ -441,21 +519,49 @@ impl VpnManager {
         }
     }
 
-    /// Probe each enabled profile (cheap passive probes: reachable sample with
-    /// no latency evidence keeps the unified tracker warm without hammering
-    /// the network on the RPi).
-    async fn health_cycle(&self) {
-        let profile_ids: Vec<String> = {
+    /// Probe every profile with the injected `ProfileProbe` and feed the real
+    /// samples into the pool. Probes run concurrently (N endpoints must not
+    /// serialize N×timeout inside the loop — RPi 3B+ friendly, mirrors the
+    /// Xray manager's `probe_latencies`).
+    ///
+    /// Honesty rule: a profile is healthy only because a real probe said so.
+    /// A probe error maps to `PathSample::failure()` — never to a fake
+    /// success — so a dead endpoint is excluded from selection and enters
+    /// cooldown instead of silently keeping 100% of the traffic.
+    async fn health_cycle(&self, now_ms: i64) {
+        let endpoints: Vec<(String, String, u16)> = {
             let pool = self.pool.read().await;
             pool.profiles()
                 .iter()
-                .map(|p| p.profile.profile_id.clone())
+                .map(|p| {
+                    (
+                        p.profile.profile_id.clone(),
+                        p.profile.server.clone(),
+                        p.profile.port,
+                    )
+                })
                 .collect()
         };
-        let now = self.now_ms();
-        for id in profile_ids {
-            let mut pool = self.pool.write().await;
-            pool.observe_health(&id, PathSample::healthy(), now);
+
+        let mut probes = Vec::with_capacity(endpoints.len());
+        for (id, server, port) in endpoints {
+            let probe = Arc::clone(&self.probe);
+            probes.push(tokio::spawn(async move {
+                let sample = probe.probe(&server, port).await;
+                (id, sample)
+            }));
+        }
+
+        for probe in probes {
+            match probe.await {
+                Ok((id, sample)) => {
+                    let mut pool = self.pool.write().await;
+                    pool.observe_health(&id, sample, now_ms);
+                }
+                Err(e) => {
+                    tracing::warn!("VPN pool health probe task failed: {e}");
+                }
+            }
         }
     }
 
@@ -670,6 +776,217 @@ vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@b.example.com:443?security=none&typ
         assert!(
             last.is_none(),
             "no eligible profile → consumer told to stop"
+        );
+    }
+
+    /// Deterministic probe fake: per-server reachability that the test can
+    /// flip at will. A reachable server reports a fixed 50 ms sample.
+    struct FakeProbe {
+        reachable: Mutex<std::collections::HashMap<String, bool>>,
+    }
+
+    impl FakeProbe {
+        fn new(pairs: &[(&str, bool)]) -> Self {
+            Self {
+                reachable: Mutex::new(pairs.iter().map(|(s, r)| (s.to_string(), *r)).collect()),
+            }
+        }
+        fn set(&self, server: &str, reachable: bool) {
+            self.reachable
+                .lock()
+                .unwrap()
+                .insert(server.to_string(), reachable);
+        }
+    }
+
+    impl ProfileProbe for FakeProbe {
+        fn probe<'a>(
+            &'a self,
+            server: &'a str,
+            _port: u16,
+        ) -> Pin<Box<dyn Future<Output = PathSample> + Send + 'a>> {
+            Box::pin(async move {
+                match self.reachable.lock().unwrap().get(server).copied() {
+                    Some(true) => PathSample {
+                        latency_ms: Some(50.0),
+                        loss_pct: None,
+                        reachable: true,
+                        degraded_evidence: false,
+                    },
+                    _ => PathSample::failure(),
+                }
+            })
+        }
+    }
+
+    fn manager_with_probe(probe: Arc<FakeProbe>) -> (VpnManager, Arc<RecordingConsumer>) {
+        manager_with_probe_cfg(test_toml(), probe)
+    }
+
+    fn manager_with_probe_cfg(
+        cfg: VpnToml,
+        probe: Arc<FakeProbe>,
+    ) -> (VpnManager, Arc<RecordingConsumer>) {
+        let consumer = Arc::new(RecordingConsumer(Mutex::new(Vec::new())));
+        let manager = VpnManager::new_with_probe(
+            cfg,
+            SharedSubsystemSnapshot::new(),
+            tokio::sync::broadcast::channel(16).0,
+            consumer.clone(),
+            probe,
+        )
+        .expect("manager");
+        (manager, consumer)
+    }
+
+    const T0: i64 = 1_700_000_000_000;
+
+    /// Failure scenario (mission): A healthy + B healthy → A becomes
+    /// unreachable via real probes → A is excluded (Failed/cooldown), new
+    /// selections use B, and the consumer is switched to B.
+    #[tokio::test]
+    async fn probe_failure_excludes_profile_and_failovers() {
+        let probe = Arc::new(FakeProbe::new(&[
+            ("a.example.com", false),
+            ("b.example.com", true),
+        ]));
+        let (manager, consumer) = manager_with_probe(probe);
+        manager.refresh(T0).await.expect("refresh");
+
+        // Initial selection: both unknown/healthy → some profile active.
+        manager.selection_cycle(T0).await;
+        assert!(consumer.0.lock().unwrap().last().unwrap().is_some());
+
+        // Real probes: A fails. enter_degraded=2 → two cycles.
+        manager.health_cycle(T0 + 1_000).await;
+        manager.health_cycle(T0 + 2_000).await;
+        let a_id = {
+            let pool = manager.pool.read().await;
+            pool.profiles()
+                .iter()
+                .find(|p| p.profile.server == "a.example.com")
+                .unwrap()
+                .profile
+                .profile_id
+                .clone()
+        };
+        {
+            let pool = manager.pool.read().await;
+            let state = pool.profile(&a_id).unwrap().health.state;
+            assert!(
+                matches!(
+                    state,
+                    balansir_vpn::profile::ProfileState::Failed
+                        | balansir_vpn::profile::ProfileState::Cooldown
+                ),
+                "A failed real probes → excluded state, got {state:?}"
+            );
+        }
+
+        // Selection must now avoid A and land on B.
+        manager.selection_cycle(T0 + 3_000).await;
+        let recorded = consumer.0.lock().unwrap();
+        let last = recorded.last().unwrap().as_ref().unwrap();
+        assert!(
+            last.starts_with("b.example.com:"),
+            "failover to healthy B, got {last}"
+        );
+    }
+
+    /// Recovery scenario (mission): A in cooldown after real failures → real
+    /// probes succeed again → A does not instantly jump back to full weight
+    /// but becomes Recovering and re-enters selection eligibility.
+    #[tokio::test]
+    async fn probe_recovery_ramps_back_after_cooldown() {
+        let probe = Arc::new(FakeProbe::new(&[
+            ("a.example.com", false),
+            ("b.example.com", true),
+        ]));
+        // health_cooldown = 0: the unified tracker gates improving transitions
+        // by a wall-clock anti-flap cooldown; deterministic tests disable it
+        // (same convention as the pool's own tests).
+        let mut cfg = test_toml();
+        cfg.pool.health_cooldown_secs = Some(0);
+        let (manager, _consumer) = manager_with_probe_cfg(cfg, probe.clone());
+        manager.refresh(T0).await.expect("refresh");
+        manager.health_cycle(T0).await;
+        manager.health_cycle(T0 + 1_000).await;
+        let a_id = {
+            let pool = manager.pool.read().await;
+            pool.profiles()
+                .iter()
+                .find(|p| p.profile.server == "a.example.com")
+                .unwrap()
+                .profile
+                .profile_id
+                .clone()
+        };
+
+        // Heal A, but within the failure cooldown (60s default): still excluded.
+        probe.set("a.example.com", true);
+        manager.health_cycle(T0 + 30_000).await;
+        {
+            let pool = manager.pool.read().await;
+            let state = pool.profile(&a_id).unwrap().health.state;
+            assert!(
+                matches!(
+                    state,
+                    balansir_vpn::profile::ProfileState::Failed
+                        | balansir_vpn::profile::ProfileState::Cooldown
+                ),
+                "cooldown must not be bypassed by one good probe, got {state:?}"
+            );
+        }
+
+        // Past cooldown: improving transitions are gated by the 10s health
+        // cooldown, so space the probes. exit_degraded=3 good samples.
+        let t1 = T0 + 61_000;
+        manager.health_cycle(t1).await;
+        manager.health_cycle(t1 + 11_000).await;
+        {
+            let pool = manager.pool.read().await;
+            let h = &pool.profile(&a_id).unwrap().health;
+            assert_eq!(
+                h.state,
+                balansir_vpn::profile::ProfileState::Recovering,
+                "recovered profile ramps up instead of instant Healthy"
+            );
+            assert_eq!(
+                h.weight, 50,
+                "3 consecutive good probes → ramp step 3 of [10, 25, 50, 100]"
+            );
+        }
+    }
+
+    /// No-healthy-VPN scenario (mission): the only profile fails real probes →
+    /// the consumer is told to stop (None), never a silent fake success.
+    #[tokio::test]
+    async fn probe_failure_of_last_profile_stops_proxy() {
+        let cfg = VpnToml {
+            local_source: Some(
+                "vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@dead.example.com:443?security=none&type=tcp#Dead"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let probe = Arc::new(FakeProbe::new(&[("dead.example.com", false)]));
+        let consumer = Arc::new(RecordingConsumer(Mutex::new(Vec::new())));
+        let manager = VpnManager::new_with_probe(
+            cfg,
+            SharedSubsystemSnapshot::new(),
+            tokio::sync::broadcast::channel(16).0,
+            consumer.clone(),
+            probe,
+        )
+        .expect("manager");
+        manager.refresh(T0).await.expect("refresh");
+        manager.health_cycle(T0).await;
+        manager.health_cycle(T0 + 1_000).await;
+        manager.selection_cycle(T0 + 2_000).await;
+        let recorded = consumer.0.lock().unwrap();
+        assert!(
+            recorded.last().unwrap().is_none(),
+            "all profiles failing real probes → proxy stopped (no silent success)"
         );
     }
 
