@@ -1,136 +1,144 @@
-# BalanSir Dead Code Audit
+# BalanSir Full Software Audit
 
 **Date**: 2026-08-17
-**Method**: Repository-wide grep, `cargo check`, `cargo clippy`, module dependency tracing.
+**HEAD**: `78c132c`
 
-## Legend
+## Architecture Overview
 
-| Status | Meaning |
-|--------|---------|
-| CANONICAL | Used in production, essential |
-| DEAD | Never compiled or never called outside dead module |
-| TEST-ONLY | Only used in `#[cfg(test)]` or test crates |
-| UNWIRED | Implementation exists but never instantiated in production |
-| OPTIONAL | Operator utility, not runtime |
+```
+balansir-common     — shared types, IPC, path health, gateway config, path pool
+balansir-control    — reconciliation engine, planner, coordinator
+balansir-daemon     — unprivileged daemon: drivers, DNS, B4, VPN, policy, subsystems
+balansir-executor   — privileged: nftables, QoS, routes, gateway backend
+balansir-api        — HTTP/SSE API + WebUI serving
+balansir-b4         — packet processing library
+balansir-vpn        — VPN profile management
+balansir-health     — unified path health model
+balansir-ota        — OTA lifecycle (A/B slots, signing, rollback)
+balansir-tests      — IPC integration tests
+```
 
----
+## Crate-by-Crate Status
 
-## Findings
+### balansir-common (20 modules)
 
-### 1. `crates/balansir-common/src/path_health.rs` — DEAD
+| Module | Status | Notes |
+|--------|--------|-------|
+| diff | CANONICAL | config diffing |
+| error | CANONICAL | shared error types |
+| event_bus | CANONICAL | bounded event bus |
+| gateway | CANONICAL | GatewayConfig, validate(), DEFAULT_MGMT_PORTS |
+| ipc | CANONICAL | postcard IPC, all MsgType variants dispatched |
+| metrics | CANONICAL | SharedMetrics |
+| network | CANONICAL | InterfaceInfo, WanIdentity |
+| **path_pool** | **NEW** | PathPool, PathCandidate, SelectionStrategy — 8 tests |
+| paths | CANONICAL | binary resolution |
+| plan | CANONICAL | reconciliation plan types |
+| profile | CANONICAL | VPN profile types |
+| qos | CANONICAL | QoS config/result types |
+| resources | CANONICAL | resource types |
+| runtime | CANONICAL | runtime utils |
+| snapshot | CANONICAL | shared snapshot |
+| state | CANONICAL | state store |
+| subsystems | CANONICAL | SubsystemSnapshot, SystemStats, FilesystemInfo, PathDecision |
+| types | CANONICAL | HealthStatus, DriverId, etc |
+| validation | CANONICAL | validation utilities |
+| version | CANONICAL | version info |
 
-**Status**: DEAD
+### balansir-daemon (27 modules)
 
-**Evidence**: `crates/balansir-common/src/lib.rs:23` has `pub use balansir_health as path_health;` — this re-export shadows any `path_health.rs` file. There is no `mod path_health;` declaration in `lib.rs`. The file is identical to `crates/balansir-health/src/lib.rs` (555 lines, zero diff). It is never compiled.
+| Module | Status | Notes |
+|--------|--------|-------|
+| amneziawg | CANONICAL | WireGuard + AmneziaWG driver, wired via DriverFactory |
+| b4 | CANONICAL | B4 driver, secrets integration |
+| b4_dpi | CANONICAL | DPI engine, NFQUEUE, uses netlink |
+| b4_engine | CANONICAL | B4 logic engine, state machine |
+| b4_manager | CANONICAL | B4 lifecycle manager |
+| capability | CANONICAL | CPU/RAM detection |
+| dns | CANONICAL | DNS forwarder, SOCKS5 UDP relay, cache |
+| dns_plane | CANONICAL | DNS observation plane |
+| driver | CANONICAL | Driver lifecycle, Config, Factory |
+| hysteria | CANONICAL | Hysteria2 driver, wired via DriverFactory |
+| netlink | CANONICAL | netlink for DPI |
+| **network_config** | **CANONICAL** | WAN/LAN role validation |
+| **path_decision** | **UNWIRED** | Computed but only served as telemetry |
+| **policy** | **UNWIRED** | PolicyConfig exists but engine not wired |
+| reconciliation | CANONICAL | Reconciler, FlowCompiler, DnsRegistry |
+| secrets | CANONICAL | secure file storage |
+| server | CANONICAL | API server wiring |
+| startup | CANONICAL | config loading |
+| subsystems | CANONICAL | SubsystemManager, all subsystem wiring |
+| system_stats | CANONICAL | /proc readers |
+| upnp | CANONICAL | UPnP/IGD |
+| vpn_manager | CANONICAL | VPN pool management |
+| wan_identity | CANONICAL | WAN MAC detection |
+| wireguard | CANONICAL | WireGuard driver |
+| xray | CANONICAL | Xray config generation |
+| xray_manager | CANONICAL | Xray lifecycle |
 
-**Action**: DELETE file.
+### balansir-executor (9 modules)
 
----
+| Module | Status | Notes |
+|--------|--------|-------|
+| executor | CANONICAL | NftablesExecutor |
+| gateway | CANONICAL | NAT, masquerade, management firewall |
+| interface | CANONICAL | interface enumeration |
+| **iprule** | **UNWIRED** | fwmark+ip-rule, tests pass, never instantiated |
+| nftables | CANONICAL | nft command wrapper |
+| path_mtu | CANONICAL | RouteMtuApplier (production), RecordOnlyApplier (test) |
+| qdisc | CANONICAL | QoS tc operations |
+| service | CANONICAL | NftablesExecutor, all ops dispatched |
+| tailscale | CANONICAL | Tailscale operations |
 
-### 2. `crates/balansir-daemon/src/reconciliation/bootstrap.rs` — DEAD
+### balansir-api (5 modules)
 
-**Status**: DEAD
+| Module | Status | Notes |
+|--------|--------|-------|
+| auth | CANONICAL | token auth |
+| control | CANONICAL | ControlPlane, DesiredUpdater |
+| handlers | CANONICAL | health, metrics, state endpoints |
+| subsystems | CANONICAL | subsystem snapshot, /system endpoint, SSE |
+| webui | CANONICAL | static file serving |
 
-**Evidence**: `bootstrap()` function is never called from `main.rs`, `startup.rs`, or any production code path. Only referenced in `error.rs` comments and one test helper (`test_bootstrap_from_empty_store`). The reconciler is created directly in `main.rs` without using this module.
+## Key Findings
 
-**Action**: Remove module declaration from `mod.rs` and delete file.
+### 1. path_decision is telemetry-only
+- `decide()` is called in subsystems refresh
+- Result stored in snapshot
+- Served via `/path/decision` API
+- **NOT consumed by any routing/policy engine**
+- This is the correct design for now — routing uses direct B4/VPN checks
 
----
+### 2. policy module is structural
+- `PolicyConfig` exists in `b4_engine/policy.rs`
+- Used by B4 manager for profile decisions
+- No global policy engine that routes traffic through PathPool
 
-### 3. `crates/balansir-executor/src/iprule.rs` — UNWIRED
+### 3. iprule is ready but unwired
+- Full implementation with tests
+- Commented as "ready to wire when daemon contract can express mark↔table"
+- Safe to keep
 
-**Status**: UNWIRED
+### 4. No duplicate implementations
+- Single DNS: dns.rs forwarder + dns_plane.rs observation
+- Single NAT/firewall: executor gateway backend
+- Single nftables: executor nftables.rs
+- Single policy: b4_engine/policy.rs (B4-specific)
+- Single health: balansir-health crate
 
-**Evidence**: `IpRuleBackend` struct exists with full implementation (`add_fwmark_rule`, `del_fwmark_rule`, `add_table`, `flush_rules`, tests). Referenced only in a comment in `service.rs:64` ("the `IpRuleBackend` capability... is implemented and unit-tested so fwmark+ip-rule is ready to wire when the daemon contract can express a mark↔table pair"). Never instantiated in production.
+### 5. All IPC ops are dispatched
+Every MsgType variant has executor dispatch + daemon client method.
 
-**Reason**: The daemon policy engine does not yet emit fwmark+table pairs. When it does, this backend is ready. Keeping it as documented readiness.
+### 6. Config fields are consumed
+All config struct fields (DnsForwarderConfig, XrayConfig, etc.) are used.
 
-**Action**: Keep. Document as UNWIRED but ready.
+### 7. Filesystems bug was real
+The `/system` endpoint was returning empty Vec::new() instead of real filesystem data. Fixed in `78c132c`.
 
----
+## Remaining Stubs
 
-### 4. `RecordOnlyApplier` (path_mtu.rs) — TEST-ONLY
-
-**Status**: TEST-ONLY
-
-**Evidence**: Defined at `crates/balansir-executor/src/path_mtu.rs:29`. Used only in tests at line 190 (`PathMtuStore::new(Box::new(RecordOnlyApplier))`). Production service.rs uses `RouteMtuApplier` (confirmed: `service.rs:87`).
-
-**Action**: Keep. Test fixture.
-
----
-
-### 5. `RecordOnlyGatewayBackend` (gateway.rs) — TEST-ONLY
-
-**Status**: TEST-ONLY
-
-**Evidence**: `crates/balansir-executor/src/gateway.rs:322`. Used in `ExecutorServices::new()` as default (`service.rs:47`) and in gateway tests (`gateway.rs:381,400`). Production daemon wires `NftablesGatewayBackend`.
-
-**Action**: Keep. Default fallback for test/standalone mode.
-
----
-
-### 6. `DummyExecutorAdapter` (reconciliation/dummy.rs) — TEST-ONLY
-
-**Status**: TEST-ONLY
-
-**Evidence**: `crates/balansir-daemon/src/reconciliation/dummy.rs`. Used in `reconciler.rs:232` (bootstrap test), `reconciler.rs:622` (test helper). Also re-exported at `mod.rs:15`.
-
-**Action**: Keep. Test fixture.
-
----
-
-### 7. `tools/balansir-image/` — OPTIONAL
-
-**Status**: OPTIONAL
-
-**Evidence**: Standalone CLI binary for image inspection/checksum/verify. Zero dependencies. Referenced only in `docs/BUILDROOT_IMAGE.md`. No Makefile target, no CI, no runtime dependency.
-
-**Action**: Keep. Operator utility.
-
----
-
-### 8. `ss_bin()` in dns.rs — CANONICAL
-
-**Status**: CANONICAL
-
-**Evidence**: Used in `health_check()` at `dns.rs:642` — checks if DNS UDP port is listening via `ss -ulnp`.
-
-**Action**: No change.
-
----
-
-### 9. OTA crate warnings — PRE-EXISTING
-
-**Status**: Pre-existing, not my code
-
-**Evidence**: 16 warnings in `balansir-ota` (unused imports, deprecated `base64::decode`, `daemon_socket` field never read, `DEFAULT_MOUNT` constant never used). These are in files the user marked as not-to-touch or are pre-existing from the OTA implementation.
-
-**Action**: Leave for now. Not dead code — just unused variables/imports in incomplete OTA.
-
----
-
-## Summary
-
-| Component | Status | Action |
-|-----------|--------|--------|
-| `common/src/path_health.rs` | DEAD | DELETE |
-| `reconciliation/bootstrap.rs` | DEAD | DELETE |
-| `iprule.rs` | UNWIRED | Keep, document |
-| `RecordOnlyApplier` | TEST-ONLY | Keep |
-| `RecordOnlyGatewayBackend` | TEST-ONLY | Keep |
-| `DummyExecutorAdapter` | TEST-ONLY | Keep |
-| `tools/balansir-image/` | OPTIONAL | Keep |
-| `ss_bin()` in dns.rs | CANONICAL | Keep |
-| OTA warnings | Pre-existing | Leave |
-
----
-
-## Duplicate Check
-
-| Area | Finding |
-|------|---------|
-| DNS | Single canonical `dns.rs` forwarder + `dns_plane.rs` observation. No duplicates. |
-| NAT/firewall | Single executor gateway backend. `RecordOnlyGatewayBackend` is test-only. |
-| Policy | Single `policy/` module in daemon. |
-| nftables | Single `nftables.rs` in executor. |
-| path_health | `balansir-health` crate is canonical; `common/src/path_health.rs` is dead duplicate. |
+| Item | Location | Status |
+|------|----------|--------|
+| path_decision → routing | daemon/path_decision.rs | Telemetry only, not wired to routing |
+| iprule backend | executor/iprule.rs | UNWIRED, ready |
+| OTA retry limit | ota/slot.rs | Immediate rollback, no retry-before-rollback |
