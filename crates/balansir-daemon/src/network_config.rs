@@ -190,10 +190,7 @@ fn is_ethernet_like(info: &InterfaceInfo) -> bool {
 /// Interfaces not mentioned in config keep their default (Unknown).
 /// This is called by the subsystem refresh loop so the snapshot reflects
 /// actual roles, not just raw netlink data.
-pub fn assign_roles(
-    interfaces: &mut [InterfaceInfo],
-    config: &NetworkConfig,
-) {
+pub fn assign_roles(interfaces: &mut [InterfaceInfo], config: &NetworkConfig) {
     for iface in interfaces.iter_mut() {
         if config.wan_interface.as_deref() == Some(&iface.name) {
             iface.role = balansir_common::network::InterfaceRole::Wan;

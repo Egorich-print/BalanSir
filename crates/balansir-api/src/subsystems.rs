@@ -53,7 +53,6 @@ pub struct LoadInfo {
     pub load15: f64,
 }
 
-
 /// `GET /system` — comprehensive system monitoring snapshot (CPU, memory,
 /// load, uptime, filesystem usage, interface rates, temperatures where
 /// available). This is the canonical source for the System Monitoring page.

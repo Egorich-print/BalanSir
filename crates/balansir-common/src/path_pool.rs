@@ -106,7 +106,10 @@ impl PathCandidate {
     /// Whether this candidate is selectable (healthy + compatible + not cooling down).
     pub fn is_selectable(&self) -> bool {
         self.compatible
-            && !matches!(self.state, CandidateState::Failing | CandidateState::CoolingDown)
+            && !matches!(
+                self.state,
+                CandidateState::Failing | CandidateState::CoolingDown
+            )
     }
 
     /// Weighted selection factor (score * compatibility * availability).
@@ -163,7 +166,11 @@ impl PathPool {
         self.candidates
             .iter()
             .filter(|c| c.is_selectable())
-            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     }
 
     fn select_priority(&self) -> Option<&PathCandidate> {
@@ -182,7 +189,11 @@ impl PathPool {
         self.candidates
             .iter()
             .filter(|c| c.is_selectable())
-            .max_by(|a, b| a.weight().partial_cmp(&b.weight()).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.weight()
+                    .partial_cmp(&b.weight())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     }
 
     fn select_round_robin(&mut self) -> Option<&PathCandidate> {
@@ -241,9 +252,17 @@ mod tests {
     #[test]
     fn selects_best_score() {
         let mut pool = PathPool::new("test".into(), SelectionStrategy::BestScore);
-        pool.add_candidate(candidate(PathCapability::Direct, 0.3, CandidateState::Healthy));
+        pool.add_candidate(candidate(
+            PathCapability::Direct,
+            0.3,
+            CandidateState::Healthy,
+        ));
         pool.add_candidate(candidate(PathCapability::B4, 0.8, CandidateState::Healthy));
-        pool.add_candidate(candidate(PathCapability::Xray, 0.5, CandidateState::Healthy));
+        pool.add_candidate(candidate(
+            PathCapability::Xray,
+            0.5,
+            CandidateState::Healthy,
+        ));
         let sel = pool.select().unwrap();
         assert_eq!(sel.capability, PathCapability::B4);
     }
@@ -251,7 +270,11 @@ mod tests {
     #[test]
     fn skips_failing_candidates() {
         let mut pool = PathPool::new("test".into(), SelectionStrategy::BestScore);
-        pool.add_candidate(candidate(PathCapability::Direct, 0.3, CandidateState::Healthy));
+        pool.add_candidate(candidate(
+            PathCapability::Direct,
+            0.3,
+            CandidateState::Healthy,
+        ));
         pool.add_candidate(candidate(PathCapability::B4, 0.9, CandidateState::Failing));
         let sel = pool.select().unwrap();
         assert_eq!(sel.capability, PathCapability::Direct);
@@ -264,7 +287,11 @@ mod tests {
             compatible: false,
             ..candidate(PathCapability::Xray, 0.9, CandidateState::Healthy)
         });
-        pool.add_candidate(candidate(PathCapability::Direct, 0.5, CandidateState::Healthy));
+        pool.add_candidate(candidate(
+            PathCapability::Direct,
+            0.5,
+            CandidateState::Healthy,
+        ));
         let sel = pool.select().unwrap();
         assert_eq!(sel.capability, PathCapability::Direct);
     }
@@ -294,7 +321,11 @@ mod tests {
     #[test]
     fn round_robin_cycles() {
         let mut pool = PathPool::new("test".into(), SelectionStrategy::RoundRobin);
-        pool.add_candidate(candidate(PathCapability::Direct, 0.5, CandidateState::Healthy));
+        pool.add_candidate(candidate(
+            PathCapability::Direct,
+            0.5,
+            CandidateState::Healthy,
+        ));
         pool.add_candidate(candidate(PathCapability::B4, 0.5, CandidateState::Healthy));
         let s1 = pool.select().unwrap().capability;
         let s2 = pool.select().unwrap().capability;
@@ -304,7 +335,11 @@ mod tests {
     #[test]
     fn find_by_capability() {
         let mut pool = PathPool::new("test".into(), SelectionStrategy::BestScore);
-        pool.add_candidate(candidate(PathCapability::Direct, 0.5, CandidateState::Healthy));
+        pool.add_candidate(candidate(
+            PathCapability::Direct,
+            0.5,
+            CandidateState::Healthy,
+        ));
         pool.add_candidate(candidate(PathCapability::B4, 0.8, CandidateState::Healthy));
         assert!(pool.find_by_capability(PathCapability::B4).is_some());
         assert!(pool.find_by_capability(PathCapability::Xray).is_none());
@@ -313,9 +348,17 @@ mod tests {
     #[test]
     fn healthy_count_excludes_failing() {
         let mut pool = PathPool::new("test".into(), SelectionStrategy::BestScore);
-        pool.add_candidate(candidate(PathCapability::Direct, 0.5, CandidateState::Healthy));
+        pool.add_candidate(candidate(
+            PathCapability::Direct,
+            0.5,
+            CandidateState::Healthy,
+        ));
         pool.add_candidate(candidate(PathCapability::B4, 0.8, CandidateState::Failing));
-        pool.add_candidate(candidate(PathCapability::Xray, 0.6, CandidateState::Degraded));
+        pool.add_candidate(candidate(
+            PathCapability::Xray,
+            0.6,
+            CandidateState::Degraded,
+        ));
         assert_eq!(pool.healthy_count(), 2); // Direct + Xray (Degraded is still selectable)
     }
 }

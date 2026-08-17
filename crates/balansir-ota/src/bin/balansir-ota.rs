@@ -24,8 +24,7 @@ fn usage() {
 fn load_config() -> Result<OtaConfig, String> {
     let path = std::env::var("BALANSIR_OTA_CONFIG")
         .unwrap_or_else(|_| "/etc/balansir/ota.toml".to_string());
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {path}: {e}"))?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
     toml::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))
 }
 
@@ -47,7 +46,8 @@ fn cmd_status() -> Result<(), String> {
 fn cmd_boot_confirm() -> Result<(), String> {
     let mut meta = load_metadata()?;
     let version = env!("CARGO_PKG_VERSION").to_string();
-    meta.confirm_boot(version).map_err(|e| format!("confirm: {e}"))?;
+    meta.confirm_boot(version)
+        .map_err(|e| format!("confirm: {e}"))?;
     meta.save().map_err(|e| format!("save: {e}"))?;
     println!("Slot {} confirmed", meta.active_slot());
     Ok(())
@@ -64,14 +64,14 @@ fn cmd_rollback() -> Result<(), String> {
 }
 
 async fn cmd_update(image_path: &str, config: &OtaConfig) -> Result<(), String> {
-    let image = std::fs::read(image_path)
-        .map_err(|e| format!("read image: {e}"))?;
+    let image = std::fs::read(image_path).map_err(|e| format!("read image: {e}"))?;
     let mut meta = load_metadata()?;
     let inactive = meta.next_slot();
     println!("Installing to slot {inactive} ({} bytes)...", image.len());
-    let daemon = OtaDaemon::new(config.clone())
-        .map_err(|e| format!("init OTA daemon: {e}"))?;
-    daemon.install(image, inactive).await
+    let daemon = OtaDaemon::new(config.clone()).map_err(|e| format!("init OTA daemon: {e}"))?;
+    daemon
+        .install(image, inactive)
+        .await
         .map_err(|e| format!("install failed: {e}"))?;
     println!("Image installed to slot {inactive}");
     println!("Reboot required to activate");
