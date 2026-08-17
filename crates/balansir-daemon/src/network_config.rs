@@ -185,6 +185,25 @@ fn is_ethernet_like(info: &InterfaceInfo) -> bool {
     }
 }
 
+/// Assign roles to interface list based on NetworkConfig.
+/// Returns a new list with `role` field populated.
+/// Interfaces not mentioned in config keep their default (Unknown).
+/// This is called by the subsystem refresh loop so the snapshot reflects
+/// actual roles, not just raw netlink data.
+pub fn assign_roles(
+    interfaces: &mut [InterfaceInfo],
+    config: &NetworkConfig,
+) {
+    for iface in interfaces.iter_mut() {
+        if config.wan_interface.as_deref() == Some(&iface.name) {
+            iface.role = balansir_common::network::InterfaceRole::Wan;
+        } else if config.lan_interface.as_deref() == Some(&iface.name) {
+            iface.role = balansir_common::network::InterfaceRole::Lan;
+        }
+        // Otherwise keep default (Unknown)
+    }
+}
+
 /// Auto-learn the L2 peer MAC on the LAN port from the kernel neighbour table.
 ///
 /// The router connected to the LAN port is a neighbour of this device; its MAC

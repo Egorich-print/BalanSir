@@ -251,7 +251,11 @@ impl SubsystemManager {
         // Interfaces ------------------------------------------------------
         let filter = self.interface_filter.read().await.clone();
         match exec.interface_info(&filter).await {
-            Ok(list) => {
+            Ok(mut list) => {
+                // Assign roles based on NetworkConfig (if loaded).
+                if let Ok(cfg) = crate::network_config::NetworkConfig::load() {
+                    crate::network_config::assign_roles(&mut list, &cfg);
+                }
                 // WAN identity (factory/current MAC, DHCP/route observation).
                 let wan = crate::wan_identity::assemble(
                     &list,
