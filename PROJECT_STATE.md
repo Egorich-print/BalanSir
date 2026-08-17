@@ -19,6 +19,10 @@ BalanSir — декларативный движок принятия решен
 
 ## 2. Workspace (crates)
 
+> Текущее состояние (2026-08-17): workspace содержит **10 crate'ов**.
+> Таблица ниже отражает исходный аудит (Phase 0, 2026-08-07, 6 crate'ов);
+> добавлены `balansir-health`, `balansir-vpn`, `balansir-b4`, `balansir-ota`.
+
 6 crate'ов, строгий ацикличный граф зависимостей (`common` — лист, остальные смотрят вниз).
 
 | Crate | Роль | Зависит от |
@@ -49,8 +53,9 @@ BalanSir — декларативный движок принятия решен
 
 ## 4. Числовые показатели аудита
 
-- Исходных `.rs` файлов: 52
-- Тестов проходит: 70 (+5 proptest-наборов, 2 ignored под root)
+- Исходных `.rs` файлов: 52 (на момент аудита)
+- Тестов проходит: 70 (+5 proptest-наборов, 2 ignored под root) — на момент аудита;
+  актуально: 475 workspace-тестов (2026-08-17)
 - CI: GitHub Actions — `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`
   на stable + nightly; кросс-сборка x86_64/aarch64/riscv64-musl; релиз по тегу.
 - Найдено проблем в аудите (категоризовано в `ARCHITECTURE_AUDIT.md` + `TECH_DEBT.md`):
