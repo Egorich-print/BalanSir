@@ -52,7 +52,7 @@ privilege-separated daemon/executor pair.
 |---------|--------------------------|
 | Multiple VPN/proxy configs | Unified transport layer with per-protocol drivers |
 | VPN profile selection | `VpnPool` weighted selection with per-profile health probing |
-| Local runtime death | (Planned) L2 lifecycle watchdog per ADR-033 — not yet in `main` |
+| Local runtime death | L2 lifecycle watchdog (ADR-033): bounded restart/recovery guard |
 | No visibility into routing | Decision traces, `/subsystems` snapshot, Prometheus metrics |
 | Privilege separation | Unprivileged daemon + root executor over authenticated IPC |
 
@@ -120,7 +120,7 @@ VPN profile management lives in `balansir-vpn` plus the daemon's `vpn_manager.rs
 
 `XrayManager` runs the active Xray driver (VLESS/Reality), supervises it with
 `driver.health_check()`, and manages per-endpoint `PathHealth` failover for static
-endpoints.
+endpoints. For the pool-driven runtime it owns the **L2 watchdog** (ADR-033).
 
 **Health model (ADR-033)**:
 
@@ -129,10 +129,21 @@ endpoints.
   Lifecycle-relevant.
 - **L3** — real tunneled request. Not implemented.
 
-> **L2 is planned, not yet in `main`.** ADR-033 defines a bounded restart/recovery
-> watchdog owned by `XrayManager`, but the implementation lives on a separate branch
-> and has **not** been merged. On `main`, the pool-driven path relies on L1 selection
-> and the driver's `health_check`; there is no automated local-runtime restart guard yet.
+**L2 watchdog (implemented)** — a bounded restart/recovery guard owned by
+`XrayManager` for the *pool-driven* active runtime. It is deliberately separate
+from the L1 pool health model and never influences profile ranking/selection:
+
+- A startup **grace window** (default 10 s) tolerates non-Healthy results while
+  the driver is coming up; after it closes, non-Healthy is treated as evidence.
+- On failure outside grace it restarts the **same** driver (never switches VPN
+  profile), respecting a **backoff** gap (default 5 s).
+- Restarts are bounded: **max_restarts** (default 3) within a rolling
+  **window_ms** (default 60 s). When the budget is spent the runtime is
+  **exhausted and stopped** (traffic direct) — no infinite restart loop. A
+  fresh start grants a new bounded budget.
+- Verified by unit tests covering grace, evidence, bounded budget exhaustion,
+  backoff gaps, same-driver restart, exhaustion-stops-runtime, and
+  non-rotation of candidates.
 
 ### B4 / DPI
 
@@ -335,7 +346,7 @@ has been exercised on real hardware.
 cargo test --workspace --no-fail-fast
 ```
 
-Current `main` baseline: **475 tests passing, 0 failing, 4 ignored** (root-gated
+Current `main` baseline: **483 tests passing, 0 failing, 4 ignored** (root-gated
 netns tests). Run the root-gated netns tests with:
 
 ```bash
