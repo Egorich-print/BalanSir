@@ -439,13 +439,20 @@ impl VpnPool {
                 }
                 dec
             }
-            None => SelectionDecision {
-                profile_id: String::new(),
-                score: 0.0,
-                reason: "no eligible profile".into(),
-                excluded,
-                candidates: 0,
-            },
+            None => {
+                // No eligible candidate: clear the active profile so the
+                // consumer is told to stop (no silent keep-running of a
+                // failed profile). Honesty rule — traffic goes direct only
+                // when there is genuinely no usable path.
+                self.active = None;
+                SelectionDecision {
+                    profile_id: String::new(),
+                    score: 0.0,
+                    reason: "no eligible profile".into(),
+                    excluded,
+                    candidates: 0,
+                }
+            }
         }
     }
 
@@ -994,5 +1001,34 @@ mod tests {
         let d = pool.select_for("f", TS);
         assert!(d.profile_id.is_empty());
         assert_eq!(d.reason, "no eligible profile");
+    }
+
+    #[test]
+    fn active_profile_cleared_when_all_eligible_profiles_fail() {
+        // The active profile later fails real probes; with no alternative
+        // left, selection must clear `active` so the consumer stops the
+        // proxy — never keep running a profile that failed health checks.
+        let mut pool = VpnPool::new(test_config());
+        populate(&mut pool, &[("a.example.com", 443), ("b.example.com", 443)]);
+        let a_id = pool.profiles()[0].profile.profile_id.clone();
+        let b_id = pool.profiles()[1].profile.profile_id.clone();
+
+        // a selected and active.
+        let d = pool.select_for("f", TS);
+        assert!(!d.profile_id.is_empty());
+        assert!(pool.active().is_some(), "a profile is active");
+
+        // Both fail real probes (enter_degraded = 2).
+        pool.observe_health(&a_id, sample_failure(), TS + 1);
+        pool.observe_health(&a_id, sample_failure(), TS + 2);
+        pool.observe_health(&b_id, sample_failure(), TS + 1);
+        pool.observe_health(&b_id, sample_failure(), TS + 2);
+
+        let d = pool.select_for("f", TS + 3);
+        assert!(d.profile_id.is_empty(), "no eligible profile");
+        assert!(
+            pool.active().is_none(),
+            "active must be cleared so the consumer is told to stop"
+        );
     }
 }
