@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// Network interface role — determined by configuration and observable
 /// properties, never by interface name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterfaceRole {
     /// WAN (provider-facing) interface. NAT masquerade applied here.
@@ -25,6 +25,7 @@ pub enum InterfaceRole {
     /// Management-only interface (e.g. Tailscale, debug console).
     Management,
     /// Unknown / not yet classified.
+    #[default]
     Unknown,
 }
 
@@ -36,12 +37,6 @@ impl InterfaceRole {
             InterfaceRole::Management => "Mgmt",
             InterfaceRole::Unknown => "Unknown",
         }
-    }
-}
-
-impl Default for InterfaceRole {
-    fn default() -> Self {
-        InterfaceRole::Unknown
     }
 }
 

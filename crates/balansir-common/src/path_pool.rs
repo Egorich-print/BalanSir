@@ -49,10 +49,11 @@ impl PathCapability {
 }
 
 /// Selection strategy for choosing among healthy candidates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionStrategy {
     /// Highest score wins.
+    #[default]
     BestScore,
     /// Strict priority order (lower index = preferred).
     Priority,
@@ -60,12 +61,6 @@ pub enum SelectionStrategy {
     Weighted,
     /// Round-robin among healthy candidates.
     RoundRobin,
-}
-
-impl Default for SelectionStrategy {
-    fn default() -> Self {
-        SelectionStrategy::BestScore
-    }
 }
 
 /// Health state of a single path candidate.
