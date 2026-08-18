@@ -11,8 +11,6 @@ use balansir_common::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// Slot identifier.
@@ -211,7 +209,7 @@ impl BootMetadata {
             return Ok(meta);
         }
 
-        let content = fs::read_to_string(path).map_err(|e| Error::Io(e))?;
+        let content = fs::read_to_string(path).map_err(Error::Io)?;
         let meta: BootMetadata = toml::from_str(&content)
             .map_err(|e| Error::Misconfiguration(format!("parse boot metadata: {e}")))?;
         debug!(
@@ -229,7 +227,7 @@ impl BootMetadata {
             Path::new(Self::METADATA_PATH)
         };
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| Error::Io(e))?;
+            fs::create_dir_all(parent).map_err(Error::Io)?;
         }
 
         let content = toml::to_string_pretty(self)
@@ -237,8 +235,8 @@ impl BootMetadata {
 
         // Atomic write: write to temp then rename
         let tmp_path = path.with_extension("toml.tmp");
-        fs::write(&tmp_path, content).map_err(|e| Error::Io(e))?;
-        fs::rename(&tmp_path, path).map_err(|e| Error::Io(e))?;
+        fs::write(&tmp_path, content).map_err(Error::Io)?;
+        fs::rename(&tmp_path, path).map_err(Error::Io)?;
 
         debug!(
             "Saved OTA boot metadata: active={} state={:?} tries={}",
@@ -362,9 +360,6 @@ pub struct BootPartition {
 }
 
 impl BootPartition {
-    /// Default mount point for the boot partition.
-    const DEFAULT_MOUNT: &'static str = "/boot";
-
     /// Create a new boot partition manager.
     pub fn new(mount_point: impl AsRef<Path>) -> Self {
         Self {
@@ -385,7 +380,7 @@ impl BootPartition {
     /// Read current cmdline.txt.
     pub fn read_cmdline(&self) -> Result<String> {
         let path = self.cmdline_path();
-        let content = fs::read_to_string(&path).map_err(|e| Error::Io(e))?;
+        let content = fs::read_to_string(&path).map_err(Error::Io)?;
         Ok(content.trim().to_string())
     }
 
@@ -393,10 +388,10 @@ impl BootPartition {
     pub fn write_cmdline(&self, content: &str) -> Result<()> {
         let path = self.cmdline_path();
         let tmp = path.with_extension("txt.tmp");
-        fs::write(&tmp, content).map_err(|e| Error::Io(e))?;
-        fs::rename(&tmp, path).map_err(|e| Error::Io(e))?;
+        fs::write(&tmp, content).map_err(Error::Io)?;
+        fs::rename(&tmp, path).map_err(Error::Io)?;
         // Sync to ensure it's on disk before reboot
-        sync_all().map_err(|e| Error::Io(e))?;
+        sync_all().map_err(Error::Io)?;
         Ok(())
     }
 
@@ -405,7 +400,7 @@ impl BootPartition {
     /// This is atomic - the rename is atomic on POSIX.
     pub fn switch_to_slot(&self, slot: Slot) -> Result<()> {
         let slot_cmdline = self.slot_cmdline_path(slot);
-        let content = fs::read_to_string(&slot_cmdline).map_err(|e| Error::Io(e))?;
+        let content = fs::read_to_string(&slot_cmdline).map_err(Error::Io)?;
         self.write_cmdline(&content)?;
         info!("Switched boot to slot {}", slot);
         Ok(())
@@ -416,7 +411,7 @@ impl BootPartition {
         for (slot, template) in [(Slot::A, template_a), (Slot::B, template_b)] {
             let path = self.slot_cmdline_path(slot);
             if !path.exists() {
-                fs::write(&path, template).map_err(|e| Error::Io(e))?;
+                fs::write(&path, template).map_err(Error::Io)?;
             }
         }
         Ok(())

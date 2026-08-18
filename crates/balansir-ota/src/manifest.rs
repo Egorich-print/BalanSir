@@ -5,12 +5,11 @@
 //! TOML representation. The public key is embedded in the production firmware.
 
 use balansir_common::{Error, Result};
+use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use std::path::Path;
-use std::str::FromStr;
 
 /// Ed25519 public key identifier for key rotation support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +115,8 @@ pub struct UpdateVerifier {
 impl UpdateVerifier {
     /// Create a verifier from a base64-encoded Ed25519 public key.
     pub fn from_base64(key_b64: &str, key_id: KeyId) -> Result<Self> {
-        let key_bytes = base64::decode(key_b64)
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(key_b64)
             .map_err(|e| Error::Misconfiguration(format!("invalid base64 public key: {e}")))?;
         if key_bytes.len() != 32 {
             return Err(Error::Misconfiguration(
@@ -173,7 +173,8 @@ impl UpdateVerifier {
         let canonical = self.canonicalize_manifest(manifest_toml)?;
 
         // Verify signature
-        let sig_bytes = base64::decode(&manifest.signature.signature)
+        let sig_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&manifest.signature.signature)
             .map_err(|e| Error::Misconfiguration(format!("invalid base64 signature: {e}")))?;
         let signature = Signature::from_bytes(&sig_bytes.try_into().unwrap());
 
@@ -244,7 +245,7 @@ pub async fn download_and_verify_image(
     }
 
     let content_length = response.content_length().unwrap_or(image_info.size);
-    if content_length != image_info.size as u64 {
+    if content_length != image_info.size {
         return Err(Error::Misconfiguration(format!(
             "size mismatch: expected {}, got {}",
             image_info.size, content_length
@@ -266,7 +267,7 @@ pub async fn download_and_verify_image(
         }
     }
 
-    if downloaded != image_info.size as u64 {
+    if downloaded != image_info.size {
         return Err(Error::Misconfiguration(format!(
             "incomplete download: expected {}, got {}",
             image_info.size, downloaded

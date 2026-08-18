@@ -3,16 +3,14 @@
 //! Validates critical gateway functionality after an OTA boot.
 //! Runs as a systemd service after multi-user.target.
 
-use crate::{manifest, slot};
 use balansir_common::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Health check configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -167,7 +165,6 @@ impl HealthReport {
 pub struct HealthChecker {
     config: HealthConfig,
     executor_socket: String,
-    daemon_socket: String,
 }
 
 impl HealthChecker {
@@ -175,7 +172,6 @@ impl HealthChecker {
         Self {
             config,
             executor_socket: "/run/balansir/executor.sock".into(),
-            daemon_socket: "/run/balansir/daemon.sock".into(),
         }
     }
 
@@ -184,7 +180,7 @@ impl HealthChecker {
         let start = Instant::now();
         let mut report = HealthReport::new(slot, firmware_version);
 
-        let critical_set: std::collections::HashSet<_> =
+        let _critical_set: std::collections::HashSet<_> =
             self.config.critical_checks.iter().cloned().collect();
         let all_checks: Vec<CheckName> = self
             .config

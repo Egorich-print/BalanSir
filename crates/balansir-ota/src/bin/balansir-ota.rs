@@ -10,7 +10,7 @@
 //!   balansir-ota boot-confirm          # confirm current slot is healthy
 
 use balansir_ota::daemon::{OtaConfig, OtaDaemon};
-use balansir_ota::slot::{BootMetadata, Slot};
+use balansir_ota::slot::BootMetadata;
 
 fn usage() {
     eprintln!("Usage: balansir-ota <command>");
@@ -65,7 +65,7 @@ fn cmd_rollback() -> Result<(), String> {
 
 async fn cmd_update(image_path: &str, config: &OtaConfig) -> Result<(), String> {
     let image = std::fs::read(image_path).map_err(|e| format!("read image: {e}"))?;
-    let mut meta = load_metadata()?;
+    let meta = load_metadata()?;
     let inactive = meta.next_slot();
     println!("Installing to slot {inactive} ({} bytes)...", image.len());
     let daemon = OtaDaemon::new(config.clone()).map_err(|e| format!("init OTA daemon: {e}"))?;

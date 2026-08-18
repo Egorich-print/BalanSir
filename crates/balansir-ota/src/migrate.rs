@@ -15,6 +15,7 @@ use tracing::{error, info, warn};
 /// Migration trait - implement for each schema version upgrade.
 pub trait ConfigMigration: Send + Sync {
     /// Source schema version (e.g., 1 for v1->v2).
+    #[allow(clippy::wrong_self_convention)]
     fn from_version(&self) -> u32;
 
     /// Target schema version.
@@ -36,6 +37,12 @@ pub trait ConfigMigration: Send + Sync {
 /// Migration registry - manages all available migrations.
 pub struct MigrationRegistry {
     migrations: HashMap<(u32, u32), Box<dyn ConfigMigration>>,
+}
+
+impl Default for MigrationRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MigrationRegistry {
@@ -145,7 +152,7 @@ impl VersionedConfig {
             )));
         }
 
-        let content = fs::read_to_string(path).map_err(|e| Error::Io(e))?;
+        let content = fs::read_to_string(path).map_err(Error::Io)?;
 
         let mut vc: VersionedConfig = serde_json::from_str(&content)
             .map_err(|e| Error::Misconfiguration(format!("parse config: {e}")))?;
@@ -173,15 +180,15 @@ impl VersionedConfig {
     /// Save config atomically.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| Error::Io(e))?;
+            fs::create_dir_all(parent).map_err(Error::Io)?;
         }
 
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| Error::Misconfiguration(format!("serialize config: {e}")))?;
 
         let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, content).map_err(|e| Error::Io(e))?;
-        fs::rename(&tmp, path).map_err(|e| Error::Io(e))?;
+        fs::write(&tmp, content).map_err(Error::Io)?;
+        fs::rename(&tmp, path).map_err(Error::Io)?;
 
         Ok(())
     }
@@ -196,9 +203,8 @@ static MIGRATION_REGISTRY: std::sync::OnceLock<MigrationRegistry> = std::sync::O
 /// Get the global migration registry.
 pub fn registry() -> &'static MigrationRegistry {
     MIGRATION_REGISTRY.get_or_init(|| {
-        let mut reg = MigrationRegistry::new();
         // Register migrations here as they are added
-        reg
+        MigrationRegistry::new()
     })
 }
 
@@ -227,7 +233,7 @@ impl MigrationRunner {
             return Ok(report);
         }
 
-        fs::create_dir_all(&self.backup_dir).map_err(|e| Error::Io(e))?;
+        fs::create_dir_all(&self.backup_dir).map_err(Error::Io)?;
 
         for entry in fs::read_dir(&self.config_dir)? {
             let entry = entry?;
@@ -285,7 +291,7 @@ impl MigrationRunner {
             path.file_name().unwrap().to_string_lossy(),
             version
         ));
-        fs::copy(path, &backup_path).map_err(|e| Error::Io(e))?;
+        fs::copy(path, &backup_path).map_err(Error::Io)?;
 
         // Apply migrations
         value = self

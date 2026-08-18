@@ -812,35 +812,31 @@ impl XrayManager {
     async fn restart_active_driver(&self) {
         let label = self.active_label().await;
         let mut guard = self.driver.write().await;
-        match guard.as_mut() {
-            Some(driver) => {
-                match driver.restart().await {
-                    Ok(()) => {
-                        *self.last_switch_ms.write().await = now_ms();
-                        // Grace anchor refresh only: keep the bounded budget
-                        // so repeated failures accumulate toward exhaustion.
-                        self.l2.write().await.on_restart(now_ms());
-                        self.started_count
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        info!(
-                            "Xray: L2 recovery restarted active driver{label_clause}",
-                            label_clause = label
-                                .as_deref()
-                                .map(|l| format!(" '{l}'"))
-                                .unwrap_or_default()
-                        );
-                        let _ = self.events.send(SubsystemEvent::XrayStarted {
-                            profile: label.unwrap_or_else(|| "active".into()),
-                        });
-                    }
-                    Err(e) => {
-                        warn!("Xray: L2 restart failed: {e}");
-                        *self.last_error.write().await =
-                            Some(format!("L2 driver restart failed: {e}"));
-                    }
+        if let Some(driver) = guard.as_mut() {
+            match driver.restart().await {
+                Ok(()) => {
+                    *self.last_switch_ms.write().await = now_ms();
+                    // Grace anchor refresh only: keep the bounded budget
+                    // so repeated failures accumulate toward exhaustion.
+                    self.l2.write().await.on_restart(now_ms());
+                    self.started_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    info!(
+                        "Xray: L2 recovery restarted active driver{label_clause}",
+                        label_clause = label
+                            .as_deref()
+                            .map(|l| format!(" '{l}'"))
+                            .unwrap_or_default()
+                    );
+                    let _ = self.events.send(SubsystemEvent::XrayStarted {
+                        profile: label.unwrap_or_else(|| "active".into()),
+                    });
+                }
+                Err(e) => {
+                    warn!("Xray: L2 restart failed: {e}");
+                    *self.last_error.write().await = Some(format!("L2 driver restart failed: {e}"));
                 }
             }
-            None => {}
         }
     }
 

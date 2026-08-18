@@ -3,7 +3,6 @@
 use crate::{health, manifest, slot};
 use balansir_common::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
@@ -134,7 +133,7 @@ impl OtaDaemon {
     /// Create a new OTA daemon.
     pub fn new(config: OtaConfig) -> Result<Self> {
         // Load embedded public key
-        let key_b64 = std::fs::read_to_string(&config.public_key_path).map_err(|e| Error::Io(e))?;
+        let key_b64 = std::fs::read_to_string(&config.public_key_path).map_err(Error::Io)?;
         let key_id = manifest::KeyId(config.key_id.clone());
         let verifier = manifest::UpdateVerifier::from_base64(&key_b64, key_id)?;
 
@@ -144,10 +143,10 @@ impl OtaDaemon {
 
         // Ensure slot cmdline files exist
         let cmdline_a = std::fs::read_to_string("/etc/balansir/cmdline-A.txt")
-            .or_else(|_| std::fs::read_to_string(&format!("{}/cmdline-A.txt", config.boot_mount)))
+            .or_else(|_| std::fs::read_to_string(format!("{}/cmdline-A.txt", config.boot_mount)))
             .unwrap_or_else(|_| "root=/dev/mmcblk0p2 rootwait console=tty1 console=serial0,115200 loglevel=8 consoleblank=0 systemd.log_level=debug net.ifnames=0 biosdevname=0 balansir_slot=A".into());
         let cmdline_b = std::fs::read_to_string("/etc/balansir/cmdline-B.txt")
-            .or_else(|_| std::fs::read_to_string(&format!("{}/cmdline-B.txt", config.boot_mount)))
+            .or_else(|_| std::fs::read_to_string(format!("{}/cmdline-B.txt", config.boot_mount)))
             .unwrap_or_else(|_| "root=/dev/mmcblk0p3 rootwait console=tty1 console=serial0,115200 loglevel=8 consoleblank=0 systemd.log_level=debug net.ifnames=0 biosdevname=0 balansir_slot=B".into());
         boot_partition.ensure_slot_cmdlines(&cmdline_a, &cmdline_b)?;
 
@@ -323,7 +322,7 @@ impl OtaDaemon {
             }
         }
 
-        if downloaded != expected_size as u64 {
+        if downloaded != expected_size {
             return Err(Error::Misconfiguration(format!(
                 "incomplete download: expected {}, got {}",
                 expected_size, downloaded
@@ -444,7 +443,7 @@ impl OtaDaemon {
             return Err(Error::Fatal("sha256sum verification failed".into()));
         }
 
-        let written_hash = String::from_utf8_lossy(&verify_output.stdout)
+        let _written_hash = String::from_utf8_lossy(&verify_output.stdout)
             .split_whitespace()
             .next()
             .unwrap_or("")
@@ -624,7 +623,7 @@ impl OtaDaemon {
             }
 
             match self.check_updates().await {
-                Ok(Some(update)) => {
+                Ok(Some(_update)) => {
                     if let Err(e) = self.prepare_update().await {
                         error!("Update preparation failed: {}", e);
                         self.update_state(|s| {
