@@ -15,3 +15,6 @@ build/
 *~
 webui/src-tauri/target
 webui/src-tauri/gen
+
+# Fornex Weeb VPS profile (own server) - never commit
+config/profiles/fornex-weeb.toml
