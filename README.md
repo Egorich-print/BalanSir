@@ -116,6 +116,15 @@ VPN profile management lives in `balansir-vpn` plus the daemon's `vpn_manager.rs
 - The selected profile is handed to `XrayManager` via a pool consumer
   (`apply_pool_profile`); the pool is authoritative for selection.
 
+**Supported subscription formats** (`balansir-vpn` importer): `vless://` URIs
+with `type=tcp|ws|grpc|httpupgrade` and `security=none|tls|reality`
+(`security=false` is accepted as a `none` alias; for WS/HTTPUpgrade TLS
+configs without `sni=` the effective SNI is derived from the `host=` fronting
+domain, and the WS/HTTPUpgrade Host header is preserved end-to-end).
+Everything else is rejected with an explicit reason — never silently
+imported: `hysteria2://`, `trojan://`, `vmess://`, `ss://` and the
+`xhttp`/`raw` transports are **not** runnable by the current runtime.
+
 ### Xray / L2 health
 
 `XrayManager` runs the active Xray driver (VLESS/Reality), supervises it with

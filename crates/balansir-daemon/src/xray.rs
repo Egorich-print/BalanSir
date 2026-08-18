@@ -42,12 +42,16 @@ pub enum XrayTransport {
     Tcp,
     WebSocket {
         path: String,
+        /// Optional WS `Host` header (fronting domain from the source config).
+        host: Option<String>,
     },
     Grpc {
         service_name: String,
     },
     HttpUpgrade {
         path: String,
+        /// Optional `Host` header (fronting domain from the source config).
+        host: Option<String>,
     },
 }
 
@@ -124,7 +128,7 @@ impl XrayConfig {
             ));
         }
         match &self.transport {
-            XrayTransport::WebSocket { path } | XrayTransport::HttpUpgrade { path } => {
+            XrayTransport::WebSocket { path, .. } | XrayTransport::HttpUpgrade { path, .. } => {
                 if !path.starts_with('/') {
                     return Err(DriverError::ConfigInvalid(format!(
                         "xray transport path {path:?} must start with '/'"
@@ -270,8 +274,14 @@ impl XrayDriver {
             stream.insert(key.into(), serde_json::Value::Object(settings));
         }
         match &cfg.transport {
-            XrayTransport::WebSocket { path } => {
-                stream.insert("wsSettings".into(), serde_json::json!({ "path": path }));
+            XrayTransport::WebSocket { path, host } => {
+                let mut ws = serde_json::json!({ "path": path });
+                if let Some(host) = host {
+                    if !host.is_empty() {
+                        ws["headers"] = serde_json::json!({ "Host": host });
+                    }
+                }
+                stream.insert("wsSettings".into(), ws);
             }
             XrayTransport::Grpc { service_name } => {
                 stream.insert(
@@ -279,11 +289,14 @@ impl XrayDriver {
                     serde_json::json!({ "serviceName": service_name }),
                 );
             }
-            XrayTransport::HttpUpgrade { path } => {
-                stream.insert(
-                    "httpupgradeSettings".into(),
-                    serde_json::json!({ "path": path }),
-                );
+            XrayTransport::HttpUpgrade { path, host } => {
+                let mut hu = serde_json::json!({ "path": path });
+                if let Some(host) = host {
+                    if !host.is_empty() {
+                        hu["host"] = serde_json::json!(host);
+                    }
+                }
+                stream.insert("httpupgradeSettings".into(), hu);
             }
             XrayTransport::Tcp => {}
         }
@@ -502,6 +515,7 @@ mod tests {
         let mut cfg = sample_config();
         cfg.transport = XrayTransport::WebSocket {
             path: "no-slash".into(),
+            host: None,
         };
         assert!(cfg.validate().is_err());
 
@@ -538,6 +552,7 @@ mod tests {
         let mut cfg = sample_config();
         cfg.transport = XrayTransport::WebSocket {
             path: "/ws".to_string(),
+            host: None,
         };
         cfg.security = XraySecurity::Tls(XrayTls {
             server_name: "sni.example.com".to_string(),

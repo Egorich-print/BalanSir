@@ -123,8 +123,15 @@ pub fn parse_line(line: &str, source: &str, source_ts_ms: i64) -> Result<VpnProf
             if !path.starts_with('/') {
                 return Err("ws path must start with '/'".into());
             }
+            // Keep the WS Host header (`host=` param) — without it the runtime
+            // config silently loses the fronting domain.
+            let host = uri
+                .get("host")
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
             Transport::WebSocket {
                 path: path.to_string(),
+                host,
             }
         }
         "grpc" => Transport::Grpc {
@@ -135,8 +142,13 @@ pub fn parse_line(line: &str, source: &str, source_ts_ms: i64) -> Result<VpnProf
             if !path.starts_with('/') {
                 return Err("httpupgrade path must start with '/'".into());
             }
+            let host = uri
+                .get("host")
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
             Transport::HttpUpgrade {
                 path: path.to_string(),
+                host,
             }
         }
         other => return Err(format!("unsupported transport type '{other}'")),
@@ -144,14 +156,24 @@ pub fn parse_line(line: &str, source: &str, source_ts_ms: i64) -> Result<VpnProf
 
     // Security + SNI.
     let security = match uri.get("security").unwrap_or("none") {
-        "none" | "" => Security::None,
+        // `security=false` is a common v2rayNG export quirk meaning "none".
+        "none" | "" | "false" => Security::None,
         "tls" => Security::Tls,
         "reality" => Security::Reality,
         other => return Err(format!("unsupported security '{other}'")),
     };
+    // SNI: explicit `sni=` wins; for WS/HttpUpgrade TLS configs the VLESS
+    // share-URI convention derives the effective SNI from the `host=` param
+    // (the fronting domain) when `sni` is absent.
     let sni = uri
         .get("sni")
         .filter(|s| !s.is_empty())
+        .or_else(|| match &transport {
+            Transport::WebSocket { host, .. } | Transport::HttpUpgrade { host, .. } => {
+                host.as_deref().filter(|s| !s.is_empty())
+            }
+            _ => None,
+        })
         .map(|s| s.to_string());
     if security != Security::None && sni.is_none() {
         return Err("TLS/reality requires a non-empty sni".into());
@@ -346,10 +368,89 @@ mod tests {
         assert_eq!(
             p.transport,
             Transport::WebSocket {
-                path: "/vless".into()
+                path: "/vless".into(),
+                host: None,
             }
         );
         assert!(p.label.contains("Bulgaria"));
+    }
+
+    /// Deterministic fixture modeled on the upstream `vpn-configs-for-russia`
+    /// corpus (formats copied, all credentials/keys replaced with synthetic
+    /// values — no real secrets in the repo).
+    #[test]
+    fn upstream_corpus_formats() {
+        // 1. Valid VLESS+Reality+TCP (the dominant upstream format).
+        let p = parse_line(
+            "vless://11111111-2222-4333-8444-555555555555@203.0.113.10:443?type=tcp&security=reality&encryption=none&flow=xtls-rprx-vision&pbk=TEST_PUBLIC_KEY_PLACEHOLDER_0000000000000&sid=abcd1234&sni=www.example.com&fp=ios#Node-1",
+            "fixture", TS,
+        ).expect("vless reality tcp");
+        assert_eq!(p.security, Security::Reality);
+        assert_eq!(
+            p.reality_pbk.as_deref(),
+            Some("TEST_PUBLIC_KEY_PLACEHOLDER_0000000000000")
+        );
+        assert_eq!(p.reality_sid.as_deref(), Some("abcd1234"));
+        assert_eq!(p.fingerprint.as_deref(), Some("ios"));
+
+        // 2. Valid VLESS over IPv6 (bracketed literal).
+        let p = parse_line(
+            "vless://11111111-2222-4333-8444-555555555555@[2001:db8::10]:8443?type=tcp&security=none#v6",
+            "fixture", TS,
+        ).expect("v6");
+        assert_eq!(p.server, "2001:db8::10");
+        assert_eq!(p.endpoint(), "[2001:db8::10]:8443", "v6 endpoint bracketed");
+
+        // 3. WS+TLS with host= but no sni= — SNI must fall back to the
+        // fronting host (upstream corpus relies on this convention).
+        let p = parse_line(
+            "vless://11111111-2222-4333-8444-555555555555@cdn.example.com:8443?type=ws&path=%2F&host=front.example.net&security=tls#ws-tls",
+            "fixture", TS,
+        ).expect("ws tls with host-derived sni");
+        assert_eq!(p.sni.as_deref(), Some("front.example.net"));
+        assert_eq!(
+            p.transport,
+            Transport::WebSocket {
+                path: "/".into(),
+                host: Some("front.example.net".into()),
+            },
+            "WS Host header preserved"
+        );
+
+        // 4. `security=false` quirk (v2rayNG export) = no security.
+        let p = parse_line(
+            "vless://11111111-2222-4333-8444-555555555555@198.51.100.7:80?security=false&type=tcp#quirk",
+            "fixture", TS,
+        ).expect("security=false alias");
+        assert_eq!(p.security, Security::None);
+
+        // 5. Malformed URI → rejected with a reason.
+        let err = parse_line("vless://not-a-valid-line", "fixture", TS).unwrap_err();
+        assert!(!err.is_empty());
+
+        // 6. Missing required field (TLS without any sni/host) → rejected.
+        let err = parse_line(
+            "vless://11111111-2222-4333-8444-555555555555@203.0.113.20:443?type=tcp&security=tls#no-sni",
+            "fixture", TS,
+        ).unwrap_err();
+        assert!(err.contains("sni"));
+
+        // 7. Unsupported protocols from the same corpus → rejected honestly.
+        for line in [
+            "hysteria2://syntheticpass0123456789abcdef@203.0.113.30:443?insecure=1&sni=hy.example.com#hy2",
+            "trojan://11111111-2222-4333-8444-555555555555@203.0.113.40:8443?security=tls&sni=t.example.com#trojan",
+            "vmess://eyJhZGQiOiIxOTguNTEuMTAwLjUwIn0=#vmess",
+        ] {
+            let err = parse_line(line, "fixture", TS).unwrap_err();
+            assert!(err.contains("unsupported scheme"), "{line}: {err}");
+        }
+
+        // 8. Unsupported transport (xhttp — large share of the corpus).
+        let err = parse_line(
+            "vless://11111111-2222-4333-8444-555555555555@203.0.113.60:443?type=xhttp&security=reality&sni=x.example.com&pbk=TEST_PUBLIC_KEY_PLACEHOLDER_0000000000000#xhttp",
+            "fixture", TS,
+        ).unwrap_err();
+        assert!(err.contains("xhttp"));
     }
 
     #[test]

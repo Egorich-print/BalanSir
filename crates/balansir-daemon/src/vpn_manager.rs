@@ -47,11 +47,17 @@ pub fn profile_to_xray_config(
 ) -> Result<XrayConfig, String> {
     let transport = match &profile.transport {
         Transport::Tcp => XrayTransport::Tcp,
-        Transport::WebSocket { path } => XrayTransport::WebSocket { path: path.clone() },
+        Transport::WebSocket { path, host } => XrayTransport::WebSocket {
+            path: path.clone(),
+            host: host.clone(),
+        },
         Transport::Grpc { service_name } => XrayTransport::Grpc {
             service_name: service_name.clone(),
         },
-        Transport::HttpUpgrade { path } => XrayTransport::HttpUpgrade { path: path.clone() },
+        Transport::HttpUpgrade { path, host } => XrayTransport::HttpUpgrade {
+            path: path.clone(),
+            host: host.clone(),
+        },
     };
     let security = match profile.security {
         Security::None => XraySecurity::None,
@@ -997,6 +1003,76 @@ vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@b.example.com:443?security=none&typ
         assert!(
             recorded.last().unwrap().is_none(),
             "all profiles failing real probes → proxy stopped (no silent success)"
+        );
+    }
+
+    /// Mission matrix scenario: A failed, B healthy, C failed → A and C
+    /// excluded with reasons, B selected; a failing probe for A/C never aborts
+    /// the health cycle for the others.
+    #[tokio::test]
+    async fn failed_healthy_failed_matrix_selects_the_healthy_one() {
+        let cfg = VpnToml {
+            local_source: Some(
+                "vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@a.example.com:443?security=none&type=tcp#A\n\
+                 vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@b.example.com:443?security=none&type=tcp#B\n\
+                 vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@c.example.com:443?security=none&type=tcp#C"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let probe = Arc::new(FakeProbe::new(&[
+            ("a.example.com", false),
+            ("b.example.com", true),
+            ("c.example.com", false),
+        ]));
+        let (manager, consumer) = manager_with_probe_cfg(cfg, probe);
+        manager.refresh(T0).await.expect("refresh: 3 profiles");
+        {
+            let pool = manager.pool.read().await;
+            assert_eq!(pool.profiles().len(), 3);
+        }
+
+        // enter_degraded=2 → two probe cycles; A and C fail, B healthy.
+        manager.health_cycle(T0).await;
+        manager.health_cycle(T0 + 1_000).await;
+
+        // Both failures were recorded — a failing probe never aborted the cycle.
+        {
+            let pool = manager.pool.read().await;
+            for host in ["a.example.com", "c.example.com"] {
+                let p = pool
+                    .profiles()
+                    .iter()
+                    .find(|p| p.profile.server == host)
+                    .unwrap();
+                assert!(
+                    matches!(
+                        p.health.state,
+                        balansir_vpn::profile::ProfileState::Failed
+                            | balansir_vpn::profile::ProfileState::Cooldown
+                    ),
+                    "{host} must be excluded, got {:?}",
+                    p.health.state
+                );
+            }
+            let b = pool
+                .profiles()
+                .iter()
+                .find(|p| p.profile.server == "b.example.com")
+                .unwrap();
+            assert_eq!(
+                b.health.state,
+                balansir_vpn::profile::ProfileState::Healthy,
+                "B stays healthy"
+            );
+        }
+
+        manager.selection_cycle(T0 + 2_000).await;
+        let recorded = consumer.0.lock().unwrap();
+        let last = recorded.last().unwrap().as_ref().unwrap();
+        assert!(
+            last.starts_with("b.example.com:"),
+            "healthy B selected, got {last}"
         );
     }
 

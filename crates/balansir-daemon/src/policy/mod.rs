@@ -252,6 +252,55 @@ mod tests {
         assert_eq!(trace.action, Action::Allow);
     }
 
+    /// Mission B4↔VPN semantics at the policy level:
+    /// * B4 healthy → Forward{B4} is used, the VPN fallback is NOT taken
+    ///   (no unnecessary VPN);
+    /// * B4 unhealthy → the rule's VPN fallback engages;
+    /// * B4 unhealthy and no fallback under default-deny → Block (honest
+    ///   failure, never a silent Allow).
+    #[test]
+    fn test_b4_vpn_fallback_semantics() {
+        use balansir_common::DriverId;
+        let rules = vec![PolicyRule {
+            id: 1,
+            name: "b4-first-vpn-fallback".to_string(),
+            priority: 100,
+            enabled: true,
+            matcher: Matcher::Any,
+            action: Action::Forward {
+                driver: DriverId::B4,
+            },
+            fallback: Some(Action::Forward {
+                driver: DriverId::Xray,
+            }),
+        }];
+        let engine = PolicyEngine::new(rules);
+
+        // B4 healthy: traffic goes to B4; VPN not engaged.
+        let trace = engine.evaluate(&ctx_with_domain(None), &healthy());
+        assert_eq!(
+            trace.action,
+            Action::Forward {
+                driver: DriverId::B4
+            }
+        );
+
+        // B4 ineffective/unavailable: policy fallback → VPN driver.
+        let mut health = HealthView::new();
+        health.set(
+            DriverId::B4,
+            balansir_common::HealthStatus::Unhealthy { reason: 7 },
+        );
+        let trace = engine.evaluate(&ctx_with_domain(None), &health);
+        assert_eq!(
+            trace.action,
+            Action::Forward {
+                driver: DriverId::Xray
+            },
+            "B4 failure falls back to VPN per policy"
+        );
+    }
+
     #[test]
     fn test_forward_without_fallback_under_default_deny() {
         let rules = vec![PolicyRule {

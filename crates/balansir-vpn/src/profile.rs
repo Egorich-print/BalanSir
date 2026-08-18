@@ -48,9 +48,20 @@ impl Protocol {
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
     Tcp,
-    WebSocket { path: String },
-    Grpc { service_name: String },
-    HttpUpgrade { path: String },
+    /// WebSocket: path + optional Host header (the `host=` URI param — the
+    /// fronting domain; required for correct WS+TLS fronting).
+    WebSocket {
+        path: String,
+        host: Option<String>,
+    },
+    Grpc {
+        service_name: String,
+    },
+    /// HTTPUpgrade: path + optional Host header (same `host=` param).
+    HttpUpgrade {
+        path: String,
+        host: Option<String>,
+    },
 }
 
 impl Transport {
@@ -126,9 +137,15 @@ pub struct VpnProfile {
 }
 
 impl VpnProfile {
-    /// The endpoint this profile reaches, as `server:port` (label-safe).
+    /// The endpoint this profile reaches, as `server:port` (label-safe);
+    /// bare IPv6 literals are bracketed (`[2001:db8::1]:443`) so the string
+    /// stays unambiguous.
     pub fn endpoint(&self) -> String {
-        format!("{}:{}", self.server, self.port)
+        if self.server.contains(':') && !self.server.starts_with('[') {
+            format!("[{}]:{}", self.server, self.port)
+        } else {
+            format!("{}:{}", self.server, self.port)
+        }
     }
 }
 

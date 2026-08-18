@@ -118,6 +118,15 @@ executor (nftables/netlink) циклом реконсиляции. Отдель�
 - Выбранный профиль передаётся в `XrayManager` через pool consumer
   (`apply_pool_profile`); пул авторитетен для выбора.
 
+**Поддерживаемые форматы подписок** (импортер `balansir-vpn`): URI `vless://`
+с `type=tcp|ws|grpc|httpupgrade` и `security=none|tls|reality`
+(`security=false` принимается как алиас `none`; для WS/HTTPUpgrade TLS-конфигов
+без `sni=` эффективный SNI выводится из fronting-домена `host=`, а
+WS/HTTPUpgrade Host-заголовок сохраняется на всём пути). Всё остальное
+отклоняется с явной причиной — никогда не импортируется молча:
+`hysteria2://`, `trojan://`, `vmess://`, `ss://` и транспорты `xhttp`/`raw`
+**не исполняются** текущим runtime.
+
 ### Xray / health L2
 
 `XrayManager` запускает активный Xray-драйвер (VLESS/Reality), следит за ним через
