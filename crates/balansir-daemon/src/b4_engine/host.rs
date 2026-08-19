@@ -6,49 +6,66 @@
 //!
 //! On Linux, `/proc/net/tcp` and `/proc/net/tcp6` expose per-connection
 //! state, retransmit counts and timeouts. The observer aggregates these per
-//! path (by destination IP suffix matching) into a `B4Observation`. On
-//! non-Linux platforms no such table is available; the observer honestly
-//! returns unknown signals (the engine then degrades to policy-only
-//! behavior).
+//! path (by destination IP) into a `B4Observation`. On non-Linux platforms no
+//! such table is available; the observer honestly returns unknown signals
+//! (the engine then degrades to policy-only behavior).
 
 use crate::b4_engine::observe::{B4Observation, B4Observer};
 
 /// Observes host TCP-table signals (Linux) for a path key.
 ///
 /// A path key may be a bare destination IP (e.g. `203.0.113.5`) or a domain;
-/// for domains the observer looks for connections to the resolved IPs by
-/// matching the key as a substring of the connection's remote address. When no
-/// connection matches, signals are unknown.
+/// for domains the observer matches the connection's remote address against
+/// the domain's resolved addresses (from the shared DNS registry) — matching
+/// the hex `:port` form of `/proc/net/tcp` against a domain never matches, so
+/// the raw form is decoded to a dotted quad first.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HostStackObserver;
 
 #[async_trait::async_trait]
 impl B4Observer for HostStackObserver {
     async fn observe(&self, flow_key: &str) -> B4Observation {
-        host_stack_observe(flow_key).await
+        host_stack_observe(flow_key, None).await
     }
 }
 
 #[cfg(target_os = "linux")]
-async fn host_stack_observe(flow_key: &str) -> B4Observation {
+async fn host_stack_observe(
+    flow_key: &str,
+    resolved: Option<&[std::net::IpAddr]>,
+) -> B4Observation {
     let tcp = std::fs::read_to_string("/proc/net/tcp").unwrap_or_default();
     let tcp6 = std::fs::read_to_string("/proc/net/tcp6").unwrap_or_default();
     let mut retransmissions: Option<u32> = None;
     let mut reset_or_timeout: Option<bool> = None;
 
-    for table in [tcp.as_str(), tcp6.as_str()] {
+    let matches_key = |ip: std::net::IpAddr| -> bool {
+        match resolved {
+            Some(addrs) => addrs.contains(&ip),
+            None => ip.to_string() == flow_key,
+        }
+    };
+
+    for (table, ipv6) in [(tcp.as_str(), false), (tcp6.as_str(), true)] {
         // Skip header line.
         for line in table.lines().skip(1) {
             let fields: Vec<&str> = line.split_whitespace().collect();
             if fields.len() < 4 {
                 continue;
             }
-            let remote = fields[2]; // e.g. 0100007F:1F90 (little-endian hex ip:port)
-            if !remote.contains(flow_key) {
+            let Some(remote_ip) = remote_ip_str(fields[2], ipv6) else {
+                continue;
+            };
+            if !matches_key(remote_ip) {
                 continue;
             }
-            let state = fields[3]; // 01..0F connection state (01=ESTABLISHED, 08=CLOSE_WAIT)
-            if state == "08" || state == "07" || state == "06" {
+            // Connection state: 01=ESTABLISHED, 04=CLOSE, 05=CLOSE_WAIT,
+            // 06=LAST_ACK, 08=CLOSING, 09=TIME_WAIT. Only "hard" failure
+            // states are interference evidence; terminal states (LAST_ACK /
+            // CLOSING / TIME_WAIT) are normal teardown and would otherwise
+            // produce false Interfered on every closed flow.
+            let state = fields[3];
+            if state == "04" || state == "05" {
                 reset_or_timeout = Some(true);
             }
             // Retransmit count is in the timer fields (fields[4] contains
@@ -69,8 +86,46 @@ async fn host_stack_observe(flow_key: &str) -> B4Observation {
     }
 }
 
+/// Decode a `/proc/net/tcp` remote `HEXIP:HEXPORT` field into an IP address.
+///
+/// IPv4 is 8 hex chars little-endian; IPv6 is 32 hex chars with reversed
+/// group order (4-3-2-1 in the table).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn remote_ip_str(field: &str, ipv6: bool) -> Option<std::net::IpAddr> {
+    let hex = field.split(':').next()?;
+    if ipv6 {
+        if hex.len() != 32 {
+            return None;
+        }
+        let mut bytes = [0u8; 16];
+        for (i, chunk) in hex.as_bytes().chunks(8).enumerate() {
+            let group = std::str::from_utf8(chunk).ok()?;
+            let v = u32::from_str_radix(group, 16).ok()?;
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        // Group order in /proc/net/tcp6 is reversed (4-3-2-1).
+        let mut reordered = [0u8; 16];
+        for (dst, src) in reordered.chunks_mut(4).zip(bytes.chunks(4).rev()) {
+            dst.copy_from_slice(src);
+        }
+        Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(reordered)))
+    } else {
+        if hex.len() != 8 {
+            return None;
+        }
+        let v = u32::from_str_radix(hex, 16).ok()?;
+        let b = v.to_le_bytes();
+        Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            b[0], b[1], b[2], b[3],
+        )))
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
-async fn host_stack_observe(_flow_key: &str) -> B4Observation {
+async fn host_stack_observe(
+    _flow_key: &str,
+    _resolved: Option<&[std::net::IpAddr]>,
+) -> B4Observation {
     // No host TCP table on non-Linux; honest unknown.
     B4Observation::default()
 }
@@ -82,23 +137,21 @@ async fn host_stack_observe(_flow_key: &str) -> B4Observation {
 /// has addresses, and `None` when no DNS source is wired.
 #[derive(Debug, Clone)]
 pub struct CompositeObserver {
-    host: HostStackObserver,
     dns: Option<std::sync::Arc<crate::reconciliation::DnsRegistry>>,
 }
 
 impl CompositeObserver {
     pub fn new(dns: Option<std::sync::Arc<crate::reconciliation::DnsRegistry>>) -> Self {
-        Self {
-            host: HostStackObserver,
-            dns,
-        }
+        Self { dns }
     }
 }
 
 #[async_trait::async_trait]
 impl B4Observer for CompositeObserver {
     async fn observe(&self, flow_key: &str) -> B4Observation {
-        let mut obs = self.host.observe(flow_key).await;
+        let resolved: Option<Vec<std::net::IpAddr>> =
+            self.dns.as_ref().and_then(|r| r.resolve(flow_key));
+        let mut obs = host_stack_observe(flow_key, resolved.as_deref()).await;
         if let Some(registry) = &self.dns {
             obs.dns_ok = Some(registry.resolve(flow_key).is_some());
         }
@@ -134,13 +187,10 @@ mod tests {
         use crate::reconciliation::FlowCompiler;
         use balansir_common::{Action, DesiredRule, FlowCriteria};
 
-        // One registry, shared by both consumers (this mirrors main.rs's
-        // composition: FlowCompiler::new((*registry).clone()) + CompositeObserver).
         let registry = std::sync::Arc::new(DnsRegistry::new());
         let compiler = FlowCompiler::new((*registry).clone());
         let observer = CompositeObserver::new(Some(Arc::clone(&registry)));
 
-        // The P6 consumer sees no domain yet -> compiles nothing.
         let rule = DesiredRule {
             id: 7,
             action: Action::Block,
@@ -154,11 +204,9 @@ mod tests {
             compiler.compile_rule(&rule).is_empty(),
             "P6 sees unresolved domain before observation"
         );
-        // B4 sees dns_ok = false (same unresolved truth).
         let before = futures_test_observe(&observer, "api.example.com");
         assert_eq!(before.dns_ok, Some(false));
 
-        // A single DNS observation lands in the shared registry.
         registry.insert(
             "api.example.com",
             vec![
@@ -167,22 +215,33 @@ mod tests {
             ],
         );
 
-        // P6 now compiles one rule per resolved IP (same observation).
         let compiled = compiler.compile_rule(&rule);
         assert_eq!(compiled.len(), 2);
-        // B4 now sees dns_ok = true (the same observation).
         let after = futures_test_observe(&observer, "api.example.com");
         assert_eq!(after.dns_ok, Some(true));
 
-        // Removing the observation is again visible to both.
         registry.remove("api.example.com");
         assert!(compiler.compile_rule(&rule).is_empty());
         let removed = futures_test_observe(&observer, "api.example.com");
         assert_eq!(removed.dns_ok, Some(false));
     }
 
+    /// /proc/net/tcp remote fields decode correctly (little-endian IPv4).
+    #[test]
+    fn proc_net_remote_decodes_ipv4() {
+        // 0100007F = 127.0.0.1 little-endian.
+        let hex = "0100007F:1F90";
+        assert_eq!(
+            remote_ip_str(hex, false),
+            Some("127.0.0.1".parse().unwrap())
+        );
+        // 02C6A8C0 LE -> bytes 0xC0 0xA8 0xC6 0x02 -> 192.168.198.2.
+        let hex2 = "02C6A8C0:01BB";
+        let ip = remote_ip_str(hex2, false).unwrap();
+        assert_eq!(ip.to_string(), "192.168.198.2");
+    }
+
     fn futures_test_observe(observer: &CompositeObserver, key: &str) -> B4Observation {
-        // B4Observer::observe is async; drive it synchronously for the test.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

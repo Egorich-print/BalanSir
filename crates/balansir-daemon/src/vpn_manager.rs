@@ -133,7 +133,6 @@ pub struct PoolToml {
     pub health_cooldown_secs: Option<u64>,
     pub rotation_interval_secs: Option<u64>,
     pub better_threshold: Option<f64>,
-    pub capacity_per_profile: Option<u32>,
 }
 
 impl VpnToml {
@@ -153,7 +152,6 @@ impl VpnToml {
             ),
             better_threshold: p.better_threshold.unwrap_or(25.0),
             ramp_steps: vec![10, 25, 50, 100],
-            capacity_per_profile: p.capacity_per_profile.unwrap_or(64),
         }
     }
 }
@@ -441,22 +439,38 @@ impl VpnManager {
             }
 
             // Operator pin (WebUI): pin overrides rotation/selection until
-            // cleared. Only applied when the pinned profile exists.
-            if let Some(pinned) = self.handle.pin.read().await.clone() {
-                let exists = pool
-                    .profiles()
-                    .iter()
-                    .any(|p| p.profile.profile_id == pinned);
-                if exists && pool.active() != Some(pinned.as_str()) {
+            // cleared. A pinned profile that is healthy/unknown stays active;
+            // a failed/cooldown pin falls through to normal selection below
+            // (failover must never be blocked by a dead pin).
+            let pin_applied = if let Some(pinned) = self.handle.pin.read().await.clone() {
+                let state = pool
+                    .profile(&pinned)
+                    .map(|p| p.health.state)
+                    .unwrap_or(balansir_vpn::ProfileState::Failed);
+                let pin_alive = !matches!(
+                    state,
+                    balansir_vpn::ProfileState::Failed | balansir_vpn::ProfileState::Cooldown
+                );
+                if pin_alive && pool.active() != Some(pinned.as_str()) {
                     let _ = pool.force_rotate_to(&pinned, "operator pin".into(), now_ms);
                 }
+                pin_alive
+            } else {
+                false
+            };
+
+            // Planned rotation (timer-based, dwell/hysteresis gated). Skipped
+            // while a live pin is held — a pinned path must not be rotated.
+            if !pin_applied {
+                let _ = pool.maybe_planned_rotate(now_ms);
             }
 
-            // Planned rotation (timer-based, dwell/hysteresis gated).
-            let _ = pool.maybe_planned_rotate(now_ms);
-
-            // Selection for the default flow (health-aware weighted + pins).
-            let _ = pool.select_for(now_ms);
+            // Selection for the default flow (health-aware weighted). Also
+            // skipped while a live pin is held: select_for would override the
+            // pinned active with the best-ranked candidate.
+            if !pin_applied {
+                let _ = pool.select_for(now_ms);
+            }
         }
 
         // Push the active profile to the Xray consumer (pool is authoritative).
@@ -692,7 +706,6 @@ vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@b.example.com:443?security=none&typ
         let cfg = test_toml();
         let pool_cfg = cfg.pool_config();
         assert_eq!(pool_cfg.min_dwell, std::time::Duration::from_secs(120));
-        assert_eq!(pool_cfg.capacity_per_profile, 64);
     }
 
     #[tokio::test]

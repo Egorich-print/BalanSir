@@ -168,8 +168,14 @@ impl NftablesGatewayBackend {
     /// 1. accept established,related (so responses to RPi-originated flows are
     ///    allowed through the input chain);
     /// 2. accept loopback;
-    /// 3. accept LAN-subnet → {22, 53, 8080, 9090} (SSH, DNS, API, metrics);
-    /// 4. (implicit) drop everything else — the input chain policy is `drop`,
+    /// 3. accept LAN-subnet → {22, 53, 8080, 9090} bound to the LAN interface
+    ///    (SSH, DNS, API, metrics) — never a bare CIDR: if the provider's WAN
+    ///    subnet coincides with the LAN CIDR, WAN must not reach the admin
+    ///    ports;
+    /// 4. accept Tailscale CGNAT (100.64.0.0/10) → the same admin ports, so a
+    ///    down LAN link can never lock the operator out (the historical
+    ///    incident: management applied with LAN down cut SSH on every path);
+    /// 5. (implicit) drop everything else — the input chain policy is `drop`,
     ///    so WAN management access is blocked.
     fn apply_management(&self, config: &GatewayConfig) -> Result<()> {
         self.remove_all_rules("input", GATEWAY_MGMT_TAG)?;
@@ -206,11 +212,7 @@ impl NftablesGatewayBackend {
         };
         self.backend.add_rule_to_chain("input", &lo)?;
 
-        // 3. LAN subnet → admin ports.
-        // iifname is intentionally omitted: when the LAN interface is DOWN
-        // (e.g. AX3 not connected), management access must still work through
-        // the WAN interface from LAN-subnet addresses. The LAN subnet CIDR
-        // alone is sufficient to scope management access.
+        // 3. LAN subnet → admin ports, bound to the LAN interface.
         for port in balansir_common::gateway::DEFAULT_MGMT_PORTS {
             // DNS: allow TCP and UDP. Other ports: TCP only.
             let protos: &[Option<NftProto>] = if *port == 53 {
@@ -222,6 +224,32 @@ impl NftablesGatewayBackend {
                 let rule = NftRuleSpec {
                     proto: *p,
                     src_cidr: Some(config.lan_subnet.clone()),
+                    dst_cidr: None,
+                    sport: None,
+                    dport: Some(*port),
+                    ct_state: None,
+                    iifname: Some(config.lan_interface.clone()),
+                    oifname: None,
+                    verdict: NftVerdict::Accept,
+                    mark: None,
+                    comment: Some(GATEWAY_MGMT_TAG.to_string()),
+                };
+                self.backend.add_rule_to_chain("input", &rule)?;
+            }
+        }
+
+        // 4. Tailscale CGNAT → admin ports (operator rescue path, works even
+        //    with the LAN link down).
+        for port in balansir_common::gateway::DEFAULT_MGMT_PORTS {
+            let protos: &[Option<NftProto>] = if *port == 53 {
+                &[Some(NftProto::Tcp), Some(NftProto::Udp)]
+            } else {
+                &[Some(NftProto::Tcp)]
+            };
+            for p in protos {
+                let rule = NftRuleSpec {
+                    proto: *p,
+                    src_cidr: Some("100.64.0.0/10".to_string()),
                     dst_cidr: None,
                     sport: None,
                     dport: Some(*port),

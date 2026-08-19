@@ -422,19 +422,34 @@ async fn main() -> Result<()> {
                 if cfg.validate(&interfaces).is_err() {
                     continue;
                 }
-                // Validation passed. Apply gateway — idempotent if already applied.
-                // We need to replicate the non-failing part of apply_network_config:
-                // gateway_apply, but skip MAC cloning (already done at startup).
+                // Skip if the gateway is already applied with this exact config:
+                // re-applying tears the datapath down and rebuilds it, which
+                // drops established mgmt/SSH connections. Only touch the kernel
+                // when the applied state actually differs.
                 let lan = cfg.lan_interface.as_deref().unwrap_or("eth0");
                 let gateway_cfg = balansir_common::gateway::GatewayConfig {
                     wan_interface: cfg.wan_interface.unwrap_or_default(),
                     lan_interface: lan.to_string(),
                     lan_subnet: cfg.lan_subnet,
                 };
+                let already_applied = match gw_executor.gateway_status().await {
+                    Ok(status) => {
+                        status.enabled
+                            && status.wan_interface.as_deref()
+                                == Some(gateway_cfg.wan_interface.as_str())
+                            && status.lan_interface.as_deref()
+                                == Some(gateway_cfg.lan_interface.as_str())
+                            && status.lan_subnet.as_deref() == Some(gateway_cfg.lan_subnet.as_str())
+                    }
+                    Err(_) => false,
+                };
+                if already_applied {
+                    continue;
+                }
                 match gw_executor.gateway_apply(&gateway_cfg).await {
                     Ok(result) => {
                         if result.ok {
-                            info!("Gateway re-check: datapath re-applied ({})", result.detail);
+                            info!("Gateway re-check: datapath applied ({})", result.detail);
                         }
                     }
                     Err(e) => {
@@ -444,8 +459,6 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
-                // ip_forward is idempotent — set it again to be safe.
-                let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1\n");
             }
         });
 

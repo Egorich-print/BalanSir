@@ -175,9 +175,6 @@ pub struct ProfileHealth {
     pub sample_count: u64,
     /// Ramp-up weight step for recovery (see `VpnPool::recovery_ramp`).
     pub weight: u32,
-    /// Active flows currently pinned to this profile (capacity view).
-    #[serde(default)]
-    pub active_flows: u32,
     /// Human-readable reasons behind the current state.
     pub reasons: Vec<String>,
 }
@@ -208,15 +205,4 @@ impl ProfileState {
             ProfileState::Recovering => "Recovering",
         }
     }
-}
-
-/// Live load/capacity accounting for a profile (mission §12).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ProfileLoad {
-    /// Number of flows currently pinned to this profile.
-    pub active_flows: u32,
-    /// Approximate bytes/sec carried (best-effort, not a precise estimator).
-    pub bytes_per_sec: f64,
-    /// Estimated utilization 0..1 from active_flows / capacity.
-    pub utilization: f64,
 }

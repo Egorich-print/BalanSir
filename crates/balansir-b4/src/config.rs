@@ -52,7 +52,23 @@ impl B4Config {
 
     /// Parse from a TOML string.
     pub fn parse(raw: &str) -> Result<Self, String> {
-        toml::from_str(raw).map_err(|e| format!("b4 config parse error: {e}"))
+        let cfg: B4Config =
+            toml::from_str(raw).map_err(|e| format!("b4 config parse error: {e}"))?;
+        // MSS rewrite is only meaningful below the typical 1460-byte MSS; a
+        // larger value would be silently applied and do nothing.
+        for profile in &cfg.profiles {
+            for strat in &profile.strategies {
+                if let StrategyToml::Mss { mss } = strat {
+                    if *mss < 100 || *mss >= 1460 {
+                        return Err(format!(
+                            "b4 config: profile '{}': mss must be in [100, 1460), got {mss}",
+                            profile.name
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(cfg)
     }
 
     /// Convert into the engine configuration.

@@ -18,7 +18,7 @@
 
 use balansir_health::{PathHealth, PathHealthConfig, PathSample, PathState};
 
-use crate::profile::{ProfileHealth, ProfileLoad, ProfileState, VpnProfile};
+use crate::profile::{ProfileHealth, ProfileState, VpnProfile};
 
 /// Tunables for the whole pool (mission §9/§10/§12).
 #[derive(Debug, Clone, PartialEq)]
@@ -38,8 +38,6 @@ pub struct PoolConfig {
     pub better_threshold: f64,
     /// Weight ramp-up steps for recovering profiles, e.g. [10, 25, 50, 100].
     pub ramp_steps: Vec<u32>,
-    /// Estimated capacity (active flows) considered "fully loaded" per profile.
-    pub capacity_per_profile: u32,
 }
 
 impl Default for PoolConfig {
@@ -51,7 +49,6 @@ impl Default for PoolConfig {
             rotation_interval: std::time::Duration::from_secs(0), // disabled by default
             better_threshold: 25.0,
             ramp_steps: vec![10, 25, 50, 100],
-            capacity_per_profile: 64,
         }
     }
 }
@@ -60,7 +57,6 @@ impl Default for PoolConfig {
 pub struct PooledProfile {
     pub profile: VpnProfile,
     pub health: ProfileHealth,
-    pub load: ProfileLoad,
     pub tracker: PathHealth,
     /// Unix ms the profile last failed (cooldown gate).
     pub last_failure_ms: i64,
@@ -153,7 +149,6 @@ impl VpnPool {
             .map(|p| PooledProfile {
                 profile: p,
                 health: ProfileHealth::default(),
-                load: ProfileLoad::default(),
                 tracker: PathHealth::new(path_config(&self.config)),
                 last_failure_ms: 0,
                 last_selected_ms: 0,
@@ -233,7 +228,6 @@ impl VpnPool {
             p.health.reasons = p.tracker.view().reasons;
             p.health.profile_id = p.profile.profile_id.clone();
             p.health.label = p.profile.label.clone();
-            p.health.active_flows = p.load.active_flows;
         }
         // Weight depends on state + recovery; compute against the immutable
         // view to avoid a second mutable borrow.
@@ -325,11 +319,8 @@ impl VpnPool {
             Some(a) => (a * 10.0).clamp(0.0, 10.0),
             None => 5.0,
         };
-        // Load headroom: penalize when active flows approach capacity.
-        let util = p.load.utilization.clamp(0.0, 1.0);
-        let load_penalty = util * 20.0;
 
-        (w + avail_bonus - latency_penalty - load_penalty).max(0.0)
+        (w + avail_bonus - latency_penalty).max(0.0)
     }
 
     /// Select the best profile. Deterministic health-aware weighted
@@ -494,7 +485,6 @@ impl VpnPool {
                     let mut h = p.health.clone();
                     h.profile_id = p.profile.profile_id.clone();
                     h.label = p.profile.label.clone();
-                    h.active_flows = p.load.active_flows;
                     h
                 })
                 .collect(),
@@ -538,7 +528,6 @@ mod tests {
             rotation_interval: Duration::from_secs(0), // disabled
             better_threshold: 25.0,
             ramp_steps: vec![10, 25, 50, 100],
-            capacity_per_profile: 64,
         }
     }
 

@@ -146,7 +146,6 @@
           <th>Latency</th>
           <th>Avail.</th>
           <th>Weight</th>
-          <th>Load</th>
           <th>Why</th>
           <th></th>
         </tr>
@@ -164,7 +163,6 @@
             <td>{p.latency_ms != null ? `${Math.round(p.latency_ms)} ms` : '—'}</td>
             <td>{p.availability != null ? `${Math.round(p.availability * 100)}%` : '—'}</td>
             <td>{p.weight || 0}</td>
-            <td>{p.active_flows != null ? p.active_flows : '—'}</td>
             <td>
               {#if p.reasons && p.reasons.length}
                 <ul class="why">

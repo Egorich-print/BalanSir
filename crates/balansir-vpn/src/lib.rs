@@ -13,6 +13,4 @@ pub mod uri;
 
 pub use importer::{import_subscription, ImportResult, RejectedProfile};
 pub use pool::{PoolConfig, PoolSnapshot, SelectionDecision, VpnPool};
-pub use profile::{
-    ProfileHealth, ProfileLoad, ProfileState, Protocol, Security, Transport, VpnProfile,
-};
+pub use profile::{ProfileHealth, ProfileState, Protocol, Security, Transport, VpnProfile};
