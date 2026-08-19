@@ -67,6 +67,44 @@
         vpn: !!(vpn && vpn.active),
       }
     : { direct: true, b4: false, xray: false, vpn: false };
+
+  // ASCII sparkline history: keep the last N samples of per-interface rate.
+  // The snapshot updates on a ~10s cadence, so this is a coarse live graph.
+  const HISTORY = 40;
+  let rxHist = [];
+  let txHist = [];
+  let histLabels = [];
+  $: if (snapshot) {
+    const totalRxRate = rates.reduce((a, r) => a + r.rx_bps, 0);
+    const totalTxRate = rates.reduce((a, r) => a + r.tx_bps, 0);
+    rxHist = [...rxHist, totalRxRate].slice(-HISTORY);
+    txHist = [...txHist, totalTxRate].slice(-HISTORY);
+    histLabels = [...histLabels, new Date().toLocaleTimeString()].slice(-HISTORY);
+  }
+
+  // Render a history of values as an ASCII bar chart (like btop's sparkline).
+  function asciiBars(values, width = 36) {
+    if (!values.length) return '(no data yet)';
+    const max = Math.max(1, ...values);
+    const rows = 4; // btop-style 4-line histogram
+    const out = [];
+    for (let row = rows - 1; row >= 0; row--) {
+      const lo = (max / rows) * row;
+      const hi = (max / rows) * (row + 1);
+      let line = '';
+      for (const v of values) {
+        line += v >= hi ? '█' : v > lo ? '▄' : '·';
+      }
+      out.push(line.padEnd(width, ' '));
+    }
+    return out.join('\n');
+  }
+
+  // ASCII percentage gauge (10 segments), like btop's bar.
+  function asciiGauge(pct, width = 20) {
+    const filled = Math.round((Math.max(0, Math.min(100, pct)) / 100) * width);
+    return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled));
+  }
 </script>
 
 <div class="dashboard">
@@ -146,6 +184,16 @@
           {/each}
         </tbody>
       </table>
+      <div class="spark">
+        <div class="spark-row">
+          <span class="spark-label">↓ RX</span>
+          <pre class="spark-pre">{asciiBars(rxHist)}</pre>
+        </div>
+        <div class="spark-row">
+          <span class="spark-label">↑ TX</span>
+          <pre class="spark-pre">{asciiBars(txHist)}</pre>
+        </div>
+      </div>
     </div>
 
     <div class="card">
@@ -207,7 +255,10 @@
     <div class="card">
       <h3>System</h3>
       {#if sys}
-        <p class="meta">CPU {sys.cpu_percent}% · RAM {sys.mem_used_mb}/{sys.mem_total_mb} MB</p>
+        <p class="meta">CPU {sys.cpu_percent}%</p>
+        <pre class="gauge">{asciiGauge(sys.cpu_percent)}</pre>
+        <p class="meta">RAM {sys.mem_used_mb}/{sys.mem_total_mb} MB</p>
+        <pre class="gauge">{asciiGauge((sys.mem_used_mb / Math.max(1, sys.mem_total_mb)) * 100)}</pre>
         <p class="meta">Load {sys.load1.toFixed(2)} / {sys.load5.toFixed(2)} / {sys.load15.toFixed(2)}</p>
         <p class="meta">Uptime {uptime(sys.uptime_secs)}</p>
       {:else}
@@ -271,6 +322,11 @@
   .fh-badge.bad { background: #3d1f1f; color: #ff6b6b; }
   .fh-badge.none { background: #2a2f3a; color: #7a8aa5; }
   .muted { color: #7a8aa5; }
+  .spark { margin-top: 8px; font-family: ui-monospace, Menlo, monospace; }
+  .spark-row { display: flex; align-items: center; gap: 8px; }
+  .spark-label { color: #7a8aa5; font-size: 0.72rem; min-width: 34px; }
+  .spark-pre { margin: 0; font-size: 0.72rem; line-height: 1.1; color: #4ecdc4; letter-spacing: 0; }
+  .gauge { margin: 2px 0 6px; font-size: 0.85rem; line-height: 1.2; color: #4ecdc4; letter-spacing: 0; }
   .minibadge {
     display: inline-block;
     padding: 0.1rem 0.45rem;

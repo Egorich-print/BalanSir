@@ -28,23 +28,6 @@
     return () => clearInterval(refreshTimer);
   });
 
-  function fmtBytes(n) {
-    if (n == null) return '—';
-    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-    let i = 0;
-    let v = Number(n);
-    while (v >= 1024 && i < units.length - 1) {
-      v /= 1024;
-      i += 1;
-    }
-    return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
-  }
-
-  function fmtRate(bytesPerSec) {
-    if (bytesPerSec == null) return '—';
-    return `${fmtBytes(bytesPerSec)}/s`;
-  }
-
   function usageBar(used, total) {
     if (!total) return 0;
     return Math.min(100, Math.round((used / total) * 100));
@@ -219,58 +202,7 @@
       <div class="uptime-value">{formatUptime(system?.uptime_secs)}</div>
     </section>
   </div>
-
-  <script>
-    function fmtBytes(n) {
-      if (n == null) return '—';
-      const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-      let i = 0;
-      let v = Number(n);
-      while (v >= 1024 && i < units.length - 1) {
-        v /= 1024;
-        i += 1;
-      }
-      return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
-    }
-
-    function fmtRate(bytesPerSec) {
-      if (bytesPerSec == null) return '—';
-      return `${fmtBytes(bytesPerSec)}/s`;
-    }
-
-    function formatUptime(secs) {
-      if (!secs) return '—';
-      const d = Math.floor(secs / 86400);
-      const h = Math.floor((secs % 86400) / 3600);
-      const m = Math.floor((secs % 3600) / 60);
-      const s = secs % 60;
-      const parts = [];
-      if (d) parts.push(`${d}d`);
-      if (h) parts.push(`${h}h`);
-      if (m) parts.push(`${m}m`);
-      parts.push(`${s}s`);
-      return parts.join(' ');
-    }
-
-    function memPct() {
-      if (!system?.memory) return 0;
-      if (!system.memory.total_mb) return 0;
-      return Math.round((system.memory.used_mb / system.memory.total_mb) * 100);
-    }
-
-    function fsPct(fs) {
-      if (!fs.total_mb) return 0;
-      return Math.round((fs.used_mb / fs.total_mb) * 100);
-    }
-
-    function fsClass(fs) {
-      const pct = fsPct(fs);
-      if (pct >= 90) return 'critical';
-      if (pct >= 75) return 'warn';
-      return '';
-    }
-  </script>
-</script>
+</div>
 
 <style>
   .system-view {
@@ -518,4 +450,3 @@
     text-align: center;
   }
 </style>
-</script>
