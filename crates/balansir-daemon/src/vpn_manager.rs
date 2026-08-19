@@ -100,6 +100,7 @@ pub fn profile_to_xray_config(
         name: Some(format!("{} @ {}", profile.label, profile.endpoint())),
         socks_port: fallback_socks,
         http_port: fallback_http,
+        geo_domains: Vec::new(),
     })
 }
 

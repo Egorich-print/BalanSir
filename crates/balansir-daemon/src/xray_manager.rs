@@ -96,6 +96,7 @@ impl XrayEndpoint {
             name: Some(self.name.clone()),
             socks_port: self.socks_port.unwrap_or(fallback_socks),
             http_port: self.http_port.unwrap_or(fallback_http),
+            geo_domains: Vec::new(),
         }
     }
 }
@@ -107,6 +108,11 @@ pub struct XrayToml {
     pub http_port: Option<u16>,
     /// Consecutive failed health probes before failover (default 3).
     pub failover_threshold: Option<u32>,
+    /// Split-tunnel domains (geo-spoofing): when the VPN pool is active, only
+    /// traffic to these domains is routed through the VPN outbound; all other
+    /// traffic goes direct. Empty = everything proxied goes through the VPN.
+    #[serde(default)]
+    pub geo_domains: Vec<String>,
     #[serde(default)]
     pub profiles: Vec<XrayEndpoint>,
 }
@@ -378,6 +384,9 @@ pub struct XrayManager {
     http_port: u16,
     #[allow(dead_code)]
     failover_threshold: u32,
+    /// Split-tunnel domains (geo-spoofing): proxied traffic to these domains
+    /// goes through the active outbound; everything else goes direct.
+    geo_domains: Vec<String>,
     paused: Arc<AtomicBool>,
     pinned: Arc<RwLock<Option<String>>>,
     wake: Arc<Notify>,
@@ -447,6 +456,7 @@ impl XrayManager {
             socks_port: xray_cfg.socks_port.unwrap_or(10808),
             http_port: xray_cfg.http_port.unwrap_or(10809),
             failover_threshold: xray_cfg.failover_threshold.unwrap_or(3).max(1),
+            geo_domains: xray_cfg.geo_domains.clone(),
             paused: Arc::new(AtomicBool::new(false)),
             pinned: Arc::new(RwLock::new(None)),
             wake: Arc::new(Notify::new()),
@@ -483,7 +493,9 @@ impl XrayManager {
         }
     }
     fn endpoint_config(&self, idx: usize) -> XrayConfig {
-        self.endpoints[idx].into_config(self.socks_port, self.http_port)
+        let mut cfg = self.endpoints[idx].into_config(self.socks_port, self.http_port);
+        cfg.geo_domains = self.geo_domains.clone();
+        cfg
     }
 
     fn enabled_indices(&self) -> Vec<usize> {
@@ -613,8 +625,9 @@ impl XrayManager {
         // authoritative — no static endpoint lookup needed) and converge.
         if let Some(profile) = &pool_profile {
             *self.pool_driven.write().await = true;
-            let config = profile_to_xray_config(profile, self.socks_port, self.http_port)
+            let mut config = profile_to_xray_config(profile, self.socks_port, self.http_port)
                 .map_err(|e| format!("vpn pool profile invalid: {e}"))?;
+            config.geo_domains = self.geo_domains.clone();
             let label = format!("{} @ {}", profile.label, profile.endpoint());
             let running = self.driver.read().await.is_some();
             let running_label = self.active_label().await;

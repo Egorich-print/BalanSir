@@ -27,6 +27,11 @@ pub struct XrayConfig {
     /// Local HTTP inbound port (default 10809).
     #[serde(default = "default_http_port")]
     pub http_port: u16,
+    /// Split-tunnel domains (geo-spoofing): traffic to these domains is
+    /// routed through this outbound; everything else goes direct. Empty =
+    /// all proxied traffic goes through this outbound (legacy behavior).
+    #[serde(default)]
+    pub geo_domains: Vec<String>,
 }
 
 const fn default_socks_port() -> u16 {
@@ -325,18 +330,44 @@ impl XrayDriver {
                     "protocol": "http"
                 }
             ],
-            "outbounds": [{
-                "protocol": "vless",
-                "settings": {
-                    "vnext": [{
-                        "address": cfg.server,
-                        "port": cfg.port,
-                        "users": [ serde_json::Value::Object(user) ]
-                    }]
-                },
-                "streamSettings": serde_json::Value::Object(stream)
-            }],
-            "dns": { "queryStrategy": "UseIP" }
+            "outbounds": serde_json::Value::Array({
+                let vless = serde_json::json!({
+                    "protocol": "vless",
+                    "tag": "proxy",
+                    "settings": {
+                        "vnext": [{
+                            "address": cfg.server,
+                            "port": cfg.port,
+                            "users": [ serde_json::Value::Object(user) ]
+                        }]
+                    },
+                    "streamSettings": serde_json::Value::Object(stream)
+                });
+                // Split tunnel: when geo_domains are configured, the direct
+                // (freedom) outbound comes FIRST so it is the default for all
+                // traffic, and only the listed domains route through the VPN.
+                // Without geo_domains, the proxy is the only outbound (legacy:
+                // everything proxied goes through the VPN).
+                if cfg.geo_domains.is_empty() {
+                    vec![vless]
+                } else {
+                    vec![
+                        serde_json::json!({ "protocol": "freedom", "tag": "direct" }),
+                        vless,
+                    ]
+                }
+            }),
+            "dns": { "queryStrategy": "UseIP" },
+            "routing": {
+                "rules": [
+                    {
+                        "type": "field",
+                        "domain": cfg.geo_domains,
+                        "outboundTag": "proxy"
+                    }
+                ],
+                "domainStrategy": "IPIfNonMatch"
+            }
         });
         serde_json::to_string_pretty(&config)
             .unwrap_or_else(|_| "{\"log\":{},\"inbounds\":[],\"outbounds\":[]}".into())
@@ -491,6 +522,7 @@ mod tests {
             name: Some("main".to_string()),
             socks_port: 10808,
             http_port: 10809,
+            geo_domains: Vec::new(),
         }
     }
 
@@ -611,6 +643,45 @@ mod tests {
         assert_eq!(json["inbounds"][0]["port"], 10808);
         assert_eq!(json["inbounds"][1]["port"], 10809);
         assert_eq!(json["inbounds"][0]["listen"], "127.0.0.1");
+    }
+
+    #[test]
+    fn generate_config_split_tunnel_routes_geo_domains() {
+        let mut cfg = sample_config();
+        cfg.geo_domains = vec![
+            "spotify.com".into(),
+            "api.spotify.com".into(),
+            "gemini.google.com".into(),
+        ];
+        let driver = XrayDriver::new(DriverId::Xray, cfg);
+        let json: serde_json::Value =
+            serde_json::from_str(&driver.generate_config()).expect("valid JSON");
+
+        // Two outbounds: direct FIRST (default), then the tagged proxy.
+        let outbounds = json["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds.len(), 2, "split tunnel adds a direct outbound");
+        assert_eq!(outbounds[0]["protocol"], "freedom");
+        assert_eq!(outbounds[0]["tag"], "direct");
+        assert_eq!(outbounds[1]["protocol"], "vless");
+        assert_eq!(outbounds[1]["tag"], "proxy");
+
+        // Routing: only geo domains go through the proxy.
+        let rules = json["routing"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["outboundTag"], "proxy");
+        let domains = rules[0]["domain"].as_array().unwrap();
+        assert!(domains.contains(&serde_json::json!("spotify.com")));
+        assert!(domains.contains(&serde_json::json!("gemini.google.com")));
+    }
+
+    #[test]
+    fn generate_config_without_geo_domains_has_single_outbound() {
+        let driver = XrayDriver::new(DriverId::Xray, sample_config());
+        let json: serde_json::Value =
+            serde_json::from_str(&driver.generate_config()).expect("valid JSON");
+        let outbounds = json["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds.len(), 1, "no split tunnel without geo_domains");
+        assert_eq!(outbounds[0]["protocol"], "vless");
     }
 
     #[test]

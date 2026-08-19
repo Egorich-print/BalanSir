@@ -115,6 +115,18 @@ VPN profile management lives in `balansir-vpn` plus the daemon's `vpn_manager.rs
   stays direct).
 - The selected profile is handed to `XrayManager` via a pool consumer
   (`apply_pool_profile`); the pool is authoritative for selection.
+- **Geo-spoofing (split tunnel)**: the Xray component config
+  (`BALANSIR_XRAY_CONFIG`) accepts a `geo_domains` list. When set, only
+  traffic to those domains is routed through the active VPN outbound; all
+  other traffic goes direct. This gives per-service geo-spoofing (e.g.
+  Spotify, Gemini) without proxying the whole LAN. Empty list = all proxied
+  traffic goes through the VPN (legacy behavior). Example:
+
+  ```toml
+  socks_port = 10808
+  http_port = 10809
+  geo_domains = ["spotify.com", "api.spotify.com", "gemini.google.com"]
+  ```
 
 **Supported subscription formats** (`balansir-vpn` importer): `vless://` URIs
 with `type=tcp|ws|grpc|httpupgrade` and `security=none|tls|reality`
