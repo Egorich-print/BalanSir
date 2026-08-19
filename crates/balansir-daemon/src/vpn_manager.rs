@@ -120,6 +120,12 @@ pub struct VpnToml {
     pub health_interval_secs: Option<u64>,
     /// Pool rotation/selection cadence (default 10s).
     pub selection_interval_secs: Option<u64>,
+    /// Persistent operator pin: profile_id (or label substring) to force on
+    /// startup, surviving daemon restarts. Applied only while the profile is
+    /// healthy/unknown; a failed/cooldown pin falls through to normal
+    /// selection (failover is never blocked).
+    #[serde(default)]
+    pub pin: Option<String>,
     /// Pool tuning (mirrors `balansir_vpn::PoolConfig`).
     #[serde(default)]
     pub pool: PoolToml,
@@ -328,6 +334,7 @@ impl VpnManager {
         probe: Arc<dyn ProfileProbe>,
     ) -> Result<Self, String> {
         let pool_cfg = config.pool_config();
+        let pin = config.pin.clone();
         Ok(Self {
             config,
             pool: Arc::new(RwLock::new(VpnPool::new(pool_cfg))),
@@ -337,7 +344,7 @@ impl VpnManager {
                 paused: Arc::new(AtomicBool::new(false)),
                 refresh_requested: Arc::new(AtomicBool::new(false)),
                 manual_rotation_requested: Arc::new(AtomicBool::new(false)),
-                pin: Arc::new(RwLock::new(None)),
+                pin: Arc::new(RwLock::new(pin)),
             },
             consumer,
             probe,
