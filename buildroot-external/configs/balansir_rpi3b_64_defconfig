@@ -70,6 +70,8 @@ BR2_PACKAGE_OPENSSH=y
 BR2_PACKAGE_TAILSCALE=y
 BR2_PACKAGE_BTOP=y
 BR2_PACKAGE_FASTFETCH=y
+# Xray-core: the proxy runtime the VPN pool drives (VLESS outbounds).
+BR2_PACKAGE_XRAY_CORE=y
 
 # Rootfs: ext4 on SD, no tar
 BR2_TARGET_ROOTFS_EXT2=y

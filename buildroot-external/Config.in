@@ -8,5 +8,6 @@ menu "BalanSir"
 source "$BR2_EXTERNAL_BALANSIR_PATH/package/balansir/Config.in"
 source "$BR2_EXTERNAL_BALANSIR_PATH/package/btop/Config.in"
 source "$BR2_EXTERNAL_BALANSIR_PATH/package/fastfetch/Config.in"
+source "$BR2_EXTERNAL_BALANSIR_PATH/package/xray/Config.in"
 
 endmenu

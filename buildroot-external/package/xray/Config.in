@@ -1,0 +1,9 @@
+config BR2_PACKAGE_XRAY_CORE
+	bool "xray-core"
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	select BR2_PACKAGE_HOST_GO
+	help
+	  Xray-core — the proxy runtime BalanSir's VPN pool drives
+	  (VLESS outbounds with tcp/ws/grpc/httpupgrade transports).
+
+	  https://github.com/XTLS/Xray-core
