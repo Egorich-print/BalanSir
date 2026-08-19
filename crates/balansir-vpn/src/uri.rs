@@ -33,11 +33,6 @@ impl ParsedUri {
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
-
-    /// Get the first value of a query key, or `default`.
-    pub fn get_or<'a>(&'a self, key: &'a str, default: &'a str) -> &'a str {
-        self.get(key).unwrap_or(default)
-    }
 }
 
 /// Parse a `scheme://userinfo@host[:port][/path]?query#fragment` URI.

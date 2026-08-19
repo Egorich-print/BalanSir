@@ -220,23 +220,3 @@ pub struct ProfileLoad {
     /// Estimated utilization 0..1 from active_flows / capacity.
     pub utilization: f64,
 }
-
-/// One selection event / decision (mission §16 explainability).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SelectionEvent {
-    /// profile_id of the selected profile.
-    pub profile_id: String,
-    /// Why this profile won (score breakdown, human readable).
-    pub reason: String,
-    /// The flow key this selection is pinned to (for stickiness).
-    pub flow: String,
-    /// Unix epoch millis.
-    pub at_ms: i64,
-}
-
-/// Why a profile was *not* selected (explainability).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExclusionReason {
-    pub profile_id: String,
-    pub reason: String,
-}

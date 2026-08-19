@@ -227,12 +227,7 @@ impl TcpReassembler {
         self.flows.retain(|_, f| f.last_seen >= cutoff);
     }
 
-    /// Remove a specific flow (e.g. on FIN/RST or profile decision).
-    pub fn drop_flow(&mut self, key: &FlowKey) {
-        self.flows.remove(key);
-    }
-
-    /// Number of tracked flows (tests/diagnostics).
+    /// Number of tracked flows.
     pub fn len(&self) -> usize {
         self.flows.len()
     }

@@ -4,7 +4,6 @@ use std::net::IpAddr;
 
 // --- Type aliases ---
 
-pub type EventId = u64;
 pub type CorrelationId = u64;
 
 bitflags! {
@@ -228,35 +227,6 @@ impl std::fmt::Display for DriverId {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DriverInfo {
-    pub id: DriverId,
-    pub name_hash: u32,
-    pub capabilities: Capabilities,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CircuitState {
-    Closed,
-    Open,
-    HalfOpen,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Slot {
-    A,
-    B,
-}
-
-impl Slot {
-    pub fn other(&self) -> Self {
-        match self {
-            Self::A => Self::B,
-            Self::B => Self::A,
-        }
-    }
-}
-
 // --- Decision Trace ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -400,32 +370,6 @@ pub struct ExecutorCapabilities {
 }
 
 // --- Desired State ---
-
-/// One HTB class: a bandwidth bucket with a guaranteed `rate` and a burst
-/// `ceil`. Identified by its `class_id` (minor number under the interface's
-/// root class).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QosClass {
-    pub class_id: u16,
-    pub rate_bits: u64,
-    pub ceil_bits: u64,
-}
-
-/// Desired QoS state for one interface: a root HTB qdisc with an aggregate
-/// ceiling and per-class buckets, each class draining into fq_codel.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QosPlan {
-    pub interface: String,
-    pub default_rate_bits: u64,
-    pub default_ceil_bits: u64,
-    pub classes: Vec<QosClass>,
-}
-
-/// Executor-reported applied QoS state (non-authority, like rule inventory).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QosState {
-    pub interfaces: Vec<String>,
-}
 
 /// Rule id reserved for the terminal fail-closed rule installed when a
 /// fail-closed config compiles with an empty rule set (P1, ADR-019).

@@ -16,18 +16,6 @@ pub trait Executor: Send + Sync {
     /// Execute an action (desired state -> actual state)
     async fn execute(&self, request: &ActionRequest) -> ActionResult;
 
-    /// Undo a previously applied action
-    async fn undo(&self, request: &ActionRequest) -> ActionResult {
-        ActionResult::Unsupported {
-            action_type: request.action.action_type(),
-        }
-    }
-
-    /// Health check
-    async fn health_check(&self) -> bool {
-        true
-    }
-
     /// Get current rule count
     async fn rule_count(&self) -> u32 {
         0
@@ -172,16 +160,6 @@ impl Executor for DummyExecutor {
 
         log.push((request.clone(), result.clone()));
         result
-    }
-
-    async fn undo(&self, request: &ActionRequest) -> ActionResult {
-        let mut applied = self.applied.lock().unwrap_or_else(|e| e.into_inner());
-        applied.retain(|r| r.action != request.action);
-
-        ActionResult::Applied {
-            execution_time_us: 50,
-            rule_id: None,
-        }
     }
 
     async fn rule_count(&self) -> u32 {

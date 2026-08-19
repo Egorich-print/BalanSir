@@ -38,18 +38,6 @@ impl ExecutionReport {
             operations,
         }
     }
-
-    /// Build an empty success report (for no-op plans).
-    pub fn noop(execution_id: Uuid) -> Self {
-        Self {
-            execution_id,
-            succeeded: 0,
-            failed: 0,
-            total: 0,
-            success: true,
-            operations: Vec::new(),
-        }
-    }
 }
 
 /// The deliberative state machine of the coordinator.

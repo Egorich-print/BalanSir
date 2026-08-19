@@ -181,11 +181,6 @@ impl PathHealth {
         self.consecutive_bad
     }
 
-    /// Cumulative connectivity failures over the tracker's lifetime.
-    pub fn failures(&self) -> u64 {
-        self.failures
-    }
-
     pub fn samples(&self) -> u64 {
         self.samples
     }
@@ -538,7 +533,6 @@ mod tests {
         assert_eq!(h.state(), PathState::Failing);
         h.reset();
         assert_eq!(h.state(), PathState::Unknown);
-        assert_eq!(h.failures(), 0);
         assert_eq!(h.samples(), 0);
     }
 

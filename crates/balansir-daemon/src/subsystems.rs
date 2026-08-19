@@ -12,9 +12,7 @@
 
 use async_trait::async_trait;
 use balansir_common::network::{InterfaceInfo, InterfaceResult, TailscaleResult, TailscaleStatus};
-use balansir_common::qos::{
-    AppliedQdisc, QosCapabilities, QosConfig, QosDirection, QosOp, QosResult,
-};
+use balansir_common::qos::{AppliedQdisc, QosCapabilities, QosConfig, QosOp, QosResult};
 use balansir_common::subsystems::{
     QosSnapshot, SharedSubsystemSnapshot, SubsystemEvent, TailscaleSnapshot,
 };
@@ -832,53 +830,10 @@ impl balansir_common::subsystems::SubsystemControl for ControlImpl {
     }
 }
 
-/// Simple QoS intent, validated. Enables config-file driven shaping.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct QosIntentToml {
-    pub interface: String,
-    pub kind: Option<String>,
-    pub direction: Option<String>,
-    pub bandwidth_mbps: Option<u64>,
-    pub latency_target_ms: Option<u64>,
-}
-
-pub fn qos_intent_from_toml(entries: &[QosIntentToml]) -> Result<Vec<QosConfig>, String> {
-    let mut out = Vec::new();
-    for entry in entries {
-        if entry.interface.trim().is_empty() {
-            return Err("qos interface must not be empty".into());
-        }
-        let kind = match entry.kind.as_deref().unwrap_or("fq_codel") {
-            "fq_codel" => balansir_common::qos::QdiscKind::FqCodel,
-            "cake" => balansir_common::qos::QdiscKind::Cake,
-            "ingress" => balansir_common::qos::QdiscKind::Ingress,
-            other => return Err(format!("unsupported qdisc kind: {other}")),
-        };
-        let direction = match entry.direction.as_deref().unwrap_or("egress") {
-            "egress" => QosDirection::Egress,
-            "ingress" => QosDirection::Ingress,
-            other => return Err(format!("unsupported qos direction: {other}")),
-        };
-        out.push(QosConfig {
-            interface: entry.interface.trim().to_string(),
-            direction,
-            kind,
-            bandwidth_bps: entry.bandwidth_mbps.map(|m| m * 1_000_000),
-            latency_target_ms: entry.latency_target_ms,
-            overhead_bytes: None,
-            ecn: true,
-            wash: false,
-            memory_limit_bytes: None,
-            classes: vec![],
-            comment: QosConfig::identity(entry.interface.trim()),
-        });
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use balansir_common::qos::QosDirection;
     use balansir_common::qos::{QdiscKind, QosCapabilities};
 
     struct FakeExec {
@@ -1309,42 +1264,6 @@ mod tests {
                 ..make_cfg(None)
             }
         ));
-    }
-
-    #[test]
-    fn qos_toml_validation() {
-        let entries = vec![
-            QosIntentToml {
-                interface: "eth0".into(),
-                kind: Some("cake".into()),
-                direction: Some("egress".into()),
-                bandwidth_mbps: Some(100),
-                latency_target_ms: Some(5),
-            },
-            QosIntentToml {
-                interface: "".into(),
-                kind: None,
-                direction: None,
-                bandwidth_mbps: None,
-                latency_target_ms: None,
-            },
-        ];
-        assert!(
-            qos_intent_from_toml(&entries).is_err(),
-            "empty interface must be rejected"
-        );
-
-        let ok_entries = vec![QosIntentToml {
-            interface: "eth0".into(),
-            kind: Some("fq_codel".into()),
-            direction: None,
-            bandwidth_mbps: Some(50),
-            latency_target_ms: None,
-        }];
-        let ok = qos_intent_from_toml(&ok_entries).unwrap();
-        assert_eq!(ok[0].interface, "eth0");
-        assert_eq!(ok[0].bandwidth_bps, Some(50_000_000));
-        assert_eq!(ok[0].kind, QdiscKind::FqCodel);
     }
 
     #[test]

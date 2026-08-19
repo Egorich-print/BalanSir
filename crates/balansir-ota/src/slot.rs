@@ -255,44 +255,6 @@ impl BootMetadata {
         self.next_slot
     }
 
-    /// Check if an update is pending (next boot will try different slot).
-    pub fn is_update_pending(&self) -> bool {
-        self.state == BootState::Pending || self.state == BootState::Trying
-    }
-
-    /// Check if we're in the middle of trying a new slot.
-    pub fn is_trying(&self) -> bool {
-        self.state == BootState::Trying
-    }
-
-    /// Mark an update as prepared (next boot will try new slot).
-    pub fn prepare_update(&mut self, new_slot: Slot, version: String) -> Result<()> {
-        if new_slot == self.active_slot {
-            return Err(Error::Misconfiguration("cannot update to same slot".into()));
-        }
-        self.next_slot = new_slot;
-        self.next_version = version;
-        self.state = BootState::Pending;
-        self.tries_remaining = 3;
-        self.save()
-    }
-
-    /// Called on boot: transition to Trying state if update was pending.
-    pub fn on_boot(&mut self) -> Result<()> {
-        if self.state == BootState::Pending {
-            if self.next_slot == self.active_slot {
-                // No actual slot change, just confirm
-                self.state = BootState::Confirmed;
-                self.tries_remaining = 3;
-            } else {
-                self.state = BootState::Trying;
-                self.tries_remaining = self.tries_remaining.saturating_sub(1);
-            }
-            self.save()?;
-        }
-        Ok(())
-    }
-
     /// Called when health check passes: confirm the new slot.
     pub fn confirm_boot(&mut self, version: String) -> Result<()> {
         if self.state == BootState::Trying {
@@ -307,28 +269,6 @@ impl BootMetadata {
             self.save()?;
         }
         Ok(())
-    }
-
-    /// Called when health check fails: decrement tries, rollback if exhausted.
-    pub fn fail_boot(&mut self, reason: String) -> Result<bool> {
-        if self.state != BootState::Trying {
-            return Ok(false);
-        }
-
-        warn!(
-            "Boot failed for slot {}: {} (tries remaining: {})",
-            self.next_slot, reason, self.tries_remaining
-        );
-
-        if self.tries_remaining == 0 {
-            // Exhausted attempts, rollback
-            self.initiate_rollback(reason)?;
-            return Ok(true);
-        }
-
-        self.tries_remaining = self.tries_remaining.saturating_sub(1);
-        self.save()?;
-        Ok(false)
     }
 
     /// Initiate rollback to previous slot.
@@ -469,39 +409,6 @@ mod tests {
         assert_eq!(meta.active_slot, Slot::A);
         assert_eq!(meta.state, BootState::Confirmed);
         assert_eq!(meta.tries_remaining, 3);
-    }
-
-    #[test]
-    fn boot_metadata_prepare_update() {
-        let mut meta = test_meta();
-        meta.prepare_update(Slot::B, "0.6.0".into()).unwrap();
-        assert_eq!(meta.next_slot, Slot::B);
-        assert_eq!(meta.next_version, "0.6.0");
-        assert_eq!(meta.state, BootState::Pending);
-    }
-
-    #[test]
-    fn boot_metadata_confirm() {
-        let mut meta = test_meta();
-        meta.prepare_update(Slot::B, "0.6.0".into()).unwrap();
-        meta.on_boot().unwrap(); // transition to Trying
-        meta.confirm_boot("0.6.0".into()).unwrap();
-        assert_eq!(meta.active_slot, Slot::B);
-        assert_eq!(meta.active_version, "0.6.0");
-        assert_eq!(meta.state, BootState::Confirmed);
-    }
-
-    #[test]
-    fn boot_metadata_rollback() {
-        let mut meta = test_meta();
-        meta.prepare_update(Slot::B, "0.6.0".into()).unwrap();
-        meta.on_boot().unwrap();
-        meta.fail_boot("health check failed".into()).unwrap(); // try 1
-        meta.fail_boot("health check failed".into()).unwrap(); // try 2
-        let rolled = meta.fail_boot("health check failed".into()).unwrap(); // try 3 -> rollback
-        assert!(rolled);
-        assert_eq!(meta.active_slot, Slot::A);
-        assert_eq!(meta.rollback_count, 1);
     }
 
     #[test]

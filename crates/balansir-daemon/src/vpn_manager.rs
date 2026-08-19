@@ -165,7 +165,6 @@ pub struct VpnManagerHandle {
     refresh_requested: Arc<AtomicBool>,
     manual_rotation_requested: Arc<AtomicBool>,
     pin: Arc<RwLock<Option<String>>>,
-    unpin: Arc<AtomicBool>,
 }
 
 impl VpnManagerHandle {
@@ -184,9 +183,6 @@ impl VpnManagerHandle {
     }
     pub async fn set_pin(&self, profile_id: Option<String>) {
         *self.pin.write().await = profile_id;
-    }
-    pub async fn request_unpin(&self) {
-        self.unpin.store(true, Ordering::Relaxed);
     }
 }
 
@@ -343,7 +339,6 @@ impl VpnManager {
                 refresh_requested: Arc::new(AtomicBool::new(false)),
                 manual_rotation_requested: Arc::new(AtomicBool::new(false)),
                 pin: Arc::new(RwLock::new(None)),
-                unpin: Arc::new(AtomicBool::new(false)),
             },
             consumer,
             probe,
@@ -445,11 +440,23 @@ impl VpnManager {
                 }
             }
 
+            // Operator pin (WebUI): pin overrides rotation/selection until
+            // cleared. Only applied when the pinned profile exists.
+            if let Some(pinned) = self.handle.pin.read().await.clone() {
+                let exists = pool
+                    .profiles()
+                    .iter()
+                    .any(|p| p.profile.profile_id == pinned);
+                if exists && pool.active() != Some(pinned.as_str()) {
+                    let _ = pool.force_rotate_to(&pinned, "operator pin".into(), now_ms);
+                }
+            }
+
             // Planned rotation (timer-based, dwell/hysteresis gated).
             let _ = pool.maybe_planned_rotate(now_ms);
 
             // Selection for the default flow (health-aware weighted + pins).
-            let _ = pool.select_for("default", now_ms);
+            let _ = pool.select_for(now_ms);
         }
 
         // Push the active profile to the Xray consumer (pool is authoritative).

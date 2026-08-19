@@ -33,9 +33,6 @@
 use balansir_common::network::InterfaceInfo;
 use serde::{Deserialize, Serialize};
 
-/// Default path for the gateway role config.
-pub const DEFAULT_NETWORK_CONFIG: &str = "/etc/balansir/network.toml";
-
 /// Typed TOML shape for the `[network]` section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkConfigFile {

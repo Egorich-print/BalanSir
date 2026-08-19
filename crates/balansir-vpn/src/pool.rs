@@ -8,8 +8,6 @@
 //! * **weighted selection**: weight = f(health state, latency, availability,
 //!   capacity headroom). Healthy profiles dominate; degraded weights shrink;
 //!   cooldown/failed are excluded;
-//! * **flow stickiness**: once a flow is pinned to a profile it stays until
-//!   the profile is excluded or the flow ends (no chaotic jumping);
 //! * **load distribution**: active-flow counts feed a capacity headroom term,
 //!   so new flows prefer under-loaded healthy profiles;
 //! * **planned rotation** only when it does not hurt: min-dwell + hysteresis +
@@ -17,8 +15,6 @@
 //! * **recovery**: Failed → Cooldown → Recovering (ramp-up weights) → Healthy;
 //! * the pool is pure/deterministic given its inputs (clock injected), so it
 //!   is fully unit-testable without network or time.
-
-use std::collections::HashMap;
 
 use balansir_health::{PathHealth, PathHealthConfig, PathSample, PathState};
 
@@ -111,8 +107,6 @@ pub struct PoolSnapshot {
 pub struct VpnPool {
     config: PoolConfig,
     profiles: Vec<PooledProfile>,
-    /// Flow → pinned profile_id (stickiness).
-    pins: HashMap<String, String>,
     active: Option<String>,
     last_rotation_ms: i64,
     last_rotation_reason: Option<String>,
@@ -135,7 +129,6 @@ impl VpnPool {
         Self {
             config,
             profiles: Vec::new(),
-            pins: HashMap::new(),
             active: None,
             last_rotation_ms: 0,
             last_rotation_reason: None,
@@ -154,11 +147,7 @@ impl VpnPool {
         if profiles.is_empty() {
             return Err("refusing to replace pool with an empty set".into());
         }
-        // Build fresh trackers; keep nothing from the old pool except pins for
-        // profiles that still exist.
-        let ids: std::collections::HashSet<String> =
-            profiles.iter().map(|p| p.profile_id.clone()).collect();
-        self.pins.retain(|_, pid| ids.contains(pid));
+        // Build fresh trackers for the new profile set.
         self.profiles = profiles
             .into_iter()
             .map(|p| PooledProfile {
@@ -197,22 +186,6 @@ impl VpnPool {
 
     pub fn active(&self) -> Option<&str> {
         self.active.as_deref()
-    }
-
-    pub fn pins(&self) -> &HashMap<String, String> {
-        &self.pins
-    }
-
-    /// Pin a flow to a profile (or clear with `None`).
-    pub fn pin_flow(&mut self, flow: &str, profile_id: Option<String>) {
-        match profile_id {
-            Some(id) => {
-                self.pins.insert(flow.to_string(), id);
-            }
-            None => {
-                self.pins.remove(flow);
-            }
-        }
     }
 
     /// Record a health sample for a profile from the unified `PathSample`
@@ -359,12 +332,10 @@ impl VpnPool {
         (w + avail_bonus - latency_penalty - load_penalty).max(0.0)
     }
 
-    /// Select a profile for a flow. Deterministic health-aware weighted
-    /// selection with stickiness:
-    /// 1. if the flow is pinned to a healthy candidate, keep it;
-    /// 2. otherwise rank eligible profiles by score and pick the top
-    ///    (ties broken deterministically by profile_id).
-    pub fn select_for(&mut self, flow: &str, now_ms: i64) -> SelectionDecision {
+    /// Select the best profile. Deterministic health-aware weighted
+    /// selection: rank eligible profiles by score and pick the top
+    /// (ties broken deterministically by profile_id).
+    pub fn select_for(&mut self, now_ms: i64) -> SelectionDecision {
         // Build candidate list with exclusion reasons.
         let mut excluded: Vec<Exclusion> = Vec::new();
         let mut candidates: Vec<(String, f64, String)> = Vec::new();
@@ -395,30 +366,6 @@ impl VpnPool {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
         });
-
-        // Stickiness: keep a pin if its target is still eligible.
-        if let Some(pinned_id) = self.pins.get(flow) {
-            if let Some((id, score, reason)) =
-                candidates.iter().find(|c| &c.0 == pinned_id).cloned()
-            {
-                let dec = SelectionDecision {
-                    profile_id: id,
-                    score,
-                    reason: format!("pinned flow (stickiness); {reason}"),
-                    excluded,
-                    candidates: candidates_count,
-                };
-                self.active = Some(dec.profile_id.clone());
-                if let Some(p) = self
-                    .profiles
-                    .iter_mut()
-                    .find(|p| p.profile.profile_id == dec.profile_id)
-                {
-                    p.last_selected_ms = now_ms;
-                }
-                return dec;
-            }
-        }
 
         match candidates.into_iter().next() {
             Some((id, score, reason)) => {
@@ -453,39 +400,6 @@ impl VpnPool {
                     candidates: 0,
                 }
             }
-        }
-    }
-
-    /// Called when a flow ends / is no longer tracked: release its pin.
-    pub fn release_flow(&mut self, flow: &str) {
-        self.pins.remove(flow);
-    }
-
-    /// Called when a flow is established on a profile: account load.
-    pub fn flow_started(&mut self, profile_id: &str) {
-        if let Some(p) = self
-            .profiles
-            .iter_mut()
-            .find(|p| p.profile.profile_id == profile_id)
-        {
-            p.load.active_flows = p.load.active_flows.saturating_add(1);
-            p.load.utilization = (p.load.active_flows as f64
-                / self.config.capacity_per_profile.max(1) as f64)
-                .min(1.0);
-        }
-    }
-
-    /// Called when a flow ends on a profile: release load.
-    pub fn flow_ended(&mut self, profile_id: &str) {
-        if let Some(p) = self
-            .profiles
-            .iter_mut()
-            .find(|p| p.profile.profile_id == profile_id)
-        {
-            p.load.active_flows = p.load.active_flows.saturating_sub(1);
-            p.load.utilization = (p.load.active_flows as f64
-                / self.config.capacity_per_profile.max(1) as f64)
-                .min(1.0);
         }
     }
 
@@ -685,11 +599,11 @@ mod tests {
     fn selects_healthy_profile_deterministically() {
         let mut pool = VpnPool::new(test_config());
         populate(&mut pool, &[("b.example.com", 443), ("a.example.com", 443)]);
-        let d = pool.select_for("flow-1", TS);
+        let d = pool.select_for(TS);
         assert!(!d.profile_id.is_empty());
         assert!(d.candidates >= 1);
         // Second call with same inputs selects the same profile.
-        let d2 = pool.select_for("flow-1", TS);
+        let d2 = pool.select_for(TS);
         assert_eq!(d.profile_id, d2.profile_id);
     }
 
@@ -708,7 +622,7 @@ mod tests {
             ProfileState::Failed
         );
 
-        let d = pool.select_for("f", TS);
+        let d = pool.select_for(TS);
         assert_eq!(d.profile_id, a_id, "healthy profile selected over failed");
         assert!(
             d.excluded
@@ -739,70 +653,8 @@ mod tests {
             pool.profile(&a_id).unwrap().health.state,
             ProfileState::Degraded
         );
-        let d = pool.select_for("f", TS);
+        let d = pool.select_for(TS);
         assert_eq!(d.profile_id, b_id);
-    }
-
-    #[test]
-    fn flow_stickiness_pins_a_flow() {
-        let mut pool = VpnPool::new(test_config());
-        populate(&mut pool, &[("a.example.com", 443), ("b.example.com", 443)]);
-        let a_id = pool.profiles()[0].profile.profile_id.clone();
-        let b_id = pool.profiles()[1].profile.profile_id.clone();
-
-        // Make b clearly better so unpinned ranking would pick it.
-        let slow = PathSample {
-            latency_ms: Some(800.0),
-            loss_pct: None,
-            reachable: true,
-            degraded_evidence: false,
-        };
-        pool.observe_health(&a_id, slow, TS);
-        pool.observe_health(&a_id, slow, TS);
-        pool.observe_health(&b_id, sample_healthy(), TS);
-
-        // Pin flow-x to a (the worse profile): stickiness must keep it on a.
-        pool.pin_flow("flow-x", Some(a_id.clone()));
-        let d = pool.select_for("flow-x", TS);
-        assert_eq!(
-            d.profile_id, a_id,
-            "pinned flow stays on a despite worse score"
-        );
-        assert!(d.reason.contains("stickiness"));
-
-        // Releasing the pin lets ranking decide → b (clearly better).
-        pool.release_flow("flow-x");
-        let d = pool.select_for("flow-x", TS);
-        assert_eq!(d.profile_id, b_id, "after unpin, ranking wins");
-    }
-
-    #[test]
-    fn load_balancing_prefers_underloaded_profile() {
-        let mut pool = VpnPool::new(test_config());
-        populate(&mut pool, &[("a.example.com", 443), ("b.example.com", 443)]);
-        let a_id = pool.profiles()[0].profile.profile_id.clone();
-        let b_id = pool.profiles()[1].profile.profile_id.clone();
-        pool.observe_health(&a_id, sample_healthy(), TS);
-        pool.observe_health(&b_id, sample_healthy(), TS);
-
-        // Load up profile a heavily → b should win new flows.
-        for _ in 0..50 {
-            pool.flow_started(&a_id);
-        }
-        let d = pool.select_for("new-flow", TS);
-        assert_eq!(d.profile_id, b_id, "underloaded healthy profile preferred");
-    }
-
-    #[test]
-    fn capacity_accounting_round_trips() {
-        let mut pool = VpnPool::new(test_config());
-        populate(&mut pool, &[("a.example.com", 443)]);
-        let a_id = pool.profiles()[0].profile.profile_id.clone();
-        pool.flow_started(&a_id);
-        pool.flow_started(&a_id);
-        assert_eq!(pool.profile(&a_id).unwrap().load.active_flows, 2);
-        pool.flow_ended(&a_id);
-        assert_eq!(pool.profile(&a_id).unwrap().load.active_flows, 1);
     }
 
     #[test]
@@ -819,7 +671,7 @@ mod tests {
         pool.observe_health(&b_id, sample_healthy(), TS);
 
         // Select a as active (a < b alphabetically, deterministic tie).
-        let d = pool.select_for("f", TS);
+        let d = pool.select_for(TS);
         let active = d.profile_id.clone();
         let _ = pool.force_rotate_to(&active, "initial".to_string(), TS);
 
@@ -868,7 +720,7 @@ mod tests {
         pool.observe_health(&a_id, slow, TS);
         pool.observe_health(&a_id, slow, TS);
         pool.observe_health(&b_id, sample_healthy(), TS);
-        let d = pool.select_for("f", TS);
+        let d = pool.select_for(TS);
         assert_eq!(d.profile_id, b_id);
 
         // Force active = a to set the dwell clock, then rotate after dwell.
@@ -941,7 +793,7 @@ mod tests {
         );
 
         // During cooldown: excluded.
-        let d = pool.select_for("f", TS + 10_000);
+        let d = pool.select_for(TS + 10_000);
         assert_ne!(d.profile_id, a_id);
         assert!(d.excluded.iter().any(|e| e.profile_id == a_id));
 
@@ -954,7 +806,7 @@ mod tests {
             pool.profile(&a_id).unwrap().health.state,
             ProfileState::Recovering
         );
-        let d = pool.select_for("f", t + 2);
+        let d = pool.select_for(t + 2);
         assert!(
             d.excluded.iter().all(|e| e.profile_id != a_id),
             "a no longer excluded"
@@ -965,30 +817,18 @@ mod tests {
     fn active_cleared_when_profile_removed() {
         let mut pool = VpnPool::new(test_config());
         populate(&mut pool, &[("a.example.com", 443), ("b.example.com", 443)]);
-        let a_id = pool.profiles()[0].profile.profile_id.clone();
-        // Select and pin to a so the active is definitely a.
-        pool.pin_flow("f", Some(a_id.clone()));
-        pool.select_for("f", TS);
-        assert_eq!(pool.active(), Some(a_id.as_str()));
-        // Replace with only b → a is gone → active cleared.
-        populate(&mut pool, &[("b.example.com", 443)]);
+        // Select: pool picks the deterministic best (both Unknown, tie by id).
+        pool.select_for(TS);
+        let active = pool.active().unwrap().to_string();
+        assert!(pool.profile(&active).is_some());
+        // Replace with only the other host → active is gone → active cleared.
+        let other = if pool.profiles()[0].profile.profile_id == active {
+            "b.example.com"
+        } else {
+            "a.example.com"
+        };
+        populate(&mut pool, &[(other, 443)]);
         assert!(pool.active().is_none());
-    }
-
-    #[test]
-    fn pins_survive_replace_only_for_existing_profiles() {
-        let mut pool = VpnPool::new(test_config());
-        populate(&mut pool, &[("a.example.com", 443), ("b.example.com", 443)]);
-        let a_id = pool.profiles()[0].profile.profile_id.clone();
-        let b_id = pool.profiles()[1].profile.profile_id.clone();
-        pool.pin_flow("f", Some(a_id.clone()));
-        // Replace with only b.
-        populate(&mut pool, &[("b.example.com", 443)]);
-        assert!(
-            pool.pins().get("f").is_none(),
-            "pin to removed profile dropped"
-        );
-        let _ = b_id;
     }
 
     #[test]
@@ -998,7 +838,7 @@ mod tests {
         let a_id = pool.profiles()[0].profile.profile_id.clone();
         pool.observe_health(&a_id, sample_failure(), TS);
         pool.observe_health(&a_id, sample_failure(), TS);
-        let d = pool.select_for("f", TS);
+        let d = pool.select_for(TS);
         assert!(d.profile_id.is_empty());
         assert_eq!(d.reason, "no eligible profile");
     }
@@ -1014,7 +854,7 @@ mod tests {
         let b_id = pool.profiles()[1].profile.profile_id.clone();
 
         // a selected and active.
-        let d = pool.select_for("f", TS);
+        let d = pool.select_for(TS);
         assert!(!d.profile_id.is_empty());
         assert!(pool.active().is_some(), "a profile is active");
 
@@ -1024,7 +864,7 @@ mod tests {
         pool.observe_health(&b_id, sample_failure(), TS + 1);
         pool.observe_health(&b_id, sample_failure(), TS + 2);
 
-        let d = pool.select_for("f", TS + 3);
+        let d = pool.select_for(TS + 3);
         assert!(d.profile_id.is_empty(), "no eligible profile");
         assert!(
             pool.active().is_none(),

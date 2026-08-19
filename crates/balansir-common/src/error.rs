@@ -1,4 +1,3 @@
-use std::time::Duration;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -6,9 +5,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Driver-specific errors
 #[derive(Debug, Error)]
 pub enum DriverError {
-    #[error("Process not found")]
-    ProcessNotFound,
-
     #[error("Config invalid: {0}")]
     ConfigInvalid(String),
 
@@ -30,9 +26,6 @@ pub enum Error {
     #[error("Temporary failure: {0}")]
     Temporary(String),
 
-    #[error("Retryable failure: {0}")]
-    Retryable(String),
-
     #[error("Fatal error: {0}")]
     Fatal(String),
 
@@ -42,17 +35,11 @@ pub enum Error {
     #[error("Unsupported on this hardware: {0}")]
     Unsupported(String),
 
-    #[error("Circuit breaker is open")]
-    CircuitOpen,
-
     #[error("IPC violation: {0}")]
     IpcViolation(String),
 
     #[error("Unauthorized: UID {uid} not in allowed list {allowed:?}")]
     Unauthorized { uid: u32, allowed: Vec<u32> },
-
-    #[error("Invalid IPC magic: expected 0x{expected:X}, got 0x{got:X}")]
-    InvalidMagic { expected: u32, got: u32 },
 
     #[error("IPC version mismatch: remote={remote}, local={local}")]
     VersionMismatch { remote: u8, local: u8 },
@@ -68,20 +55,6 @@ pub enum Error {
 
     #[error("Driver error: {0}")]
     Driver(#[from] DriverError),
-}
-
-impl Error {
-    pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::Temporary(_) | Self::Retryable(_))
-    }
-
-    pub fn retry_delay(&self) -> Option<Duration> {
-        match self {
-            Self::Temporary(_) => Some(Duration::from_millis(100)),
-            Self::Retryable(_) => Some(Duration::from_secs(5)),
-            _ => None,
-        }
-    }
 }
 
 impl From<postcard::Error> for Error {

@@ -2,7 +2,6 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
 use prometheus_client::registry::Registry;
 use std::sync::RwLock;
 
@@ -22,23 +21,14 @@ pub struct Metrics {
     // Counters
     pub reconciliations_total: Counter,
     pub reconciliation_failures_total: Counter,
-    pub drift_items_total: Counter,
-    pub executor_operations_total: Counter,
-    pub policy_evaluations_total: Counter,
 
     // Gauges
     pub active_rules: Gauge,
     pub desired_rules: Gauge,
-    pub health_status: Gauge,
 
     // Driver observability
     drivers: Family<TierLabel, Gauge>,
     pub driver_lifecycle_transitions: Counter,
-
-    // Histograms
-    pub reconciliation_duration_seconds: Histogram,
-    pub policy_evaluation_duration_micros: Histogram,
-    pub executor_operation_duration_micros: Histogram,
 }
 
 impl Metrics {
@@ -63,27 +53,6 @@ impl Metrics {
             reconciliation_failures_total.clone(),
         );
 
-        let drift_items_total = Counter::default();
-        registry.register(
-            "balansir_drift_items",
-            "Total number of drift items detected",
-            drift_items_total.clone(),
-        );
-
-        let executor_operations_total = Counter::default();
-        registry.register(
-            "balansir_executor_operations",
-            "Total number of executor operations",
-            executor_operations_total.clone(),
-        );
-
-        let policy_evaluations_total = Counter::default();
-        registry.register(
-            "balansir_policy_evaluations",
-            "Total number of policy evaluations",
-            policy_evaluations_total.clone(),
-        );
-
         let active_rules = Gauge::default();
         registry.register(
             "balansir_active_rules",
@@ -96,13 +65,6 @@ impl Metrics {
             "balansir_desired_rules",
             "Number of desired rules",
             desired_rules.clone(),
-        );
-
-        let health_status = Gauge::default();
-        registry.register(
-            "balansir_health_status",
-            "Health status (0=unhealthy, 1=degraded, 2=healthy)",
-            health_status.clone(),
         );
 
         let drivers = Family::<TierLabel, Gauge>::default();
@@ -119,42 +81,14 @@ impl Metrics {
             driver_lifecycle_transitions.clone(),
         );
 
-        let reconciliation_duration_seconds = Histogram::new(exponential_buckets(0.001, 2.0, 10));
-        registry.register(
-            "balansir_reconciliation_duration_seconds",
-            "Duration of reconciliation cycles in seconds",
-            reconciliation_duration_seconds.clone(),
-        );
-
-        let policy_evaluation_duration_micros = Histogram::new(exponential_buckets(1.0, 2.0, 10));
-        registry.register(
-            "balansir_policy_evaluation_duration_micros",
-            "Duration of policy evaluations in microseconds",
-            policy_evaluation_duration_micros.clone(),
-        );
-
-        let executor_operation_duration_micros = Histogram::new(exponential_buckets(10.0, 2.0, 10));
-        registry.register(
-            "balansir_executor_operation_duration_micros",
-            "Duration of executor operations in microseconds",
-            executor_operation_duration_micros.clone(),
-        );
-
         Self {
             registry: RwLock::new(registry),
             reconciliations_total,
             reconciliation_failures_total,
-            drift_items_total,
-            executor_operations_total,
-            policy_evaluations_total,
             active_rules,
             desired_rules,
-            health_status,
             drivers,
             driver_lifecycle_transitions,
-            reconciliation_duration_seconds,
-            policy_evaluation_duration_micros,
-            executor_operation_duration_micros,
         }
     }
 
@@ -176,21 +110,6 @@ impl Metrics {
         self.reconciliation_failures_total.inc();
     }
 
-    /// Record drift items
-    pub fn record_drift(&self, count: u64) {
-        self.drift_items_total.inc_by(count);
-    }
-
-    /// Record executor operation
-    pub fn record_executor_operation(&self) {
-        self.executor_operations_total.inc();
-    }
-
-    /// Record policy evaluation
-    pub fn record_policy_evaluation(&self) {
-        self.policy_evaluations_total.inc();
-    }
-
     /// Set active rules gauge
     pub fn set_active_rules(&self, count: i64) {
         self.active_rules.set(count);
@@ -199,11 +118,6 @@ impl Metrics {
     /// Set desired rules gauge
     pub fn set_desired_rules(&self, count: i64) {
         self.desired_rules.set(count);
-    }
-
-    /// Set health status gauge
-    pub fn set_health_status(&self, status: i64) {
-        self.health_status.set(status);
     }
 
     /// Set per-tier driver counts. `counts` is indexed by `HealthTier::as_u8`
@@ -221,22 +135,6 @@ impl Metrics {
     /// Record a driver lifecycle transition (state change).
     pub fn record_driver_lifecycle_transition(&self) {
         self.driver_lifecycle_transitions.inc();
-    }
-
-    /// Record reconciliation duration
-    pub fn record_reconciliation_duration(&self, seconds: f64) {
-        self.reconciliation_duration_seconds.observe(seconds);
-    }
-
-    /// Record policy evaluation duration
-    pub fn record_policy_evaluation_duration(&self, microseconds: f64) {
-        self.policy_evaluation_duration_micros.observe(microseconds);
-    }
-
-    /// Record executor operation duration
-    pub fn record_executor_operation_duration(&self, microseconds: f64) {
-        self.executor_operation_duration_micros
-            .observe(microseconds);
     }
 }
 
@@ -311,12 +209,10 @@ mod tests {
 
         metrics.set_active_rules(10);
         metrics.set_desired_rules(15);
-        metrics.set_health_status(2);
 
         let output = metrics.encode_metrics();
         assert!(output.contains("balansir_active_rules 10"));
         assert!(output.contains("balansir_desired_rules 15"));
-        assert!(output.contains("balansir_health_status 2"));
     }
 
     #[test]
@@ -329,7 +225,6 @@ mod tests {
     #[test]
     fn test_driver_tier_gauges_encoded() {
         let metrics = Metrics::new();
-        metrics.set_health_status(2);
         metrics.set_driver_tiers([1, 2, 3, 4]);
         metrics.record_driver_lifecycle_transition();
         metrics.record_driver_lifecycle_transition();

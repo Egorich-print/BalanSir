@@ -1,7 +1,6 @@
-use balansir_common::event_bus::BoundedEventBus;
 use balansir_common::ipc::{IpcMessage, IpcServerConnection, MsgType};
 use balansir_common::metrics::SharedMetrics;
-use balansir_common::{DesiredState, DriverId, Result};
+use balansir_common::{DesiredState, Result};
 use balansir_control::ReconcileReason;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
@@ -11,9 +10,6 @@ use tokio::net::UnixListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, error, info, warn};
 
-use balansir_daemon::driver::factory::ConfiguredFactory;
-use balansir_daemon::driver::health::TierTracker;
-use balansir_daemon::driver::lifecycle::{DriverIntent, DriverLifecycleManager};
 use balansir_daemon::driver::ComponentDriver;
 use balansir_daemon::reconciliation::{ExecutorClient, Reconciler, ReconcilerConfig};
 
@@ -39,20 +35,9 @@ async fn main() -> Result<()> {
     tokio::fs::set_permissions(socket_path, Permissions::from_mode(SOCKET_PERMS)).await?;
     info!("Listening on {} (mode {:#o})", SOCKET_PATH, SOCKET_PERMS);
 
-    // Driver lifecycle state machine (ADR-011). Real driver configs are wired
-    // via the typed ConfiguredFactory (M3.5); until a config source is loaded
-    // the registry is empty and every Start fails honestly as a tracked Failed
-    // slot.
-    let lifecycle: Arc<tokio::sync::Mutex<DriverLifecycleManager>> =
-        Arc::new(tokio::sync::Mutex::new(DriverLifecycleManager::new(
-            Box::new(ConfiguredFactory::empty()),
-        )));
-
-    // M3.3 observability: shared metrics + event bus + tier tracker, fed by the
-    // orchestration layer (NOT by the lifecycle manager itself, per ADR-012).
+    // M3.3 observability: shared metrics, fed by the
+    // orchestration layer (ADR-012).
     let metrics = Arc::new(SharedMetrics::new());
-    let events: Arc<BoundedEventBus> = Arc::new(BoundedEventBus::new(1024));
-    let tracker = Arc::new(tokio::sync::Mutex::new(TierTracker::default()));
 
     // M3.4.1 production control plane: the daemon binary now drives the real
     // Coordinator -> BasicPlanner -> plan -> execution-adapter -> ActualState
@@ -384,7 +369,6 @@ async fn main() -> Result<()> {
             .unwrap_or(10808);
         #[cfg(not(feature = "xray"))]
         let xray_socks_port = 10808u16;
-        let _manager_snapshot = manager.snapshot(); // for potential future use
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             let mut last_vpn_active = false;
@@ -499,19 +483,9 @@ async fn main() -> Result<()> {
                         match IpcServerConnection::accept(stream).await {
                             Ok(conn) => {
                                 info!("Executor connected (UID: {})", conn.peer_uid());
-                                let lifecycle = Arc::clone(&lifecycle);
                                 let metrics = Arc::clone(&metrics);
-                                let events = Arc::clone(&events);
-                                let tracker = Arc::clone(&tracker);
                                 let reconciler = Arc::clone(&reconciler);
-                                tokio::spawn(handle_connection(
-                                    conn,
-                                    lifecycle,
-                                    metrics,
-                                    events,
-                                    tracker,
-                                    reconciler,
-                                ));
+                                tokio::spawn(handle_connection(conn, metrics, reconciler));
                             }
                             Err(e) => {
                                 warn!("Authentication failed: {}", e);
@@ -700,24 +674,13 @@ async fn apply_network_config(executor: &Arc<ExecutorClient>) {
 
 async fn handle_connection(
     mut conn: IpcServerConnection,
-    lifecycle: Arc<tokio::sync::Mutex<DriverLifecycleManager>>,
     metrics: Arc<SharedMetrics>,
-    events: Arc<BoundedEventBus>,
-    tracker: Arc<tokio::sync::Mutex<TierTracker>>,
     reconciler: Arc<Reconciler>,
 ) {
     loop {
         match conn.recv().await {
             Ok(msg) => {
-                let response = handle_message(
-                    &msg,
-                    Arc::clone(&lifecycle),
-                    &metrics,
-                    &events,
-                    &tracker,
-                    &reconciler,
-                )
-                .await;
+                let response = handle_message(&msg, &metrics, &reconciler).await;
                 if let Err(e) = conn.send(&response).await {
                     error!("Send error: {}", e);
                     break;
@@ -731,31 +694,9 @@ async fn handle_connection(
     }
 }
 
-/// Payload of a driver message: a postcard-encoded `DriverId`.
-fn driver_id_from_payload(msg: &IpcMessage) -> Option<DriverId> {
-    postcard::from_bytes(&msg.payload).ok()
-}
-
-/// Reconcile tier tracking after any lifecycle-affecting operation. Emits
-/// `ComponentHealthChanged` on the bus and updates gauges; tier changes are
-/// pushed only when the tier actually differs (ADR-012).
-async fn refresh_tiers(
-    lifecycle: &tokio::sync::Mutex<DriverLifecycleManager>,
-    metrics: &SharedMetrics,
-    events: &BoundedEventBus,
-    tracker: &tokio::sync::Mutex<TierTracker>,
-) {
-    let mut tracker_guard = tracker.lock().await;
-    let manager = lifecycle.lock().await;
-    tracker_guard.reconcile(&manager, metrics, events);
-}
-
 async fn handle_message(
     msg: &IpcMessage,
-    lifecycle: Arc<tokio::sync::Mutex<DriverLifecycleManager>>,
     metrics: &SharedMetrics,
-    events: &BoundedEventBus,
-    tracker: &tokio::sync::Mutex<TierTracker>,
     reconciler: &Reconciler,
 ) -> IpcMessage {
     match msg.msg_type {
@@ -766,51 +707,6 @@ async fn handle_message(
         MsgType::GetMetrics => {
             let body = metrics.encode_metrics().into_bytes();
             IpcMessage::response_data(msg.correlation_id, body)
-        }
-        MsgType::StartDriver | MsgType::RestartDriver => {
-            let Some(id) = driver_id_from_payload(msg) else {
-                return IpcMessage::response_error(msg.correlation_id, "Invalid driver id");
-            };
-            let fingerprint = id.as_u32() as u64;
-            let intent = DriverIntent {
-                id,
-                action: if msg.msg_type == MsgType::RestartDriver {
-                    balansir_common::DriverAction::Restart
-                } else {
-                    balansir_common::DriverAction::Start
-                },
-                fingerprint,
-            };
-            let failed = {
-                let mut g = lifecycle.lock().await;
-                let emitted = g.reconcile(vec![intent]).await;
-                emitted.iter().any(|e| {
-                    matches!(
-                        e.outcome,
-                        balansir_daemon::driver::lifecycle::DriverOutcome::Failed { .. }
-                    )
-                })
-            };
-            refresh_tiers(&lifecycle, metrics, events, tracker).await;
-            if failed {
-                info!(?id, "driver failed to start");
-                IpcMessage::response_error(msg.correlation_id, "Driver failed to start")
-            } else {
-                info!(?id, "driver started");
-                IpcMessage::response_ok(msg.correlation_id)
-            }
-        }
-        MsgType::StopDriver => {
-            let Some(id) = driver_id_from_payload(msg) else {
-                return IpcMessage::response_error(msg.correlation_id, "Invalid driver id");
-            };
-            {
-                let mut g = lifecycle.lock().await;
-                g.reconcile(vec![DriverIntent::stop(id)]).await;
-            }
-            refresh_tiers(&lifecycle, metrics, events, tracker).await;
-            info!(?id, "driver stopped");
-            IpcMessage::response_ok(msg.correlation_id)
         }
         // M3.8 CLI / control-plane queries.
         MsgType::GetPlan => {

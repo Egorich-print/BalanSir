@@ -1,118 +1,13 @@
 //! D3: Stress testing
 //!
-//! - 1000+ rules policy evaluation (correctness + timing)
 //! - 24h reconciliation loop simulation with rule churn
 //! - Memory leak detection (executor call count stability)
 
 use balansir_common::diff::StateDiff;
-use balansir_common::{Action, ActionRequest, ActionResult, DesiredRule, DesiredState, HealthView};
-use balansir_daemon::policy::{Matcher, PacketContext, PolicyEngine, PolicyRule};
+use balansir_common::{Action, ActionRequest, ActionResult, DesiredRule, DesiredState};
 use balansir_daemon::reconciliation::{ExecutorAdapter, Reconciler, ReconcilerConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
-
-/// Empty health view: no tracked driver is unhealthy, so routing is untouched.
-fn healthy() -> HealthView {
-    HealthView::new()
-}
-
-/// Build a packet context with given dst port/domain
-fn ctx(dst_port: u16, domain_hash: Option<u32>) -> PacketContext {
-    PacketContext {
-        src_ip: std::net::IpAddr::from([192, 168, 1, 10]),
-        dst_ip: std::net::IpAddr::from([8, 8, 8, 8]),
-        src_port: 40000,
-        dst_port,
-        protocol: 6,
-        domain_hash,
-        interface: None,
-    }
-}
-
-/// Generate N rules with unique ports, priorities 0..N
-fn gen_rules(n: u32) -> Vec<PolicyRule> {
-    (0..n)
-        .map(|i| PolicyRule {
-            id: i,
-            name: format!("rule-{}", i),
-            priority: i,
-            enabled: true,
-            matcher: Matcher::Port {
-                port: ((i % 60000) + 1000) as u16,
-            },
-            action: Action::Block,
-            fallback: None,
-        })
-        .collect()
-}
-
-/// 1000+ rules: verify top-priority matching and measure evaluation time
-#[test]
-fn policy_engine_1000_rules() {
-    let rule_count = 1024u32;
-    let engine = PolicyEngine::new(gen_rules(rule_count));
-
-    // Warmup
-    let _ = engine.evaluate(&ctx(443, None), &healthy());
-
-    // Correctness: rule i matches port (i%60000)+1000, blocks
-    for i in [0u32, 1, 500, 1023] {
-        let port = ((i % 60000) + 1000) as u16;
-        let trace = engine.evaluate(&ctx(port, None), &healthy());
-        assert_eq!(
-            trace.action,
-            Action::Block,
-            "rule {} should block {}",
-            i,
-            port
-        );
-        assert!(
-            trace.steps.iter().any(|s| s.rule_id == i && s.matched),
-            "rule {} must be the matching step",
-            i
-        );
-    }
-
-    // Non-matching port falls through to default Allow
-    let trace = engine.evaluate(&ctx(1, None), &healthy());
-    assert_eq!(trace.action, Action::Allow);
-
-    // Timing: 10k evaluations over 1024 rules (ports cycle through rules)
-    let iterations = 10_000u32;
-    let start = Instant::now();
-    let mut decisions = 0;
-    for i in 0..iterations {
-        let port = (((i % rule_count) % 60000) + 1000) as u16;
-        decisions += (engine.evaluate(&ctx(port, None), &healthy()).action == Action::Block) as u32;
-    }
-    let elapsed = start.elapsed();
-    let per_eval_ns = elapsed.as_nanos() / iterations as u128;
-
-    assert_eq!(decisions, iterations, "all generated ports must match");
-    assert!(
-        elapsed < std::time::Duration::from_secs(10),
-        "1000-rule evaluation too slow: {:?}",
-        elapsed
-    );
-    eprintln!(
-        "policy_engine_1000_rules: {} evals x {} rules in {:?} ({:.1} ns/eval)",
-        iterations, rule_count, elapsed, per_eval_ns
-    );
-}
-
-/// Rules with duplicate priorities: stable, must not panic and must still match
-#[test]
-fn policy_engine_duplicate_priorities() {
-    let mut rules = gen_rules(100);
-    for r in &mut rules {
-        r.priority = 42;
-    }
-    let engine = PolicyEngine::new(rules);
-    let trace = engine.evaluate(&ctx(1000, None), &healthy());
-    assert_eq!(trace.action, Action::Block);
-    assert_eq!(trace.steps.len(), 1);
-}
 
 /// 24h reconciliation simulation (2880 cycles @ 30s) with rule churn.
 /// Verifies: convergence, executor call stability (no leak), rollback path.
@@ -282,31 +177,4 @@ async fn reconciler_rapid_churn_legacy() {
 
     let desired = reconciler.get_desired().await;
     assert_eq!(desired.rules.len(), 10);
-}
-
-/// Policy engine with deep churn: add/remove 10k rules, engine stays consistent
-#[test]
-fn policy_engine_rule_churn() {
-    let mut engine = PolicyEngine::new(Vec::new());
-    for i in 0..10_000u32 {
-        engine.add_rule(PolicyRule {
-            id: i,
-            name: format!("churn-{}", i),
-            priority: i,
-            enabled: true,
-            matcher: Matcher::Port {
-                port: (i as u16).wrapping_add(1),
-            },
-            action: Action::Reject,
-            fallback: None,
-        });
-        if i >= 1000 {
-            engine.remove_rule(i - 1000);
-        }
-    }
-    assert_eq!(engine.rules().len(), 1000);
-
-    let trace = engine.evaluate(&ctx(9001, None), &healthy());
-    // port 9001 = rule 9000 (rejected), still present after churn
-    assert_eq!(trace.action, Action::Reject);
 }

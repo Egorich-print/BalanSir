@@ -17,4 +17,4 @@ pub mod strategies;
 
 pub use config::B4Config;
 #[cfg(target_os = "linux")]
-pub use engine::{default_config, B4Engine, B4Stats};
+pub use engine::{B4Engine, B4Stats};

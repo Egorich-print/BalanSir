@@ -6,7 +6,6 @@ use crate::traits::Executor;
 use async_trait::async_trait;
 use balansir_common::{ReconciliationOperation, ReconciliationPlan};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// Executes plans in-memory. Records the number of executed steps and can be
@@ -65,23 +64,6 @@ impl Executor for MockExecutor {
                 "MockExecutor: injected failure".into(),
             ))
         }
-    }
-}
-
-/// Convenience adapter that owns an `Arc<dyn Executor>` and exposes helper
-/// accessors (keeps consumers decoupled from the concrete executor).
-#[derive(Clone)]
-pub struct ExecutorRef {
-    inner: Arc<dyn Executor>,
-}
-
-impl ExecutorRef {
-    pub fn new(inner: Arc<dyn Executor>) -> Self {
-        Self { inner }
-    }
-
-    pub fn as_trait(&self) -> &dyn Executor {
-        self.inner.as_ref()
     }
 }
 

@@ -225,11 +225,6 @@ impl NfQueue {
         let msg = self.netlink_msg(NFQNL_MSG_VERDICT, attrs, self.queue_num);
         self.sock.send(&msg, 0).map(|_| ())
     }
-
-    /// Underlying socket fd (for integration with async runtimes if needed).
-    pub fn as_raw_fd(&self) -> i32 {
-        self.sock.as_raw_fd()
-    }
 }
 
 /// Append a netlink attribute (nla) with `type` and `data` payload.

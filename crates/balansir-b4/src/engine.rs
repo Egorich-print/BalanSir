@@ -127,11 +127,6 @@ impl B4Engine {
         self.dead.load(Ordering::SeqCst)
     }
 
-    /// Whether the interception loop is currently running.
-    pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
-    }
-
     /// Snapshot of the engine counters.
     pub fn stats(&self) -> B4Stats {
         B4Stats {
@@ -307,18 +302,6 @@ fn apply_to(pkt: &mut TcpPacket, strat: &Strategy) -> bool {
     }
 }
 
-/// Default engine config helper (for tests and sane defaults).
-pub fn default_config() -> EngineConfig {
-    use crate::strategies::Profile;
-    EngineConfig {
-        profiles: vec![Profile {
-            name: "default".into(),
-            domains: vec![],
-            strategies: vec![Strategy::Mss { mss: 1200 }],
-        }],
-    }
-}
-
 /// Debug helper: hex of the first up-to-6 bytes of a payload.
 fn hex6(bytes: &[u8]) -> String {
     bytes.iter().take(6).map(|b| format!("{b:02x}")).collect()
@@ -334,11 +317,5 @@ mod tests {
         let mut pkt = TcpPacket::parse(&raw).unwrap();
         assert!(apply_to(&mut pkt, &Strategy::Ttl { ttl: 61 }));
         assert_eq!(pkt.raw[8], 61);
-    }
-
-    #[test]
-    fn default_config_resolves_default() {
-        let cfg = default_config();
-        assert!(cfg.profile_for("anyhost.example").is_some());
     }
 }
