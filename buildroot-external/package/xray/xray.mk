@@ -14,7 +14,6 @@ XRAY_SOURCE = Xray-linux-arm64-v8a.zip
 XRAY_SITE = https://github.com/XTLS/Xray-core/releases/download/v$(XRAY_VERSION)
 XRAY_LICENSE = GPL-3.0
 XRAY_LICENSE_FILES = LICENSE
-XRAY_DEPENDENCIES = host-unzip
 
 define XRAY_EXTRACT_CMDS
 	$(UNZIP) -o $(XRAY_DL_DIR)/$(XRAY_SOURCE) -d $(@D)
