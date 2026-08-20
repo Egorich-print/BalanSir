@@ -11,6 +11,7 @@
 //! Cross-platform (macOS/Linux) for inspect/checksum; build/qemu need a Linux
 //! environment (the Buildroot VM), which the tool detects and reports.
 
+mod build;
 mod collect;
 mod elf;
 mod image;
@@ -91,7 +92,23 @@ fn main() -> ExitCode {
                 }
             }
         }
-        "build" | "help" | "-h" | "--help" => {
+        "build" => {
+            let defconfig = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("balansir_rpi3b_64_defconfig");
+            match build::build(defconfig) {
+                Ok(out) => {
+                    println!("{out}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("balansir-image: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        "help" | "-h" | "--help" => {
             usage();
             ExitCode::SUCCESS
         }
