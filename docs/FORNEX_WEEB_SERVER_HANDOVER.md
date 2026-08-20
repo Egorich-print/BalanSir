@@ -15,7 +15,7 @@
 | **Domain (FreeDNS)** | `weeb.twilightparadox.com` |
 | **Tailscale IP** | `100.95.185.77` |
 | **SSH Access** | `root` @ `199.68.199.68` |
-| **SSH Password** | `A6Oo6bVvsB41B6Qt` |
+| **SSH Password** | `REDACTED-FORNEX-SSH-PASSWORD` |
 | **OS / Kernel** | Ubuntu 24.04.4 LTS (x86_64, Linux 6.8.0-136-generic) |
 | **Hardware** | 961 MB RAM, ~2.3 GB free disk space, 1 CPU core |
 

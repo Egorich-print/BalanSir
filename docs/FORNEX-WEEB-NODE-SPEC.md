@@ -62,7 +62,7 @@
 - **Hysteria 2 (`apernet/hysteria:latest` docker container):**
   - Port `3658/udp`.
   - Config: `/etc/hysteria/config.yaml`.
-  - Password: `weeb-secure-password-2026`.
+  - Password: `REDACTED-HYSTERIA-PASSWORD`.
 
 ### 2.3 Layer 3 Tunnel Drivers (AmneziaWG 3.0 & 2.0)
 - **AmneziaWG 3.0 (`awg3` docker container):**

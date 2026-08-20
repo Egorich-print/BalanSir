@@ -20,7 +20,7 @@ This document provides a complete technical handover for the production VPN/DNS 
 | **Hostname / Domain** | `weeb.twilightparadox.com` (managed via FreeDNS) |
 | **Public IPv4** | `199.68.199.68` |
 | **Tailscale IP** | `100.95.185.77` |
-| **SSH Access** | `sshpass -p "A6Oo6bVvsB41B6Qt" ssh root@100.95.185.77` (or via public IP) |
+| **SSH Access** | `sshpass -p "REDACTED-FORNEX-SSH-PASSWORD" ssh root@100.95.185.77` (or via public IP) |
 | **OS / Kernel** | Ubuntu 24.04.4 LTS (Linux 6.8.0-136-generic x86_64) |
 | **Hardware Specs** | 961 MB RAM, ~2.3 GB free disk space (`/dev/vda1`) |
 
@@ -95,7 +95,7 @@ This document provides a complete technical handover for the production VPN/DNS 
 ### Stack 5: Hysteria 2.0
 - **Engine:** Hysteria 2 Docker container
 - **Port:** `3658/udp`
-- **Auth:** Shared password (`weeb-secure-auth-2026`)
+- **Auth:** Shared password (`REDACTED-HYSTERIA-PASSWORD`)
 
 ---
 
