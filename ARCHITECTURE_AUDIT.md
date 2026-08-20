@@ -102,9 +102,9 @@ flow compiler подключён → `b4_manager::B4Manager` (path-MTU конт�
 ## 9. Открытые фичи / blockers (не дубликаты)
 
 1. **NAT/UPnP/management firewall не реализованы** — executor не имеет соответствующих ops.
-2. **B4 TCP reassembly** фрагментированного ClientHello отсутствует (`balansir-b4/src/{engine,packet}.rs`,
-   `extract_tls_sni` возвращает None при фрагментации) — базовое требование пути B4.
-3. **Xray `allowInsecure`** (`daemon/src/xray.rs:208`) несовместим с xray 26.7.28.
+   - Обновление (2026-08-20): gateway datapath (MASQUERADE, IP forwarding, conntrack, mgmt firewall, UPnP DNAT) реализован через `GatewayOp`/`UpnpOp` в executor — закрыто.
+2. **B4 TCP reassembly** фрагментированного ClientHello: реализован (`reassembly.rs`); полные strategy-sets (mission §6, tcp/udp/fragmentation/faking/targets + geosite categories + Discovery §7) добавлены в `set.rs`/`set_apply.rs`/`geosite.rs`/`b4_discovery.rs`.
+3. ~~**Xray `allowInsecure`** (`daemon/src/xray.rs`) несовместим с xray 26.7.28.~~ Закрыто: `allowInsecure: true` отклоняется в `validate()`, в генерируемый конфиг не эмитится; добавлена поддержка xhttp/splithttp транспорта (mission §10).
 4. QEMU slirp: смена MAC активного eth0 рвёт сеть (свойство user-mode networking).
 5. Rootfs VM эфемерный — пересборка: `sync-to-vm.sh 2222` (после commit), builder `/home/builder/br-qemu`, `make balansir-rebuild all`.
 
@@ -118,6 +118,7 @@ flow compiler подключён → `b4_manager::B4Manager` (path-MTU конт�
 | B4 | DPI sniff / path-MTU | `balansir-b4` (engine), `b4_dpi.rs`, `b4_manager.rs` |
 | Xray/VPN | туннели | `xray.rs`/`xray_manager.rs`, `vpn_manager.rs`, `balansir-vpn` |
 | OTA | A/B обновления | `balansir-ota` |
+| WiFi/MPTCP | беспровод/мультипуть | `wifi.rs`/`wifi_manager.rs`, `mptcp.rs`/`mptcp_manager.rs` |
 
 Правило: **новое kernel-касание — только через executor Op**. Daemon никогда
 не вызывает `ip`/`nft` напрямую.
