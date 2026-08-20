@@ -97,9 +97,10 @@
       <tr>
         <th>Interface</th>
         <th>State</th>
+        <th>Device</th>
         <th>MAC</th>
         <th>MTU</th>
-        <th>Speed</th>
+        <th>Link / Max</th>
         <th>Addresses</th>
         <th>RX</th>
         <th>TX</th>
@@ -113,12 +114,30 @@
           <td>
             <strong>{iface.name}</strong>
             {#if iface.qdisc}<span class="tag">{iface.qdisc}</span>{/if}
+            {#if iface.role && iface.role !== 'unknown'}<span class="tag role">{iface.role}</span>{/if}
           </td>
           <td>
             <span class:up={iface.link_up} class:down={!iface.link_up}>
               {iface.link_up ? 'UP' : 'DOWN'}
             </span>
             {#if iface.oper_state}<span class="sub">{iface.oper_state}</span>{/if}
+          </td>
+          <td>
+            {#if iface.device_model}
+              <span class="dev">{iface.device_model}</span>
+              <span class="sub">{iface.if_type || iface.kind || ''}</span>
+            {:else}
+              <span class="sub">{iface.if_type || iface.kind || '—'}</span>
+            {/if}
+            {#if iface.driver}
+              <span class="sub" title="kernel driver">drv {iface.driver}</span>
+            {/if}
+            {#if iface.usb}
+              <span class="tag usb" title="USB-attached adapter">USB</span>
+            {/if}
+            {#if iface.vendor_id}
+              <span class="sub">vid {iface.vendor_id}{iface.product_id ? ':' + iface.product_id : ''}</span>
+            {/if}
           </td>
           <td>
             {iface.mac || '—'}
@@ -147,7 +166,17 @@
             {/if}
           </td>
           <td>{iface.mtu}</td>
-          <td>{iface.speed_mbps ? `${iface.speed_mbps} Mb/s` : '—'}</td>
+          <td>
+            {#if iface.speed_mbps}
+              <span class="speed">{iface.speed_mbps} Mb/s</span>
+              {#if iface.duplex}<span class="sub">{iface.duplex}</span>{/if}
+            {:else}
+              —
+            {/if}
+            {#if iface.max_throughput_mbps}
+              <span class="sub" title="measured max throughput">max {iface.max_throughput_mbps} Mb/s</span>
+            {/if}
+          </td>
           <td class="addr-cell">
             {#each iface.ipv4 as ip}<span class="addr">{ip}</span>{/each}
             {#each iface.ipv6 as ip}<span class="addr ipv6">{ip}</span>{/each}
@@ -158,7 +187,7 @@
           <td>{iface.rx_dropped + iface.tx_dropped}</td>
         </tr>
       {:else}
-        <tr><td colspan="10" class="empty">No interfaces reported</td></tr>
+        <tr><td colspan="11" class="empty">No interfaces reported</td></tr>
       {/each}
     </tbody>
   </table>
@@ -174,6 +203,10 @@
   .down { color: #ff6b6b; font-weight: 700; }
   .sub { color: #5a6a85; font-size: 0.78rem; margin-left: 6px; }
   .tag { background: #0f3460; color: #4cc9f0; border-radius: 4px; padding: 1px 6px; font-size: 0.72rem; margin-left: 6px; }
+  .tag.role { color: #4cd07d; }
+  .tag.usb { color: #ffd166; }
+  .dev { color: #e8ecf4; }
+  .speed { color: #4cc9f0; }
   .addr { display: inline-block; margin: 2px 6px 0 0; background: #0f1524; border-radius: 4px; padding: 1px 6px; font-size: 0.78rem; }
   .addr.ipv6 { color: #c77dff; }
   .empty { color: #5a6a85; text-align: center; padding: 30px; }

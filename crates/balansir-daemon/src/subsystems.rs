@@ -1015,6 +1015,28 @@ impl balansir_common::subsystems::SubsystemControl for ControlImpl {
             None => Err("DPI engine not configured (set BALANSIR_DPI_CONFIG)".to_string()),
         }
     }
+
+    async fn dpi_set_paused(&self, paused: bool) -> Result<(), String> {
+        let dpi = self.manager.dpi.read().await;
+        match dpi.as_ref() {
+            Some(d) => {
+                d.set_enabled(!paused).await?;
+                self.manager.refresh().await;
+                Ok(())
+            }
+            None => Err("DPI engine not configured (set BALANSIR_DPI_CONFIG)".to_string()),
+        }
+    }
+
+    async fn dpi_is_paused(&self) -> bool {
+        self.manager
+            .dpi
+            .read()
+            .await
+            .as_ref()
+            .map(|d| !d.is_enabled())
+            .unwrap_or(true)
+    }
 }
 
 #[cfg(test)]

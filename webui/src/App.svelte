@@ -9,6 +9,8 @@
   import Qos from './views/Qos.svelte';
   import B4 from './views/B4.svelte';
   import Dpi from './views/Dpi.svelte';
+  import Wifi from './views/Wifi.svelte';
+  import Mptcp from './views/Mptcp.svelte';
   import Xray from './views/Xray.svelte';
   import VpnPool from './views/VpnPool.svelte';
   import Tailscale from './views/Tailscale.svelte';
@@ -42,6 +44,8 @@
     { id: 'qos', label: 'QoS', component: Qos },
     { id: 'b4', label: 'B4', component: B4 },
     { id: 'dpi', label: 'DPI', component: Dpi },
+    { id: 'wifi', label: 'Wi-Fi', component: Wifi },
+    { id: 'mptcp', label: 'MPTCP', component: Mptcp },
     { id: 'xray', label: 'Xray', component: Xray },
     { id: 'vpn', label: 'VPN Pool', component: VpnPool },
     { id: 'tailscale', label: 'Tailscale', component: Tailscale },
@@ -73,10 +77,23 @@
       sseState = 'connected';
       reconnectDelay = 1000;
     };
-    es.onmessage = () => {
+    const onEvent = () => {
       lastEventAt = new Date();
       refreshAll();
     };
+    // Named subsystem events do not fire onmessage (only keep-alive pings do);
+    // register listeners so real state changes refresh the dashboard promptly.
+    const namedEvents = [
+      'qos_applied', 'qos_removed', 'qos_drift', 'qos_error',
+      'interface_mac_changed', 'interface_mac_restored', 'interface_error',
+      'tailscale_status_changed', 'tailscale_reconnected', 'tailscale_error',
+      'b4_state_changed', 'b4_adapted', 'b4_recovered', 'b4_drift', 'b4_error',
+      'xray_started', 'xray_stopped', 'xray_switched', 'xray_health_changed', 'xray_error',
+      'vpn_pool_updated', 'vpn_active_changed', 'vpn_pool_error',
+      'resync_required',
+    ];
+    for (const name of namedEvents) es.addEventListener(name, onEvent);
+    es.onmessage = onEvent;
     es.onerror = () => {
       sseState = 'disconnected';
       es.close();

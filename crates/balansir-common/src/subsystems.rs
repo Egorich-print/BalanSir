@@ -639,4 +639,8 @@ pub trait SubsystemControl: Send + Sync {
     /// Notify B4 Discovery that a domain is blocked/interfered; runs a bounded
     /// strategy search and returns the selected strategy name (if any).
     async fn b4_notify_discovery(&self, domain: &str) -> Result<Option<String>, String>;
+    /// Pause/resume the DPI-bypass engine (stop/start + queue rules).
+    async fn dpi_set_paused(&self, paused: bool) -> Result<(), String>;
+    /// Whether the DPI-bypass engine is currently running.
+    async fn dpi_is_paused(&self) -> bool;
 }

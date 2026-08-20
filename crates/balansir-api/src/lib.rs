@@ -145,6 +145,7 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/b4", get(subsystems::get_b4))
         .route("/b4/pause", post(subsystems::set_b4_paused))
         .route("/dpi", get(subsystems::get_dpi))
+        .route("/dpi/pause", post(subsystems::set_dpi_paused))
         .route("/b4/discovery", get(subsystems::get_b4_discovery))
         .route(
             "/b4/discovery/notify",

@@ -78,7 +78,7 @@
         <thead><tr><th>ID</th><th>Action</th><th>Priority</th></tr></thead>
         <tbody>
           {#each actual.rules as r}
-            <tr><td>#{r.id}</td><td>{r.action}</td><td>P{r.priority}</td></tr>
+            <tr><td>#{r.id}</td><td>{r.action}</td><td>{r.priority != null ? `P${r.priority}` : '—'}</td></tr>
           {/each}
         </tbody>
       </table>

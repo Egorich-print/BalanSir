@@ -11,7 +11,9 @@
   async function loadHistory() {
     try {
       const list = await api.events();
-      events = Array.isArray(list) ? list.slice(-limit).reverse() : [];
+      // Backend returns { events: [...], count: N }; unwrap it.
+      const arr = Array.isArray(list) ? list : (list && list.events) || [];
+      events = Array.isArray(arr) ? arr.slice(-limit).reverse() : [];
     } catch (e) {
       events = [{ timestamp: Date.now() / 1000, event_type: 'error', details: `Cannot load history: ${e.message}` }];
     }
@@ -20,21 +22,56 @@
   let es = null;
   let reconnectDelay = 1000;
 
+  function handleSSEMessage(event) {
+    let payload = {};
+    try { payload = JSON.parse(event.data); } catch (e) { /* keep raw */ }
+    // The backend sends named events (`event: qos_applied` etc.) which do NOT
+    // fire onmessage; listen for them explicitly. Data-only events fall back
+    // to the generic message type.
+    const type = event.type || 'message';
+    let detail = payload;
+    if (type === 'message' && event.data === 'ping') {
+      return; // keep-alive pings are not events
+    }
+    subsystemEvents = [
+      {
+        timestamp: Date.now() / 1000,
+        event_type: type,
+        details: typeof detail === 'string' ? detail : JSON.stringify(detail),
+      },
+      ...subsystemEvents,
+    ].slice(0, 100);
+  }
+
   function connect() {
     es = new EventSource(subsystemEventUrl());
     es.onopen = () => (reconnectDelay = 1000);
-    es.onmessage = (event) => {
-      let payload = {};
-      try { payload = JSON.parse(event.data); } catch (e) { /* keep raw */ }
-      subsystemEvents = [
-        {
-          timestamp: Date.now() / 1000,
-          event_type: event.type || 'message',
-          details: JSON.stringify(payload),
-        },
-        ...subsystemEvents,
-      ].slice(0, 100);
-    };
+    es.onmessage = handleSSEMessage;
+    // Named events do not trigger onmessage; register a listener for them.
+    es.addEventListener('qos_applied', handleSSEMessage);
+    es.addEventListener('qos_removed', handleSSEMessage);
+    es.addEventListener('qos_drift', handleSSEMessage);
+    es.addEventListener('qos_error', handleSSEMessage);
+    es.addEventListener('interface_mac_changed', handleSSEMessage);
+    es.addEventListener('interface_mac_restored', handleSSEMessage);
+    es.addEventListener('interface_error', handleSSEMessage);
+    es.addEventListener('tailscale_status_changed', handleSSEMessage);
+    es.addEventListener('tailscale_reconnected', handleSSEMessage);
+    es.addEventListener('tailscale_error', handleSSEMessage);
+    es.addEventListener('b4_state_changed', handleSSEMessage);
+    es.addEventListener('b4_adapted', handleSSEMessage);
+    es.addEventListener('b4_recovered', handleSSEMessage);
+    es.addEventListener('b4_drift', handleSSEMessage);
+    es.addEventListener('b4_error', handleSSEMessage);
+    es.addEventListener('xray_started', handleSSEMessage);
+    es.addEventListener('xray_stopped', handleSSEMessage);
+    es.addEventListener('xray_switched', handleSSEMessage);
+    es.addEventListener('xray_health_changed', handleSSEMessage);
+    es.addEventListener('xray_error', handleSSEMessage);
+    es.addEventListener('vpn_pool_updated', handleSSEMessage);
+    es.addEventListener('vpn_active_changed', handleSSEMessage);
+    es.addEventListener('vpn_pool_error', handleSSEMessage);
+    es.addEventListener('resync_required', handleSSEMessage);
     es.onerror = () => {
       es.close();
       setTimeout(connect, reconnectDelay);

@@ -51,6 +51,36 @@ export const api = {
   setB4Paused: (paused) =>
     req('/b4/pause', { method: 'POST', body: JSON.stringify({ paused }) }),
   dpi: () => req('/dpi'),
+  setDpiPaused: (paused) =>
+    req('/dpi/pause', { method: 'POST', body: JSON.stringify({ paused }) }),
+  b4Discovery: () => req('/b4/discovery'),
+  notifyB4Discovery: (domain) =>
+    req('/b4/discovery/notify', {
+      method: 'POST',
+      body: JSON.stringify({ domain }),
+    }),
+
+  wifi: () => req('/wifi'),
+  wifiScan: (iface) =>
+    req('/wifi/scan', { method: 'POST', body: JSON.stringify({ interface: iface }) }),
+  wifiConnect: (body) =>
+    req('/wifi/connect', { method: 'POST', body: JSON.stringify(body) }),
+  wifiDisconnect: (iface) =>
+    req('/wifi/disconnect', {
+      method: 'POST',
+      body: JSON.stringify({ interface: iface }),
+    }),
+  mptcp: () => req('/mptcp'),
+  setMptcpEnabled: (enabled) =>
+    req('/mptcp/enabled', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
+  setMptcpEndpoints: (endpoints) =>
+    req('/mptcp/endpoints', {
+      method: 'POST',
+      body: JSON.stringify({ endpoints }),
+    }),
 
   xray: () => req('/xray'),
   setXrayPaused: (paused) =>

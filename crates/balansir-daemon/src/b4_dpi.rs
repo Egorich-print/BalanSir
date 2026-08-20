@@ -363,4 +363,22 @@ impl DpiManager {
     pub fn notify_blocked(&self, domain: &str) {
         self.discovery.on_blocked(domain);
     }
+
+    /// Pause/resume the engine. Pausing stops the interception loop and removes
+    /// the queue rules (traffic returns to the direct path); resuming restarts
+    /// both. Honest: if the engine cannot be restarted the pause stays in
+    /// effect and an error is returned.
+    pub async fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+        if enabled {
+            self.start().await
+        } else {
+            self.stop().await;
+            Ok(())
+        }
+    }
+
+    /// Whether the engine is currently running (enabled).
+    pub fn is_enabled(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
 }

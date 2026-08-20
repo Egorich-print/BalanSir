@@ -22,10 +22,36 @@
     }
   }
 
+  function formatUptime(secs) {
+    if (!secs && secs !== 0) return '—';
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = Math.floor(secs % 60);
+    const parts = [];
+    if (d > 0) parts.push(`${d}d`);
+    if (h > 0) parts.push(`${h}h`);
+    if (m > 0) parts.push(`${m}m`);
+    parts.push(`${s}s`);
+    return parts.join(' ');
+  }
+
+  function fmtMem(mb) {
+    // Backend reports MB; show GiB for readability (matches Dashboard).
+    if (mb === undefined || mb === null) return '—';
+    return `${(mb / 1024).toFixed(1)} GiB`;
+  }
+
   onMount(() => {
     refresh();
-    const timer = setInterval(refresh, 2000);
-    return () => clearInterval(refreshTimer);
+    refreshTimer = setInterval(refresh, 2000);
+    return () => {
+      if (refreshTimer) clearInterval(refreshTimer);
+    };
+  });
+
+  onDestroy(() => {
+    if (refreshTimer) clearInterval(refreshTimer);
   });
 
   function usageBar(used, total) {
@@ -92,14 +118,14 @@
       <header>
         <h2>Memory</h2>
         <span class="subtitle">
-          {fmtBytes(system?.memory?.used_mb)} / {fmtBytes(system?.memory?.total_mb)}
+          {fmtMem(system?.memory?.used_mb)} / {fmtMem(system?.memory?.total_mb)}
         </span>
       </header>
       <div class="usage-bar">
         <div class="usage-fill" style="width: {memPct()}%"></div>
       </div>
       <div class="usage-label">
-        {fmtBytes(system?.memory?.used_mb)} used / {fmtBytes(system?.memory?.total_mb)} total ({memPct()}%)
+        {fmtMem(system?.memory?.used_mb)} used / {fmtMem(system?.memory?.total_mb)} total ({memPct()}%)
       </div>
     </section>
 
@@ -152,9 +178,9 @@
                 <tr class={fsClass(fs)}>
                   <td>{fs.mount_point}</td>
                   <td>{fs.fstype}</td>
-                  <td class="right">{fmtBytes(fs.total_mb)}</td>
-                  <td class="right">{fmtBytes(fs.used_mb)}</td>
-                  <td class="right">{fmtBytes(fs.available_mb)}</td>
+                  <td class="right">{fmtMem(fs.total_mb)}</td>
+                  <td class="right">{fmtMem(fs.used_mb)}</td>
+                  <td class="right">{fmtMem(fs.available_mb)}</td>
                   <td>
                     <div class="mini-bar">
                       <div class="mini-fill {fsClass(fs)}" style="width: {fsPct(fs)}%"></div>
@@ -194,12 +220,6 @@
         {:else}
           <p class="empty">No interface rate data</p>
       {/if}
-    </section>
-
-    <!-- Uptime -->
-    <section class="panel uptime small">
-      <header><h2>Uptime</h2></header>
-      <div class="uptime-value">{formatUptime(system?.uptime_secs)}</div>
     </section>
   </div>
 </div>

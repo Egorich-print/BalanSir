@@ -196,6 +196,27 @@ pub async fn notify_b4_discovery(
     }
 }
 
+/// `POST /dpi/pause` — pause/resume the DPI-bypass engine (stop/start the
+/// NFQUEUE loop and its queue rules; traffic returns to the direct path while
+/// paused).
+pub async fn set_dpi_paused(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let paused = match body.get("paused").and_then(|v| v.as_bool()) {
+        Some(p) => p,
+        None => return error_response("body requires \"paused\": true|false"),
+    };
+    match control.dpi_set_paused(paused).await {
+        Ok(()) => Json(serde_json::json!({ "paused": paused })).into_response(),
+        Err(e) => error_response(&e),
+    }
+}
+
 /// `POST /b4/pause` — pause/resume the B4 adaptation engine.
 pub async fn set_b4_paused(
     State(state): State<Arc<ApiState>>,
