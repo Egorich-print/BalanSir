@@ -104,10 +104,8 @@ impl IwWifiBackend {
                     if n.security.is_empty() || n.security == "open" {
                         n.security = "wpa2/wpa3".to_string();
                     }
-                } else if line.starts_with("capability") {
-                    if n.security.is_empty() {
-                        n.security = "open".to_string();
-                    }
+                } else if line.starts_with("capability") && n.security.is_empty() {
+                    n.security = "open".to_string();
                 }
             }
         }

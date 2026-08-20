@@ -369,15 +369,15 @@ pub fn build_fake_quic_packet(
     pkt
 }
 
-/// Fast pseudo-random byte (xorshift seeded from the address/time). Determinism
-/// is not needed; we just need cheap, varied bytes for the fake payload.
+/// Fast pseudo-random byte. Determinism is not needed; we just need cheap,
+/// varied bytes for the fake payload.
 fn fastrand_byte() -> u8 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    ((nanos as u32 >> 3) as u8) ^ ((nanos as u32 >> 11) as u8)
+    ((nanos >> 3) as u8) ^ ((nanos >> 11) as u8)
 }
 
 /// Compute the UDP checksum (with IPv4 pseudo-header).

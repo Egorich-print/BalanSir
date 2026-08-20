@@ -125,10 +125,11 @@ impl ConnectivityProbe for TcpTlsProbe {
             });
         // TCP handshake reached the server = the site loads (the safe,
         // bounded, dependency-free proxy the mission allows).
-        TcpStream::connect_timeout(&addr, self.timeout)
-            .is_ok()
-            .then_some(1.0)
-            .unwrap_or(0.0)
+        if TcpStream::connect_timeout(&addr, self.timeout).is_ok() {
+            1.0
+        } else {
+            0.0
+        }
     }
 }
 
@@ -141,6 +142,12 @@ pub struct B4Discovery {
     probe: Box<dyn ConnectivityProbe>,
     /// Active trial count (global budget).
     active_trials: usize,
+}
+
+impl Default for B4Discovery {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl B4Discovery {
@@ -387,6 +394,12 @@ pub struct DiscoveryManager {
     enabled: std::sync::atomic::AtomicBool,
 }
 
+impl Default for DiscoveryManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DiscoveryManager {
     pub fn new() -> Self {
         Self {
@@ -458,12 +471,6 @@ impl DiscoveryManager {
             domains: inner.state(),
             last_error: None,
         }
-    }
-}
-
-impl Default for DiscoveryManager {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
