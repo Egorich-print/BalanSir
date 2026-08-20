@@ -62,6 +62,16 @@ pub enum Transport {
         path: String,
         host: Option<String>,
     },
+    /// XHTTP (a.k.a. splithttp / split-http): the modern CDN-friendly
+    /// HTTP/2-based transport used by current Xray servers (mission §10).
+    /// `mode` is `"auto"` | `"packet-up"` | `"stream-up"`; `extra` is optional
+    /// opaque JSON (e.g. `{"maxConcurrency":8,"mode":"auto"}`).
+    Xhttp {
+        path: String,
+        host: Option<String>,
+        mode: Option<String>,
+        extra: Option<String>,
+    },
 }
 
 impl Transport {
@@ -72,6 +82,7 @@ impl Transport {
             Transport::WebSocket { .. } => "ws",
             Transport::Grpc { .. } => "grpc",
             Transport::HttpUpgrade { .. } => "httpupgrade",
+            Transport::Xhttp { .. } => "xhttp",
         }
     }
 }

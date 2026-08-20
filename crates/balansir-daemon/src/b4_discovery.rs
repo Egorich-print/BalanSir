@@ -27,7 +27,7 @@
 use balansir_b4::set::B4Set;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Discovery configuration (bounded by default — never a runaway search).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,7 +141,6 @@ pub struct B4Discovery {
     probe: Box<dyn ConnectivityProbe>,
     /// Active trial count (global budget).
     active_trials: usize,
-    started: Instant,
 }
 
 impl B4Discovery {
@@ -158,7 +157,6 @@ impl B4Discovery {
             candidate_sets: build_candidate_sets(),
             probe,
             active_trials: 0,
-            started: Instant::now(),
         }
     }
 

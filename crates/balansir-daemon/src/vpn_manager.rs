@@ -58,6 +58,17 @@ pub fn profile_to_xray_config(
             path: path.clone(),
             host: host.clone(),
         },
+        Transport::Xhttp {
+            path,
+            host,
+            mode,
+            extra,
+        } => XrayTransport::Xhttp {
+            path: path.clone(),
+            host: host.clone(),
+            mode: mode.clone(),
+            extra: extra.clone(),
+        },
     };
     let security = match profile.security {
         Security::None => XraySecurity::None,

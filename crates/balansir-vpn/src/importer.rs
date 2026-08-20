@@ -151,6 +151,30 @@ pub fn parse_line(line: &str, source: &str, source_ts_ms: i64) -> Result<VpnProf
                 host,
             }
         }
+        "xhttp" | "splithttp" | "split_http" => {
+            let path = uri.get("path").unwrap_or("/");
+            if !path.starts_with('/') {
+                return Err("xhttp path must start with '/'".into());
+            }
+            let host = uri
+                .get("host")
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let mode = uri
+                .get("mode")
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let extra = uri
+                .get("extra")
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            Transport::Xhttp {
+                path: path.to_string(),
+                host,
+                mode,
+                extra,
+            }
+        }
         other => return Err(format!("unsupported transport type '{other}'")),
     };
 
@@ -162,16 +186,16 @@ pub fn parse_line(line: &str, source: &str, source_ts_ms: i64) -> Result<VpnProf
         "reality" => Security::Reality,
         other => return Err(format!("unsupported security '{other}'")),
     };
-    // SNI: explicit `sni=` wins; for WS/HttpUpgrade TLS configs the VLESS
-    // share-URI convention derives the effective SNI from the `host=` param
-    // (the fronting domain) when `sni` is absent.
+    // SNI: explicit `sni=` wins; for WS/HttpUpgrade/Xhttp TLS configs the
+    // VLESS share-URI convention derives the effective SNI from the `host=`
+    // param (the fronting domain) when `sni` is absent.
     let sni = uri
         .get("sni")
         .filter(|s| !s.is_empty())
         .or_else(|| match &transport {
-            Transport::WebSocket { host, .. } | Transport::HttpUpgrade { host, .. } => {
-                host.as_deref().filter(|s| !s.is_empty())
-            }
+            Transport::WebSocket { host, .. }
+            | Transport::HttpUpgrade { host, .. }
+            | Transport::Xhttp { host, .. } => host.as_deref().filter(|s| !s.is_empty()),
             _ => None,
         })
         .map(|s| s.to_string());
@@ -445,12 +469,25 @@ mod tests {
             assert!(err.contains("unsupported scheme"), "{line}: {err}");
         }
 
-        // 8. Unsupported transport (xhttp — large share of the corpus).
+        // 8. xhttp transport is now supported (mission §10) — parses into the
+        //    Xhttp variant with mode/extra preserved.
+        let profile = parse_line(
+            "vless://11111111-2222-4333-8444-555555555555@203.0.113.60:443?type=xhttp&security=reality&sni=x.example.com&pbk=TEST_PUBLIC_KEY_PLACEHOLDER_0000000000000&mode=auto&path=%2Fws#xhttp",
+            "fixture", TS,
+        ).unwrap();
+        match &profile.transport {
+            Transport::Xhttp { path, mode, .. } => {
+                assert_eq!(path, "/ws");
+                assert_eq!(mode.as_deref(), Some("auto"));
+            }
+            other => panic!("expected xhttp transport, got {other:?}"),
+        }
+        // A bare unknown transport is still rejected honestly.
         let err = parse_line(
-            "vless://11111111-2222-4333-8444-555555555555@203.0.113.60:443?type=xhttp&security=reality&sni=x.example.com&pbk=TEST_PUBLIC_KEY_PLACEHOLDER_0000000000000#xhttp",
+            "vless://11111111-2222-4333-8444-555555555555@203.0.113.60:443?type=weird&security=none#x",
             "fixture", TS,
         ).unwrap_err();
-        assert!(err.contains("xhttp"));
+        assert!(err.contains("unsupported transport"), "{err}");
     }
 
     #[test]

@@ -58,6 +58,15 @@ pub enum XrayTransport {
         /// Optional `Host` header (fronting domain from the source config).
         host: Option<String>,
     },
+    /// XHTTP (splithttp): the modern CDN-friendly HTTP/2 transport. `mode` is
+    /// `"auto"`/`"packet-up"`/`"stream-up"`; `extra` is optional opaque JSON.
+    Xhttp {
+        path: String,
+        /// Optional `Host` header (fronting domain from the source config).
+        host: Option<String>,
+        mode: Option<String>,
+        extra: Option<String>,
+    },
 }
 
 /// TLS layer: plain TLS (server name + optional certificate pinning) or
@@ -133,7 +142,9 @@ impl XrayConfig {
             ));
         }
         match &self.transport {
-            XrayTransport::WebSocket { path, .. } | XrayTransport::HttpUpgrade { path, .. } => {
+            XrayTransport::WebSocket { path, .. }
+            | XrayTransport::HttpUpgrade { path, .. }
+            | XrayTransport::Xhttp { path, .. } => {
                 if !path.starts_with('/') {
                     return Err(DriverError::ConfigInvalid(format!(
                         "xray transport path {path:?} must start with '/'"
@@ -204,6 +215,7 @@ fn transport_network(config: &XrayConfig) -> &'static str {
         XrayTransport::WebSocket { .. } => "ws",
         XrayTransport::Grpc { .. } => "grpc",
         XrayTransport::HttpUpgrade { .. } => "httpupgrade",
+        XrayTransport::Xhttp { .. } => "xhttp",
     }
 }
 
@@ -302,6 +314,36 @@ impl XrayDriver {
                     }
                 }
                 stream.insert("httpupgradeSettings".into(), hu);
+            }
+            XrayTransport::Xhttp {
+                path,
+                host,
+                mode,
+                extra,
+            } => {
+                // XHTTP settings: path (required), optional host/mode and
+                // optional `extra` JSON (e.g. {"maxConcurrency":8}). Emitted
+                // via serde so no string interpolation can break the JSON.
+                let mut xh = serde_json::Map::new();
+                xh.insert("path".into(), serde_json::json!(path));
+                if let Some(host) = host {
+                    if !host.is_empty() {
+                        xh.insert("host".into(), serde_json::json!(host));
+                    }
+                }
+                if let Some(mode) = mode {
+                    if !mode.is_empty() {
+                        xh.insert("mode".into(), serde_json::json!(mode));
+                    }
+                }
+                if let Some(extra) = extra {
+                    if !extra.is_empty() {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(extra) {
+                            xh.insert("extra".into(), parsed);
+                        }
+                    }
+                }
+                stream.insert("xhttpSettings".into(), serde_json::Value::Object(xh));
             }
             XrayTransport::Tcp => {}
         }
@@ -643,6 +685,49 @@ mod tests {
         assert_eq!(json["inbounds"][0]["port"], 10808);
         assert_eq!(json["inbounds"][1]["port"], 10809);
         assert_eq!(json["inbounds"][0]["listen"], "127.0.0.1");
+    }
+
+    #[test]
+    fn generate_config_xhttp_transport() {
+        // Mission §10: xhttp (splithttp) must be fully supported in the
+        // runtime config — lifecycle/health/integration use the same driver.
+        let mut cfg = sample_config();
+        cfg.transport = XrayTransport::Xhttp {
+            path: "/vless".to_string(),
+            host: Some("cdn.example.com".to_string()),
+            mode: Some("auto".to_string()),
+            extra: Some(r#"{"maxConcurrency":8}"#.to_string()),
+        };
+        cfg.security = XraySecurity::Tls(XrayTls {
+            server_name: "cdn.example.com".to_string(),
+            pinned_peer_cert_sha256: None,
+            verify_peer_cert_by_name: None,
+            allow_insecure: false,
+        });
+        assert!(cfg.validate().is_ok());
+        let driver = XrayDriver::new(DriverId::Xray, cfg);
+        let json: serde_json::Value =
+            serde_json::from_str(&driver.generate_config()).expect("valid JSON");
+        let out = &json["outbounds"][0];
+        assert_eq!(out["streamSettings"]["network"], "xhttp");
+        assert_eq!(out["streamSettings"]["security"], "tls");
+        let xh = &out["streamSettings"]["xhttpSettings"];
+        assert_eq!(xh["path"], "/vless");
+        assert_eq!(xh["host"], "cdn.example.com");
+        assert_eq!(xh["mode"], "auto");
+        assert_eq!(xh["extra"]["maxConcurrency"], 8);
+    }
+
+    #[test]
+    fn xhttp_path_must_start_with_slash() {
+        let mut cfg = sample_config();
+        cfg.transport = XrayTransport::Xhttp {
+            path: "no-slash".to_string(),
+            host: None,
+            mode: None,
+            extra: None,
+        };
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
