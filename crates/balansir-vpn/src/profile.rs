@@ -139,6 +139,12 @@ pub struct VpnProfile {
     /// Client fingerprint (`fp=`), kept for runtime config fidelity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// Optional SHA-256 fingerprint(s) of the server certificate (comma-
+    /// separated hex). When set, the runtime pins the peer certificate instead
+    /// of trusting any cert chained to the system store — reduces trust in
+    /// untrusted subscription endpoints (mission §9).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned_peer_cert_sha256: Option<String>,
     /// Human label from the source URI fragment (may be percent-encoded).
     pub label: String,
     /// Source identifier (which subscription file / URL produced this).

@@ -1670,6 +1670,7 @@ priority = 20
             flow: Some("xtls-rprx-vision".into()),
             uuid: "11111111-2222-3333-4444-555555555555".into(),
             fingerprint: None,
+            pinned_peer_cert_sha256: None,
             label: "test".into(),
             source: "test".into(),
             source_ts_ms: 0,

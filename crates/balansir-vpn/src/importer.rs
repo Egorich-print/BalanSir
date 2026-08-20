@@ -219,6 +219,27 @@ pub fn parse_line(line: &str, source: &str, source_ts_ms: i64) -> Result<VpnProf
         .get("fp")
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    // Certificate pinning (mission §9): `pinSHA256`/`pinnedPeerCertSha256`
+    // carry comma-separated SHA-256 fingerprints. Validate the hex form so a
+    // malformed pin is rejected, not silently dropped (a bad pin is a trust
+    // decision the operator must see).
+    let pinned_peer_cert_sha256 = uri
+        .get("pinSHA256")
+        .or_else(|| uri.get("pinnedPeerCertSha256"))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .map(|s| {
+            let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
+            if parts
+                .iter()
+                .all(|p| p.len() == 64 && p.chars().all(|c| c.is_ascii_hexdigit()))
+            {
+                Ok(parts.join(","))
+            } else {
+                Err(format!("invalid certificate pin sha256: {s}"))
+            }
+        })
+        .transpose()?;
 
     let label = uri.fragment.unwrap_or_default();
     let label = if label.trim().is_empty() {
@@ -240,6 +261,7 @@ pub fn parse_line(line: &str, source: &str, source_ts_ms: i64) -> Result<VpnProf
         flow,
         uuid,
         fingerprint,
+        pinned_peer_cert_sha256,
         label,
         source: source.to_string(),
         source_ts_ms,
@@ -488,6 +510,26 @@ mod tests {
             "fixture", TS,
         ).unwrap_err();
         assert!(err.contains("unsupported transport"), "{err}");
+    }
+
+    #[test]
+    fn certificate_pin_is_validated_and_parsed() {
+        // Valid pin → carried on the profile.
+        let profile = parse_line(
+            "vless://11111111-2222-4333-8444-555555555555@203.0.113.60:443?security=tls&sni=x.example.com&pinSHA256=e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9#pinned",
+            "fixture", TS,
+        ).unwrap();
+        assert_eq!(
+            profile.pinned_peer_cert_sha256.as_deref(),
+            Some("e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9")
+        );
+
+        // Malformed pin → rejected loudly (never silently dropped).
+        let err = parse_line(
+            "vless://11111111-2222-4333-8444-555555555555@203.0.113.60:443?security=tls&sni=x.example.com&pinSHA256=not-a-sha#bad",
+            "fixture", TS,
+        ).unwrap_err();
+        assert!(err.contains("pin"), "{err}");
     }
 
     #[test]

@@ -77,7 +77,10 @@ pub fn profile_to_xray_config(
                 .sni
                 .clone()
                 .unwrap_or_else(|| profile.server.clone()),
-            pinned_peer_cert_sha256: None,
+            // Pool-imported profiles may carry a certificate pin (mission §9):
+            // when present, the runtime pins the peer cert instead of trusting
+            // the system store — reduces trust in untrusted endpoints.
+            pinned_peer_cert_sha256: profile.pinned_peer_cert_sha256.clone(),
             verify_peer_cert_by_name: None,
             allow_insecure: false,
         }),
@@ -144,6 +147,7 @@ pub struct VpnToml {
 
 /// Pool tunables exposed in the config file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PoolToml {
     pub min_dwell_secs: Option<u64>,
     pub failure_cooldown_secs: Option<u64>,
@@ -388,6 +392,16 @@ impl VpnManager {
             let is_path =
                 trimmed.starts_with('/') || trimmed.starts_with("./") || trimmed.starts_with("../");
             if is_path {
+                // Bound the local file the same way as a remote subscription
+                // (1 MiB) so a malicious/oversized file cannot exhaust memory.
+                let md = std::fs::metadata(trimmed)
+                    .map_err(|e| format!("stat local source {trimmed}: {e}"))?;
+                if md.len() > 1024 * 1024 {
+                    return Err(format!(
+                        "local source {trimmed} is {} bytes (max 1 MiB)",
+                        md.len()
+                    ));
+                }
                 body = std::fs::read_to_string(trimmed)
                     .map_err(|e| format!("read local source {trimmed}: {e}"))?;
             } else {
@@ -1135,6 +1149,7 @@ vless://194302fe-9c53-4203-b17e-c0b30a4d79b6@b.example.com:443?security=none&typ
             flow: None,
             uuid: "194302fe-9c53-4203-b17e-c0b30a4d79b6".into(),
             fingerprint: None,
+            pinned_peer_cert_sha256: None,
             label: "A".into(),
             source: "test".into(),
             source_ts_ms: 0,

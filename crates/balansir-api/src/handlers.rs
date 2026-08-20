@@ -308,23 +308,25 @@ pub async fn get_actual(State(state): State<Arc<ApiState>>) -> impl IntoResponse
     };
 
     let mut rules: Vec<serde_json::Value> = Vec::with_capacity(actual.active_rules.len());
-        for r in &actual.active_rules {
-            // Priority is not part of the executor's actual rule inventory (the
-            // executor knows verdicts, not policy priority). Map it from the
-            // desired rules so the WebUI renders P<priority> honestly.
-            let priority = match r.rule_id {
-                Some(id) => plane.desired().await.ok().and_then(|d| {
-                    d.rules.iter().find(|dr| dr.id == id).map(|dr| dr.priority)
-                }),
-                None => None,
-            };
-            rules.push(serde_json::json!({
-                "id": r.id,
-                "action": format!("{:?}", r.action),
-                "rule_id": r.rule_id,
-                "priority": priority,
-            }));
-        }
+    for r in &actual.active_rules {
+        // Priority is not part of the executor's actual rule inventory (the
+        // executor knows verdicts, not policy priority). Map it from the
+        // desired rules so the WebUI renders P<priority> honestly.
+        let priority = match r.rule_id {
+            Some(id) => plane
+                .desired()
+                .await
+                .ok()
+                .and_then(|d| d.rules.iter().find(|dr| dr.id == id).map(|dr| dr.priority)),
+            None => None,
+        };
+        rules.push(serde_json::json!({
+            "id": r.id,
+            "action": format!("{:?}", r.action),
+            "rule_id": r.rule_id,
+            "priority": priority,
+        }));
+    }
 
     Json(serde_json::json!({
         "rules": rules,
