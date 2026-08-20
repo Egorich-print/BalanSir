@@ -54,7 +54,7 @@ BalanSir — декларативный движок принятия решен
 ## 4. Числовые показатели аудита
 
 - Исходных `.rs` файлов: 52 (на момент аудита)
-- Тестов проходит: 381 workspace-тестов (2026-08-19), в т.ч. 231 в `balansir-daemon`,
+- Тестов проходит: 432 workspace-тестов (2026-08-20), в т.ч. 196 в `balansir-daemon`,
   29 в `balansir-vpn`, 5 ignored под root
 - CI: GitHub Actions — `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`
   на stable + nightly; кросс-сборка x86_64/aarch64/riscv64-musl; релиз по тегу.

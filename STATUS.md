@@ -406,7 +406,7 @@ BalanSir — это декларативный движок принятия р�
 
 **Repository:** https://github.com/Egorich-print/BalanSir
 
-**Tests:** 381 passing (2026-08-19), 5 ignored (require root); incl. 231 daemon, 29 vpn
+**Tests:** 432 passing (2026-08-20), 5 ignored (require root); incl. 194 daemon, 30 vpn
 
 ## Docker
 
