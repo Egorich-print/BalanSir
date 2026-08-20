@@ -114,6 +114,9 @@ pub struct DpiSnapshot {
     #[serde(default)]
     pub engine_dead: bool,
     pub last_error: Option<String>,
+    /// B4 Discovery state (mission §7): auto-selected strategies per domain.
+    #[serde(default)]
+    pub discovery: DiscoveryView,
 }
 
 /// B4 component view: policy intent, per-flow adaptation state, ownership
@@ -458,6 +461,39 @@ pub struct MptcpSubsystemView {
     pub busy: bool,
 }
 
+/// B4 Discovery view (mission §7): auto-selected bypass strategies per domain.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiscoveryView {
+    pub enabled: bool,
+    #[serde(default)]
+    pub domains: Vec<DiscoveryDomainView>,
+    pub last_error: Option<String>,
+}
+
+/// One domain's Discovery state in the view model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiscoveryDomainView {
+    pub domain: String,
+    pub active: Option<String>,
+    /// Candidate names with their status.
+    #[serde(default)]
+    pub candidates: Vec<DiscoveryCandidateView>,
+    pub selected_ms: i64,
+    pub validated_ms: i64,
+    pub observed_blocked: bool,
+    pub last_event: Option<String>,
+}
+
+/// One candidate's Discovery state in the view model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiscoveryCandidateView {
+    pub name: String,
+    pub status: String,
+    pub quality: f64,
+    pub rejected_reason: Option<String>,
+    pub trial_ends_ms: i64,
+}
+
 /// A consistent point-in-time view of all non-policy subsystems.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubsystemSnapshot {
@@ -600,4 +636,7 @@ pub trait SubsystemControl: Send + Sync {
         &self,
         endpoints: Vec<(String, String)>,
     ) -> Result<crate::network::MptcpResult, String>;
+    /// Notify B4 Discovery that a domain is blocked/interfered; runs a bounded
+    /// strategy search and returns the selected strategy name (if any).
+    async fn b4_notify_discovery(&self, domain: &str) -> Result<Option<String>, String>;
 }

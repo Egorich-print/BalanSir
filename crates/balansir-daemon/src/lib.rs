@@ -1,3 +1,4 @@
+pub mod b4_discovery;
 pub mod b4_dpi;
 pub mod b4_engine;
 pub mod b4_manager;

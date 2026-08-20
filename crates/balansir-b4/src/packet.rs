@@ -104,6 +104,11 @@ impl TcpPacket {
         ])
     }
 
+    /// Set the TCP sequence number in place.
+    pub fn set_tcp_seq(&mut self, seq: u32) {
+        self.raw[self.tcp_offset + 4..self.tcp_offset + 8].copy_from_slice(&seq.to_be_bytes());
+    }
+
     /// TCP flags byte (byte 13 of the TCP header). Lower bits are FIN/SYN/RST/
     /// PSH/ACK/URG/ECE/CWR.
     pub fn tcp_flags(&self) -> u8 {
@@ -234,6 +239,244 @@ pub fn fix_ipv4_checksum(pkt: &mut TcpPacket) {
     pkt.raw[10..12].copy_from_slice(&csum.to_be_bytes());
 }
 
+/// A parsed IPv4+UDP packet (used by the UDP faking plane).
+#[derive(Debug, Clone)]
+pub struct UdpPacket {
+    pub raw: Vec<u8>,
+    pub ip_header_len: usize,
+    pub udp_offset: usize,
+    pub udp_len: usize,
+}
+
+impl UdpPacket {
+    /// Try to parse `raw` as IPv4+UDP. Returns None if not UDP or malformed.
+    pub fn parse(raw: &[u8]) -> Option<Self> {
+        if raw.len() < 20 {
+            return None;
+        }
+        let ver_ihl = raw[0];
+        if ver_ihl >> 4 != 4 {
+            return None;
+        }
+        let ip_header_len = ((ver_ihl & 0x0f) as usize) * 4;
+        if ip_header_len < 20 || raw.len() < ip_header_len {
+            return None;
+        }
+        let proto = raw[9];
+        if proto != 17 {
+            return None; // UDP only
+        }
+        let ip_total_len = u16::from_be_bytes([raw[2], raw[3]]) as usize;
+        if ip_total_len < ip_header_len || raw.len() < ip_total_len {
+            return None;
+        }
+        let udp_offset = ip_header_len;
+        if raw.len() < udp_offset + 8 {
+            return None;
+        }
+        let udp_len = u16::from_be_bytes([raw[udp_offset + 4], raw[udp_offset + 5]]) as usize;
+        if udp_len < 8 || raw.len() < udp_offset + udp_len {
+            return None;
+        }
+        Some(Self {
+            raw: raw.to_vec(),
+            ip_header_len,
+            udp_offset,
+            udp_len,
+        })
+    }
+
+    /// Destination port.
+    pub fn dst_port(&self) -> u16 {
+        u16::from_be_bytes([self.raw[self.udp_offset + 2], self.raw[self.udp_offset + 3]])
+    }
+
+    /// Source port.
+    pub fn src_port(&self) -> u16 {
+        u16::from_be_bytes([self.raw[self.udp_offset], self.raw[self.udp_offset + 1]])
+    }
+
+    /// IPv4 source address.
+    pub fn src_ip(&self) -> [u8; 4] {
+        [self.raw[12], self.raw[13], self.raw[14], self.raw[15]]
+    }
+
+    /// IPv4 destination address.
+    pub fn dst_ip(&self) -> [u8; 4] {
+        [self.raw[16], self.raw[17], self.raw[18], self.raw[19]]
+    }
+
+    /// UDP payload bytes.
+    pub fn payload(&self) -> &[u8] {
+        &self.raw[self.udp_offset + 8..self.udp_offset + self.udp_len]
+    }
+}
+
+/// Build a fake UDP packet (QUIC-looking) toward `dst` on port 443. The fake
+/// carries the QUIC public header (long header, initial packet) with random
+/// bytes so DPI's QUIC fingerprinting is confused. This is the "udp.mode=fake"
+/// technique: when DPI sees malformed/random QUIC it stops tracking the flow,
+/// and the client's real traffic is often passed (or forced back to TCP).
+pub fn build_fake_quic_packet(
+    src: [u8; 4],
+    dst: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload_len: usize,
+) -> Vec<u8> {
+    // IP header (20) + UDP header (8) + QUIC-like payload.
+    let len = 20 + 8 + payload_len.max(1);
+    let mut pkt = vec![0u8; len];
+    // IPv4 header.
+    pkt[0] = 0x45;
+    pkt[2..4].copy_from_slice(&(len as u16).to_be_bytes());
+    pkt[8] = 64; // TTL
+    pkt[9] = 17; // UDP
+    pkt[12..16].copy_from_slice(&src);
+    pkt[16..20].copy_from_slice(&dst);
+    // UDP header.
+    let u = 20;
+    pkt[u..u + 2].copy_from_slice(&src_port.to_be_bytes());
+    pkt[u + 2..u + 4].copy_from_slice(&dst_port.to_be_bytes());
+    let udp_len = 8 + payload_len.max(1);
+    pkt[u + 4..u + 6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    // QUIC public header (long header): first byte 0xC3 (header form + type),
+    // version, 8-byte connection ID, then random payload.
+    let p = u + 8;
+    pkt[p] = 0xC3;
+    if payload_len > 1 {
+        pkt[p + 1..p + 5].copy_from_slice(&0x00000001u32.to_be_bytes()); // QUIC v1
+        if payload_len > 5 {
+            pkt[p + 5] = 0x00; // first byte of DCID length = 0
+            for b in &mut pkt[p + 6..] {
+                *b = fastrand_byte();
+            }
+        }
+    }
+    // Zero the IP header checksum then fix both.
+    let mut tmp = TcpPacket {
+        raw: pkt.clone(),
+        ip_header_len: 20,
+        ip_total_len: len,
+        tcp_offset: u,
+        tcp_header_len: 8,
+        tcp_doff_field: 0,
+        checksum_offsets: (10, u + 6),
+    };
+    fix_ipv4_checksum(&mut tmp);
+    // Fix UDP checksum via a manual pseudo-header sum.
+    fix_udp_checksum(&mut pkt, src, dst, u, udp_len);
+    pkt
+}
+
+/// Fast pseudo-random byte (xorshift seeded from the address/time). Determinism
+/// is not needed; we just need cheap, varied bytes for the fake payload.
+fn fastrand_byte() -> u8 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    ((nanos as u32 >> 3) as u8) ^ ((nanos as u32 >> 11) as u8)
+}
+
+/// Compute the UDP checksum (with IPv4 pseudo-header).
+pub fn fix_udp_checksum(
+    pkt: &mut [u8],
+    src: [u8; 4],
+    dst: [u8; 4],
+    udp_offset: usize,
+    udp_len: usize,
+) {
+    // Set checksum field to 0 first.
+    pkt[udp_offset + 6..udp_offset + 8].copy_from_slice(&[0, 0]);
+    let mut sum: u32 = 0;
+    for i in (0..4).step_by(2) {
+        sum += ((src[i] as u32) << 8) | (src[i + 1] as u32);
+    }
+    for i in (0..4).step_by(2) {
+        sum += ((dst[i] as u32) << 8) | (dst[i + 1] as u32);
+    }
+    sum += 17; // UDP protocol
+    sum += udp_len as u32;
+    for i in (0..udp_len).step_by(2) {
+        let hi = pkt[udp_offset + i] as u32;
+        let lo = if i + 1 < udp_len {
+            pkt[udp_offset + i + 1] as u32
+        } else {
+            0
+        };
+        sum += (hi << 8) | lo;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    let csum = !(sum as u16);
+    pkt[udp_offset + 6..udp_offset + 8].copy_from_slice(&csum.to_be_bytes());
+}
+
+/// Split a TCP packet's payload into two IP fragments (mission §6
+/// fragmentation plane). Returns the two raw IP packets (fragments), each with
+/// the correct IP fragment offset and checksums. `split_at` is the byte offset
+/// inside the TCP payload where the second fragment begins.
+pub fn fragment_tcp_payload(pkt: &TcpPacket, split_at: usize) -> Option<(Vec<u8>, Vec<u8>)> {
+    let payload = pkt.tcp_payload();
+    if split_at == 0 || split_at >= payload.len() {
+        return None;
+    }
+    let total = pkt.len();
+    let tcp_header = pkt.tcp_offset + pkt.tcp_header_len;
+    let mut frag1 = pkt.raw[..tcp_header + split_at].to_vec();
+    let mut frag2 = Vec::new();
+
+    // Fragment 1: IP total length = header + tcp header + first part.
+    let f1_len = frag1.len() as u16;
+    frag1[2..4].copy_from_slice(&f1_len.to_be_bytes());
+    // Fragment offset 0, more-fragments flag (0x2000).
+    frag1[6] = 0x40; // DF=0 (don't fragment bit clear), MBZ
+    frag1[7] = 0x00;
+
+    // Fragment 2: full IP header + remainder. Offset = (tcp_header)/8.
+    let offset = (tcp_header / 8) as u16;
+    frag2.extend_from_slice(&pkt.raw[..pkt.ip_header_len]);
+    let f2_len = (pkt.ip_header_len + (total - tcp_header - split_at)) as u16;
+    frag2[2..4].copy_from_slice(&f2_len.to_be_bytes());
+    frag2[6] = 0x40;
+    frag2[7] = ((offset >> 8) & 0xff) as u8;
+    let _ = offset;
+    frag2.extend_from_slice(&pkt.raw[tcp_header + split_at..]);
+
+    // Recompute checksums on both.
+    let mut f1 = TcpPacket {
+        raw: frag1.clone(),
+        ip_header_len: pkt.ip_header_len,
+        ip_total_len: frag1.len(),
+        tcp_offset: pkt.tcp_offset,
+        tcp_header_len: pkt.tcp_header_len,
+        tcp_doff_field: 0,
+        checksum_offsets: (10, pkt.tcp_offset + 16),
+    };
+    fix_ipv4_checksum(&mut f1);
+    fix_tcp_checksum(&mut f1);
+    frag1 = f1.raw;
+
+    // Fragment 2 is a pure IP fragment (no full TCP header), so only fix the
+    // IP checksum.
+    let mut f2 = TcpPacket {
+        raw: frag2.clone(),
+        ip_header_len: pkt.ip_header_len,
+        ip_total_len: frag2.len(),
+        tcp_offset: 0,
+        tcp_header_len: 0,
+        tcp_doff_field: 0,
+        checksum_offsets: (10, 0),
+    };
+    fix_ipv4_checksum(&mut f2);
+    frag2 = f2.raw;
+
+    Some((frag1, frag2))
+}
+
 /// Recompute and write the TCP checksum (with pseudo-header).
 pub fn fix_tcp_checksum(pkt: &mut TcpPacket) {
     let ip = &pkt.raw;
@@ -278,6 +521,25 @@ pub fn fix_tcp_checksum(pkt: &mut TcpPacket) {
 #[cfg(test)]
 pub fn tests_synth_syn() -> Vec<u8> {
     synth_syn_with_mss(1460, false)
+}
+
+/// Test-only helper: a minimal IPv4+UDP packet to port 443.
+#[cfg(test)]
+pub fn tests_synth_udp() -> Vec<u8> {
+    let mut pkt = vec![0u8; 20 + 8 + 12];
+    // IP header
+    pkt[0] = 0x45;
+    let pkt_len = pkt.len() as u16;
+    pkt[2..4].copy_from_slice(&pkt_len.to_be_bytes());
+    pkt[8] = 64;
+    pkt[9] = 17; // UDP
+    pkt[12..16].copy_from_slice(&[10, 0, 0, 1]);
+    pkt[16..20].copy_from_slice(&[10, 0, 0, 2]);
+    // UDP header
+    pkt[20..22].copy_from_slice(&12345u16.to_be_bytes()); // src port
+    pkt[22..24].copy_from_slice(&443u16.to_be_bytes()); // dst port
+    pkt[24..26].copy_from_slice(&(8 + 12u16).to_be_bytes()); // udp len
+    pkt
 }
 
 /// Build a minimal valid IPv4+TCP SYN packet (test helper).

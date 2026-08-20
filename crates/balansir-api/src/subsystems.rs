@@ -159,6 +159,43 @@ pub async fn get_dpi(State(state): State<Arc<ApiState>>) -> Response {
     Json(snapshot.dpi).into_response()
 }
 
+/// `GET /b4/discovery` — B4 Discovery state (mission §7): auto-selected
+/// strategies per domain.
+pub async fn get_b4_discovery(State(state): State<Arc<ApiState>>) -> Response {
+    let snapshot = match snapshot_or_unavailable(&state).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    Json(snapshot.dpi.discovery).into_response()
+}
+
+/// Body for `POST /b4/discovery/notify`.
+#[derive(Deserialize)]
+pub struct DiscoveryNotifyBody {
+    pub domain: String,
+}
+
+/// `POST /b4/discovery/notify` — tell Discovery that a domain is observed
+/// blocked/interfered; it runs a bounded strategy search and applies the best
+/// candidate to the engine.
+pub async fn notify_b4_discovery(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<DiscoveryNotifyBody>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match control.b4_notify_discovery(&body.domain).await {
+        Ok(selected) => Json(serde_json::json!({
+            "domain": body.domain,
+            "selected": selected,
+        }))
+        .into_response(),
+        Err(e) => error_response(&e),
+    }
+}
+
 /// `POST /b4/pause` — pause/resume the B4 adaptation engine.
 pub async fn set_b4_paused(
     State(state): State<Arc<ApiState>>,

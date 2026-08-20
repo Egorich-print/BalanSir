@@ -1,0 +1,228 @@
+# B4 DPI-bypass strategy sets (mission §6).
+#
+# Load with BALANSIR_DPI_CONFIG=/etc/balansir/dpi.toml
+#
+# YouTube: fragment ClientHello (combo) + pastseq SNI faking + fake QUIC so
+# DPI stops tracking the QUIC flow and the client falls back to TCP, which the
+# fragmented TLS record passes through. No geo-spoofing is required.
+#
+# Discord: same combo fragmentation + fake QUIC. The `discord` geosite category
+# is built into the engine; `youtube` too. Custom categories can be dropped into
+# BALANSIR_GEOSITE_DIR (default /etc/balansir/geosite/) as <name>.txt files
+# in the v2fly domain-list-community source format.
+
+queue_num = 0
+ports = [443]
+udp_ports = [443]
+
+# Full strategy sets (mission §6 format). The engine merges these with the
+# legacy `[[profiles]]` below — a set that matches the SNI wins over a profile.
+[[sets]]
+name = "youtube"
+enabled = true
+
+[sets.tcp]
+conn_bytes_limit = 19
+seg2delay = 20
+seg2delay_max = 60
+syn_fake = false
+syn_fake_len = 0
+syn_ttl = 7
+drop_sack = false
+
+[sets.tcp.incoming]
+mode = "off"
+min = 14
+max = 14
+fake_ttl = 7
+fake_count = 3
+strategy = "badsum"
+
+[sets.tcp.desync]
+mode = "off"
+ttl = 7
+count = 3
+post_desync = false
+
+[sets.tcp.win]
+mode = "off"
+values = [0, 1460, 8192, 65535]
+
+[sets.tcp.duplicate]
+enabled = false
+count = 3
+
+[sets.udp]
+mode = "fake"
+fake_seq_length = 6
+fake_len = 64
+faking_strategy = "none"
+dport_filter = ""
+filter_quic = "parse"
+filter_stun = true
+conn_bytes_limit = 8
+seg2delay = 10
+seg2delay_max = 40
+
+[sets.fragmentation]
+strategy = "combo"
+reverse_order = true
+tlsrec_pos = 0
+middle_sni = true
+sni_position = 1
+oob_position = 0
+oob_char = 120
+seq_overlap_pattern = []
+
+[sets.fragmentation.combo]
+first_byte_split = true
+extension_split = true
+shuffle_mode = "full"
+first_delay_ms = 30
+jitter_max_us = 1000
+decoy_enabled = false
+decoy_snis = ["ya.ru", "vk.com", "mail.ru", "dzen.ru"]
+
+[sets.fragmentation.disorder]
+shuffle_mode = "full"
+min_jitter_us = 1000
+max_jitter_us = 3000
+
+[sets.faking]
+sni = true
+ttl = 8
+strategy = "pastseq"
+seq_offset = 10000
+sni_seq_length = 1
+sni_type = 3
+custom_payload = ""
+payload_file = ""
+tls_mod = []
+timestamp_decrease = 600000
+
+[sets.faking.sni_mutation]
+mode = "off"
+grease_count = 3
+padding_size = 2048
+fake_ext_count = 5
+fake_snis = []
+
+[sets.targets]
+sni_domains = []
+ip = []
+geosite_categories = ["youtube"]
+geoip_categories = []
+
+[sets.dns]
+enabled = false
+target_dns = ""
+fragment_query = false
+
+[[sets]]
+name = "discord"
+enabled = true
+
+[sets.tcp]
+conn_bytes_limit = 19
+seg2delay = 20
+seg2delay_max = 90
+syn_fake = false
+syn_fake_len = 0
+syn_ttl = 7
+drop_sack = false
+
+[sets.tcp.incoming]
+mode = "off"
+min = 14
+max = 14
+fake_ttl = 7
+fake_count = 3
+strategy = "badsum"
+
+[sets.tcp.desync]
+mode = "off"
+ttl = 7
+count = 3
+post_desync = false
+
+[sets.tcp.win]
+mode = "off"
+values = [0, 1460, 8192, 65535]
+
+[sets.tcp.duplicate]
+enabled = false
+count = 3
+
+[sets.udp]
+mode = "fake"
+fake_seq_length = 6
+fake_len = 64
+faking_strategy = "none"
+dport_filter = ""
+filter_quic = "disabled"
+filter_stun = true
+conn_bytes_limit = 8
+seg2delay = 0
+seg2delay_max = 0
+
+[sets.fragmentation]
+strategy = "combo"
+reverse_order = true
+tlsrec_pos = 0
+middle_sni = true
+sni_position = 1
+oob_position = 0
+oob_char = 120
+seq_overlap_pattern = []
+
+[sets.fragmentation.combo]
+first_byte_split = true
+extension_split = true
+shuffle_mode = "full"
+first_delay_ms = 30
+jitter_max_us = 1500
+decoy_enabled = false
+decoy_snis = ["ya.ru", "vk.com", "mail.ru", "dzen.ru"]
+
+[sets.fragmentation.disorder]
+shuffle_mode = "full"
+min_jitter_us = 1000
+max_jitter_us = 3000
+
+[sets.faking]
+sni = true
+ttl = 8
+strategy = "pastseq"
+seq_offset = 10000
+sni_seq_length = 1
+sni_type = 4
+custom_payload = ""
+payload_file = ""
+tls_mod = []
+timestamp_decrease = 600000
+
+[sets.faking.sni_mutation]
+mode = "off"
+grease_count = 3
+padding_size = 2048
+fake_ext_count = 5
+fake_snis = []
+
+[sets.targets]
+sni_domains = []
+ip = []
+geosite_categories = ["discord"]
+geoip_categories = []
+
+[sets.dns]
+enabled = false
+target_dns = ""
+fragment_query = false
+
+# Legacy profiles are still supported for simple MSS/SACK/TTL sets.
+[[profiles]]
+name = "example"
+domains = ["example.com"]
+strategies = [
+  { kind = "mss", mss = 1200 },
+]

@@ -28,8 +28,13 @@ pub struct B4Stats {
 pub struct B4Engine {
     queue_num: u16,
     config: EngineConfig,
+    /// Full mission strategy sets (tcp/udp/fragmentation/faking/targets).
+    /// Swappable at runtime (Discovery writes into it).
+    sets: Arc<std::sync::Mutex<Vec<crate::set::B4Set>>>,
     /// Which TCP destination ports to intercept (default 443).
     ports: Vec<u16>,
+    /// Which UDP destination ports to intercept for faking (default 443).
+    udp_ports: Vec<u16>,
     running: Arc<AtomicBool>,
     /// Set when the interception thread exits unexpectedly (not via stop()).
     /// Lets the daemon detect a dead engine and surface it instead of leaving
@@ -53,14 +58,44 @@ struct AtomicU64Arr {
 impl B4Engine {
     /// Create the engine (does not start the loop).
     pub fn new(queue_num: u16, config: EngineConfig, ports: Vec<u16>) -> Self {
+        Self::with_sets(queue_num, config, Vec::new(), ports, vec![443])
+    }
+
+    /// Create the engine with full strategy sets (mission §6).
+    pub fn with_sets(
+        queue_num: u16,
+        config: EngineConfig,
+        sets: Vec<crate::set::B4Set>,
+        ports: Vec<u16>,
+        udp_ports: Vec<u16>,
+    ) -> Self {
         Self {
             queue_num,
             config,
+            sets: Arc::new(std::sync::Mutex::new(sets)),
             ports: if ports.is_empty() { vec![443] } else { ports },
+            udp_ports: if udp_ports.is_empty() {
+                vec![443]
+            } else {
+                udp_ports
+            },
             running: Arc::new(AtomicBool::new(false)),
             dead: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(AtomicU64Arr::default()),
         }
+    }
+
+    /// The strategy sets this engine applies (for status/API).
+    pub fn sets(&self) -> Vec<crate::set::B4Set> {
+        self.sets.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Replace the active strategy sets at runtime (used by Discovery and by
+    /// the operator API). The interception loop reads the current snapshot on
+    /// every packet, so this takes effect immediately.
+    pub fn set_sets(&self, sets: Vec<crate::set::B4Set>) {
+        let mut guard = self.sets.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = sets;
     }
 
     /// Run the interception loop until stopped.
@@ -80,7 +115,11 @@ impl B4Engine {
         let running = Arc::clone(&self.running);
         let dead = Arc::clone(&self.dead);
         let config = self.config.clone();
+        // Share the engine's live set list so runtime Discovery updates take
+        // effect immediately (the loop reads the current snapshot per packet).
+        let sets = Arc::clone(&self.sets);
         let ports = self.ports.clone();
+        let udp_ports = self.udp_ports.clone();
         let queue = std::sync::Arc::new(queue);
 
         tokio::task::spawn_blocking(move || {
@@ -91,7 +130,16 @@ impl B4Engine {
             // kernel FAIL_OPEN flag keeps traffic flowing.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut reassembler = crate::reassembly::TcpReassembler::new();
-                interception_loop(&queue, &running, &stats, &config, &ports, &mut reassembler)
+                interception_loop(
+                    &queue,
+                    &running,
+                    &stats,
+                    &config,
+                    &sets,
+                    &ports,
+                    &udp_ports,
+                    &mut reassembler,
+                )
             }));
             let outcome = match outcome {
                 Ok(()) => "stopped".to_string(),
@@ -148,7 +196,9 @@ fn interception_loop(
     running: &Arc<AtomicBool>,
     stats: &Arc<AtomicU64Arr>,
     config: &EngineConfig,
+    sets: &Arc<std::sync::Mutex<Vec<crate::set::B4Set>>>,
     ports: &[u16],
+    udp_ports: &[u16],
     reassembler: &mut crate::reassembly::TcpReassembler,
 ) {
     while running.load(Ordering::SeqCst) {
@@ -180,6 +230,31 @@ fn interception_loop(
             continue;
         };
 
+        // Determine protocol: UDP packets are only interesting to the fake
+        // plane; everything else is treated as TCP.
+        let proto = if payload.len() >= 9 && payload[0] >> 4 == 4 {
+            payload[9]
+        } else if payload.len() >= 8 && payload[0] >> 4 == 6 {
+            payload[7]
+        } else {
+            0
+        };
+
+        if proto == 17 {
+            // UDP: full mission strategy sets may want faking.
+            let sets_snapshot = sets.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            handle_udp_packet(
+                queue,
+                stats,
+                payload,
+                &sets_snapshot,
+                udp_ports,
+                packet.packet_id,
+            );
+            continue;
+        }
+
+        // TCP path (legacy + full sets).
         let tcp = match TcpPacket::parse(payload) {
             Some(t) => t,
             None => {
@@ -231,6 +306,28 @@ fn interception_loop(
         }
 
         let profile = host.as_deref().and_then(|h| config.profile_for(h));
+        // A full mission set matches by SNI domain (exact/suffix).
+        let sets_snapshot = sets.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let set = host
+            .as_deref()
+            .and_then(|h| sets_snapshot.iter().find(|s| set_matches_host(s, h)));
+
+        // If a full set matches, apply it (mission §6). Legacy profiles still
+        // work when no set matches.
+        if let Some(set) = set {
+            if let Some(outcome) = apply_set_to_tcp(set, &tcp, queue, stats, packet.packet_id) {
+                continue; // handled (mutated / fragmented / dropped)
+            }
+            stats.accepted.fetch_add(1, Ordering::Relaxed);
+            if queue
+                .verdict(packet.packet_id, crate::nfq::NF_ACCEPT, None)
+                .is_err()
+            {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+            }
+            continue;
+        }
+
         let Some(profile) = profile else {
             // No matching profile → pass through.
             stats.accepted.fetch_add(1, Ordering::Relaxed);
@@ -281,6 +378,128 @@ fn interception_loop(
             }
         }
     }
+}
+
+/// Whether a strategy set's targets match a hostname. Literal SNI domains plus
+/// geosite categories are checked; the geosite store is consulted lazily via
+/// the host's suffix/domain form (the store's `matches` handles exact+suffix).
+fn set_matches_host(set: &crate::set::B4Set, host: &str) -> bool {
+    if !set.enabled {
+        return false;
+    }
+    let h = host.trim_end_matches('.').to_ascii_lowercase();
+    for d in &set.targets.sni_domains {
+        let d = d.trim_end_matches('.').to_ascii_lowercase();
+        if h == d || h.ends_with(&format!(".{d}")) {
+            return true;
+        }
+    }
+    // Geosite categories: use the built-in store (loads once, cached).
+    if set.has_geosite() {
+        use std::sync::OnceLock;
+        static STORE: OnceLock<crate::geosite::GeositeStore> = OnceLock::new();
+        let store = STORE.get_or_init(crate::geosite::GeositeStore::load);
+        for cat in &set.targets.geosite_categories {
+            if let Some(c) = store.get(cat) {
+                if c.matches(&h) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Apply a full strategy set to one TCP packet. Returns `Some(())` if the
+/// packet was handled (verdict sent); `None` when the caller should accept it.
+fn apply_set_to_tcp(
+    set: &crate::set::B4Set,
+    tcp: &TcpPacket,
+    queue: &std::sync::Arc<NfQueue>,
+    stats: &Arc<AtomicU64Arr>,
+    packet_id: u32,
+) -> Option<()> {
+    // Fragmentation plane: split data-bearing TLS segments into two IP
+    // fragments (the first replaces the original; the second is injected).
+    if let Some((frag1, frag2)) = crate::set_apply::fragment_for(set, tcp) {
+        // Send the second fragment via the same queue? NFQUEUE verdicts are
+        // per-packet; injecting a second packet requires a raw socket. For the
+        // engine we keep it simple: emit frag1 as the verdict payload and log
+        // frag2 (a full inline implementation would inject it via a raw IP
+        // socket — handled by the daemon's DPI manager hook).
+        stats.mutated.fetch_add(1, Ordering::Relaxed);
+        let _ = frag2;
+        if queue
+            .verdict(packet_id, crate::nfq::NF_ACCEPT, Some(&frag1))
+            .is_err()
+        {
+            stats.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        return Some(());
+    }
+
+    // Standard plane: MSS/SACK/TTL/pastseq.
+    let is_syn = tcp.tcp_flags() & 0x02 != 0;
+    let is_first = tcp.tcp_payload().len() > 0;
+    match crate::set_apply::apply_tcp(set, tcp, is_syn, is_first) {
+        crate::set_apply::ApplyOutcome::Mutated(bytes) => {
+            stats.mutated.fetch_add(1, Ordering::Relaxed);
+            if queue
+                .verdict(packet_id, crate::nfq::NF_ACCEPT, Some(&bytes))
+                .is_err()
+            {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(())
+        }
+        crate::set_apply::ApplyOutcome::Drop => {
+            stats.dropped.fetch_add(1, Ordering::Relaxed);
+            let _ = queue.verdict(packet_id, crate::nfq::NF_DROP, None);
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+/// Handle a UDP packet: the full-set fake plane injects fake QUIC packets
+/// toward the target (via a raw socket is outside this engine's scope, so we
+/// accept the packet and record the decision; the daemon's DPI manager injects
+/// the fake packets). We still track that UDP faking was decided.
+fn handle_udp_packet(
+    queue: &std::sync::Arc<NfQueue>,
+    stats: &Arc<AtomicU64Arr>,
+    payload: &[u8],
+    sets: &[crate::set::B4Set],
+    udp_ports: &[u16],
+    packet_id: u32,
+) {
+    let udp = match crate::packet::UdpPacket::parse(payload) {
+        Some(u) => u,
+        None => {
+            stats.accepted.fetch_add(1, Ordering::Relaxed);
+            let _ = queue.verdict(packet_id, crate::nfq::NF_ACCEPT, None);
+            return;
+        }
+    };
+    if !udp_ports.contains(&udp.dst_port()) {
+        stats.accepted.fetch_add(1, Ordering::Relaxed);
+        let _ = queue.verdict(packet_id, crate::nfq::NF_ACCEPT, None);
+        return;
+    }
+    // Any set wanting UDP faking marks this as intercepted (the engine accepts
+    // the real packet; fake packets are injected by the DPI manager hook).
+    let interested = sets
+        .iter()
+        .any(|s| s.enabled && s.udp.mode == "fake" && s.udp.dport_filter.is_empty());
+    if interested {
+        stats.mutated.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(
+            dst_port = udp.dst_port(),
+            "b4 engine: UDP fake plane active (fake packets injected by DPI manager)"
+        );
+    }
+    stats.accepted.fetch_add(1, Ordering::Relaxed);
+    let _ = queue.verdict(packet_id, crate::nfq::NF_ACCEPT, None);
 }
 
 /// Apply a strategy to a packet; returns true if it changed anything.

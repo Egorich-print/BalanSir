@@ -1,0 +1,237 @@
+//! Strategy-set application (mission §6): turn a `B4Set` into concrete packet
+//! mutations on intercepted TCP/UDP packets.
+//!
+//! The engine calls [`apply_tcp`] / [`apply_udp`]; these decide whether the
+//! set wants the traffic and return the mutation result. Mutations are pure
+//! packet transforms (bounded, checksum-correct) — no kernel access here, so
+//! the whole plane is unit-testable without root.
+
+use crate::packet::{build_fake_quic_packet, fragment_tcp_payload, tcp_opt, TcpPacket, UdpPacket};
+use crate::set::{B4Set, ComboPlane, FragmentationPlane};
+
+/// Outcome of applying a set to one packet.
+#[derive(Debug, Clone)]
+pub enum ApplyOutcome {
+    /// Packet untouched (set not applicable / disabled).
+    Pass,
+    /// Packet was mutated in place (payload replaced via verdict).
+    Mutated(Vec<u8>),
+    /// The packet should be fragmented into two IP fragments.
+    Fragment(Vec<u8>, Vec<u8>),
+    /// The packet should be dropped (conn_bytes_limit exceeded).
+    Drop,
+}
+
+/// Is this TCP packet in the set's target window? We only intercept port 443
+/// (and optionally other configured ports); the domain/IP match is done at the
+/// engine level. This filters out non-target traffic cheaply.
+pub fn tcp_in_scope(set: &B4Set, _pkt: &TcpPacket) -> bool {
+    set.wants_tcp()
+}
+
+/// Apply the TCP plane of a set to a packet. Returns the mutation outcome.
+pub fn apply_tcp(set: &B4Set, pkt: &TcpPacket, is_syn: bool, is_first_seg: bool) -> ApplyOutcome {
+    if !set.wants_tcp() {
+        return ApplyOutcome::Pass;
+    }
+    let mut changed = false;
+    let mut mutated = pkt.clone();
+
+    // SYN-plane mutations: MSS rewrite, SACK strip, TTL, syn_fake is a packet
+    // generator (handled by the engine), syn_ttl set here.
+    if is_syn {
+        if let Some(mss) = default_mss_for(&set.fragmentation) {
+            changed |= tcp_opt::set_mss(&mut mutated, mss);
+        }
+        if set.tcp.drop_sack {
+            changed |= tcp_opt::strip_option(&mut mutated, tcp_opt::SACK_PERMITTED);
+        }
+        if set.tcp.syn_ttl != 0 && mutated.raw[8] != set.tcp.syn_ttl {
+            mutated.raw[8] = set.tcp.syn_ttl;
+            changed = true;
+        }
+    }
+
+    // Faking plane: pastseq sequence offset on the first data segment.
+    if is_first_seg && set.faking.sni && set.faking.strategy == "pastseq" {
+        let seq = mutated.tcp_seq();
+        let offset = set.faking.seq_offset;
+        if offset > 0 {
+            mutated.set_tcp_seq(seq.wrapping_add(offset));
+            changed = true;
+        }
+    }
+
+    if changed {
+        crate::packet::fix_ipv4_checksum(&mut mutated);
+        crate::packet::fix_tcp_checksum(&mut mutated);
+        ApplyOutcome::Mutated(mutated.raw)
+    } else {
+        ApplyOutcome::Pass
+    }
+}
+
+/// Fragmentation plane: split a TCP packet that carries a TLS record into two
+/// IP fragments (combo: split at the TLS record boundary / inside the SNI).
+/// Returns `Some((frag1, frag2))` when the plane is active and the packet
+/// qualifies.
+pub fn fragment_for(set: &B4Set, pkt: &TcpPacket) -> Option<(Vec<u8>, Vec<u8>)> {
+    if !set.wants_tcp() {
+        return None;
+    }
+    let plan = &set.fragmentation;
+    if plan.strategy != "combo" && plan.strategy != "disorder" {
+        return None;
+    }
+    let payload = pkt.tcp_payload();
+    // Only fragment data-bearing segments (not pure ACKs/SYN), and only once
+    // the payload is large enough to split meaningfully.
+    if payload.is_empty() || payload.len() < 2 {
+        return None;
+    }
+    let split_at = combo_split_point(&plan.combo, payload.len());
+    if split_at == 0 || split_at >= payload.len() {
+        return None;
+    }
+    fragment_tcp_payload(pkt, split_at)
+}
+
+/// Decide the split point inside the payload for the combo plane.
+fn combo_split_point(combo: &ComboPlane, payload_len: usize) -> usize {
+    if combo.first_byte_split {
+        // Split after the first byte (the TLS record type 0x16) so no single
+        // fragment carries the record type + length in the normal shape.
+        return 1.min(payload_len.saturating_sub(1));
+    }
+    if combo.extension_split && payload_len >= 2 {
+        // Split around the ClientHello extensions boundary. We approximate:
+        // split at 1/3 of the payload (a cheap, bounded proxy for the
+        // extension boundary).
+        return (payload_len / 3).max(1).min(payload_len.saturating_sub(1));
+    }
+    payload_len / 2
+}
+
+/// Default MSS to advertise given the fragmentation plane (lower MSS forces
+/// smaller segments, which is the classic DPI-evasion companion to splitting).
+fn default_mss_for(plan: &FragmentationPlane) -> Option<u16> {
+    if plan.strategy.is_empty() || plan.strategy == "none" {
+        None
+    } else {
+        Some(1200)
+    }
+}
+
+/// Apply the UDP plane of a set. Returns the mutation outcome (fake QUIC
+/// packets are generated by the engine; here we just decide interest).
+pub fn apply_udp(set: &B4Set, pkt: &UdpPacket) -> ApplyOutcome {
+    if !set.wants_udp() {
+        return ApplyOutcome::Pass;
+    }
+    // Only UDP traffic to the target ports (443 = QUIC) is interesting.
+    if pkt.dst_port() != 443 {
+        return ApplyOutcome::Pass;
+    }
+    ApplyOutcome::Mutated(Vec::new())
+}
+
+/// Build a fake QUIC packet toward the target of a real UDP packet (the
+/// "udp.mode=fake" technique). The engine sends this as an injected packet.
+pub fn fake_quic_packet_for(set: &B4Set, pkt: &UdpPacket) -> Option<Vec<u8>> {
+    if !set.wants_udp() || pkt.dst_port() != 443 {
+        return None;
+    }
+    let payload_len = set.udp.fake_len.max(1) as usize;
+    Some(build_fake_quic_packet(
+        pkt.src_ip(),
+        pkt.dst_ip(),
+        pkt.src_port(),
+        pkt.dst_port(),
+        payload_len,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_set() -> B4Set {
+        let mut set = crate::set::B4Set::default();
+        set.enabled = true;
+        set.name = "test".into();
+        set.tcp.drop_sack = true;
+        set.tcp.syn_ttl = 7;
+        set.udp.mode = "fake".into();
+        set.udp.fake_len = 64;
+        set.fragmentation.strategy = "combo".into();
+        set.fragmentation.combo.first_byte_split = true;
+        set.faking.sni = true;
+        set.faking.strategy = "pastseq".into();
+        set.faking.seq_offset = 10000;
+        set
+    }
+
+    #[test]
+    fn apply_tcp_syn_rewrites_mss_ttl() {
+        let set = sample_set();
+        let raw = crate::packet::tests_synth_syn();
+        let pkt = TcpPacket::parse(&raw).unwrap();
+        let outcome = apply_tcp(&set, &pkt, true, false);
+        match outcome {
+            ApplyOutcome::Mutated(bytes) => {
+                let re = TcpPacket::parse(&bytes).unwrap();
+                assert_eq!(re.raw[8], 7);
+            }
+            _ => panic!("expected mutation"),
+        }
+    }
+
+    #[test]
+    fn apply_tcp_pastseq_changes_seq() {
+        let set = sample_set();
+        let raw = crate::packet::tests_synth_syn();
+        let pkt = TcpPacket::parse(&raw).unwrap();
+        let orig = pkt.tcp_seq();
+        let outcome = apply_tcp(&set, &pkt, false, true);
+        match outcome {
+            ApplyOutcome::Mutated(bytes) => {
+                let re = TcpPacket::parse(&bytes).unwrap();
+                assert_eq!(re.tcp_seq(), orig.wrapping_add(10000));
+            }
+            _ => panic!("expected mutation"),
+        }
+    }
+
+    #[test]
+    fn fragment_combo_splits_first_byte() {
+        let set = sample_set();
+        // Build a TCP packet with 100 bytes of payload.
+        let raw = crate::packet::tests_synth_syn();
+        let mut pkt = TcpPacket::parse(&raw).unwrap();
+        pkt.raw.extend_from_slice(&vec![0x16u8; 100]);
+        // Re-parse with payload.
+        let pkt = TcpPacket::parse(&pkt.raw).unwrap();
+        assert!(pkt.tcp_payload().len() >= 100);
+        let fragments = fragment_for(&set, &pkt);
+        assert!(fragments.is_some());
+        let (f1, f2) = fragments.unwrap();
+        assert!(f1.len() > 20);
+        assert!(f2.len() > 20);
+    }
+
+    #[test]
+    fn udp_fake_packet_is_quic_like() {
+        let set = sample_set();
+        // Build a UDP packet to port 443.
+        let raw = crate::packet::tests_synth_udp();
+        let pkt = UdpPacket::parse(&raw).unwrap();
+        let fake = fake_quic_packet_for(&set, &pkt).unwrap();
+        assert!(fake.len() > 30);
+        assert_eq!(fake[9], 17); // UDP protocol
+                                 // dst port 443 at UDP header bytes 22..24.
+        let dst_port = u16::from_be_bytes([fake[22], fake[23]]);
+        assert_eq!(dst_port, 443);
+        // First byte of the QUIC long header.
+        assert_eq!(fake[28], 0xC3);
+    }
+}

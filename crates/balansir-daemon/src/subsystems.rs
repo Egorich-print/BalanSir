@@ -384,6 +384,7 @@ impl SubsystemManager {
                         errors: st.errors,
                         engine_dead: st.engine_dead,
                         last_error: st.last_error,
+                        discovery: st.discovery,
                     };
                 })
                 .await;
@@ -1000,6 +1001,18 @@ impl balansir_common::subsystems::SubsystemControl for ControlImpl {
                 Ok(result)
             }
             None => Err("MPTCP manager not attached".to_string()),
+        }
+    }
+
+    async fn b4_notify_discovery(&self, domain: &str) -> Result<Option<String>, String> {
+        let dpi = self.manager.dpi.read().await;
+        match dpi.as_ref() {
+            Some(d) => {
+                let selected = d.discovery().on_blocked(domain);
+                self.manager.refresh().await;
+                Ok(selected)
+            }
+            None => Err("DPI engine not configured (set BALANSIR_DPI_CONFIG)".to_string()),
         }
     }
 }

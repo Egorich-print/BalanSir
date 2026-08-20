@@ -38,6 +38,8 @@ pub struct DpiStatus {
     /// How many nft queue rules the executor reports as installed.
     pub queue_rules: u32,
     pub last_error: Option<String>,
+    /// B4 Discovery view (mission §7).
+    pub discovery: balansir_common::subsystems::DiscoveryView,
 }
 
 /// Runs the DPI-bypass engine and owns its lifecycle.
@@ -51,6 +53,10 @@ pub struct DpiManager {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     executor: Option<Arc<dyn crate::reconciliation::ExecutorAdapter>>,
     last_error: Mutex<Option<String>>,
+    /// B4 Discovery (mission §7): auto-selects bypass strategies for blocked
+    /// domains and pushes them into the engine. Shared with the API/WebUI.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    discovery: std::sync::Arc<crate::b4_discovery::DiscoveryManager>,
 }
 
 #[cfg(target_os = "linux")]
@@ -89,11 +95,27 @@ impl DpiManager {
             let engine_cfg = cfg.clone().into_engine();
             let queue_num = cfg.queue_num;
             let ports = cfg.ports();
+            let udp_ports = cfg.udp_ports();
             let profiles = cfg.profiles.iter().map(|p| p.name.clone()).collect();
-            let engine = balansir_b4::B4Engine::new(queue_num, engine_cfg, ports.clone());
+            let sets = cfg.all_sets();
+            let engine = balansir_b4::B4Engine::with_sets(
+                queue_num,
+                engine_cfg,
+                sets,
+                ports.clone(),
+                udp_ports,
+            );
+            let engine = Arc::new(engine);
+            let discovery = std::sync::Arc::new(crate::b4_discovery::DiscoveryManager::new());
+            {
+                let mut dm = discovery.clone();
+                let dm_mut =
+                    std::sync::Arc::get_mut(&mut dm).expect("fresh Arc has unique ownership");
+                dm_mut.attach_engine(Arc::clone(&engine));
+            }
             Ok(Self {
                 inner: Some(DpiInner {
-                    engine: Arc::new(engine),
+                    engine,
                     queue_num,
                     ports,
                     profiles,
@@ -102,16 +124,19 @@ impl DpiManager {
                 running: Arc::new(AtomicBool::new(false)),
                 executor,
                 last_error: Mutex::new(None),
+                discovery,
             })
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = config_path;
+            let discovery = std::sync::Arc::new(crate::b4_discovery::DiscoveryManager::new());
             Ok(Self {
                 inner: None,
                 running: Arc::new(AtomicBool::new(false)),
                 executor,
                 last_error: Mutex::new(None),
+                discovery,
             })
         }
     }
@@ -250,6 +275,36 @@ impl DpiManager {
         let (packets_seen, tls_packets, mutated, accepted, dropped, errors) =
             (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
 
+        // Discovery state (mission §7): map into the view model.
+        let dsnap = self.discovery.snapshot();
+        let discovery_view = balansir_common::subsystems::DiscoveryView {
+            enabled: dsnap.enabled,
+            domains: dsnap
+                .domains
+                .into_iter()
+                .map(|d| balansir_common::subsystems::DiscoveryDomainView {
+                    domain: d.domain,
+                    active: d.active,
+                    candidates: d
+                        .candidates
+                        .into_iter()
+                        .map(|c| balansir_common::subsystems::DiscoveryCandidateView {
+                            name: c.name,
+                            status: c.status,
+                            quality: c.quality,
+                            rejected_reason: c.rejected_reason,
+                            trial_ends_ms: c.trial_ends_ms,
+                        })
+                        .collect(),
+                    selected_ms: d.selected_ms,
+                    validated_ms: d.validated_ms,
+                    observed_blocked: d.observed_blocked,
+                    last_event: d.last_event,
+                })
+                .collect(),
+            last_error: dsnap.last_error,
+        };
+
         DpiStatus {
             enabled: self.running.load(Ordering::SeqCst),
             config_path,
@@ -265,6 +320,7 @@ impl DpiManager {
             engine_dead: self.engine_dead(),
             queue_rules: 0, // populated by the executor, not the daemon
             last_error: err,
+            discovery: discovery_view,
         }
     }
 
@@ -290,6 +346,21 @@ impl Default for DpiManager {
             running: Arc::new(AtomicBool::new(false)),
             executor: None,
             last_error: Mutex::new(None),
+            discovery: std::sync::Arc::new(crate::b4_discovery::DiscoveryManager::new()),
         }
+    }
+}
+
+impl DpiManager {
+    /// The Discovery manager (mission §7). The API/WebUI reads it; the policy
+    /// engine calls `on_blocked` when a domain is observed blocked.
+    pub fn discovery(&self) -> std::sync::Arc<crate::b4_discovery::DiscoveryManager> {
+        std::sync::Arc::clone(&self.discovery)
+    }
+
+    /// Report a blocked/interfered domain to Discovery so it can select (and
+    /// apply) a bypass strategy. No-op when Discovery is disabled.
+    pub fn notify_blocked(&self, domain: &str) {
+        self.discovery.on_blocked(domain);
     }
 }
