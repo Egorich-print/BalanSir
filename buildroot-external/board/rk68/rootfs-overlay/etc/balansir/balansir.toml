@@ -1,0 +1,20 @@
+# BalanSir desired-state config for the Buildroot image (first boot).
+#
+# Loaded by the daemon at boot via BALANSIR_CONFIG (see the systemd unit).
+# Startup recovery (ADR-027): the daemon restores this exact state after
+# reboot; a malformed file is a fatal startup error, never silently empty.
+#
+# IMPORTANT: this is the *factory* policy. On first boot the operator should
+# `balansir-cli reload` a site-specific config; an empty rule set with
+# empty_config_action = "pass" is intentionally permissive so the box can be
+# reached for provisioning.
+
+[policy]
+# Fail-open on empty (provisioning-safe). Change to "drop" for a fail-closed
+# appliance profile (P1/ADR-019).
+empty_config_action = "pass"
+
+[[rules]]
+id = 1
+action = "allow"
+priority = 100

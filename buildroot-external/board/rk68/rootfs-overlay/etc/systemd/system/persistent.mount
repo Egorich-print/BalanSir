@@ -1,0 +1,19 @@
+# Mount the persistent OTA/data partition (mmcblk0p4 → /persistent).
+#
+# /persistent holds the OTA boot metadata (BootMetadata) that survives firmware
+# updates and tracks A/B boot state across reboots (mission §13). The partition
+# is created by post-image.sh and labelled balansir-persistent.
+[Unit]
+Description=BalanSir persistent data partition (OTA metadata)
+DefaultDependencies=no
+After=systemd-fsck-root.service
+Before=sysinit.target
+
+[Mount]
+What=/dev/mmcblk0p4
+Where=/persistent
+Type=ext4
+Options=rw,noatime
+
+[Install]
+WantedBy=local-fs.target

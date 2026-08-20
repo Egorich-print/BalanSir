@@ -1,0 +1,58 @@
+[Unit]
+Description=BalanSir Network Policy Engine - Daemon
+Documentation=https://github.com/balansir/balansir
+After=network.target balansir-executor.service
+Wants=network.target
+
+[Service]
+# Simple: the daemon does not implement sd_notify, so Type=notify would never
+# become active (fixed, ADR-030).
+Type=simple
+ExecStart=/usr/local/bin/balansir-daemon
+# Startup config (P7.2.1, ADR-027): the daemon restores the last accepted
+# desired state after reboot without an operator reload. A rejected config is
+# a fatal startup error (never silently empty).
+Environment=BALANSIR_CONFIG=/etc/balansir/balansir.toml
+# Gateway port roles + WAN MAC cloning (mission §12–13). Explicit config, never
+# autodetection; daemon fails closed when the roles are invalid.
+Environment=BALANSIR_NETWORK_CONFIG=/etc/balansir/network.toml
+# IPC peer auth (ADR-013): the daemon accepts the privileged executor (root)
+# and the operator CLI (root); the unprivileged daemon UID is allowed so the
+# executor can accept the daemon's control connection (fixed, ADR-030).
+Environment=BALANSIR_ALLOWED_UIDS=0,1500
+# WebUI: serve the Svelte SPA built into the image (package install hook).
+Environment=BALANSIR_WEBUI_DIR=/usr/share/balansir/webui
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Security
+User=balansir
+Group=balansir
+NoNewPrivileges=yes
+# Network control from the unprivileged daemon:
+# - CAP_NET_BIND_SERVICE: DNS gateway binds UDP/53 on the LAN address
+#   (BALANSIR_DNS_CONFIG).
+# - CAP_NET_ADMIN: DPI-bypass engine binds NFQUEUE and installs the queue
+#   nft rule (BALANSIR_DPI_CONFIG).
+# No root; only these two capabilities. Mirrors deploy/systemd/balansir-daemon.service.
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=yes
+# /run/balansir is created by systemd-tmpfiles (tmpfiles.d/balansir.conf),
+# owned root:balansir so both daemon and executor can use it.
+ReadWritePaths=/var/lib/balansir /var/log/balansir /run/balansir
+PrivateTmp=yes
+
+# Resource limits
+MemoryMax=128M
+TasksMax=64
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=balansir-daemon
+
+[Install]
+WantedBy=multi-user.target

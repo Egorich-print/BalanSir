@@ -1,0 +1,86 @@
+# BalanSir + RK68 (Rockchip RK3568) Buildroot configuration — initial support
+# layer (mission §12).
+#
+# Board: "Rockchip RK3568 NVR DEMO DDR4 V12 Linux Board" (NVR304-32E2)
+#   - SoC: RK3568, 4× Cortex-A55 (AArch64), 4 GiB DDR4
+#   - Boot: SPI NAND 128 MiB (kernel at 0xF80000, 12 MiB, booti protocol)
+#   - UART: NS16550 @ 0xFE660000 (reg-shift 2), 115200 8N1
+#   - LAN: eth0 (fe2a0000) + eth1 (fe010000)
+#
+# IMPORTANT boot notes (see docs/hardware/rk3568/board-info.md):
+#   - This board's U-Boot `bootm` has NO FDT/ATAGS support — the kernel MUST be
+#     booted via `booti` (ARM64 Image) with a DTB at fdt_addr_r (0x0a100000) or
+#     the internal control FDT (0xebd753c0).
+#   - The kernel entry must disable the MMU at EL2 and drop to EL1 before any
+#     memory access (board-info §Kernel Requirements).
+#   - There is NO SD rootfs: the kernel boots from SPI NAND. BalanSir's A/B
+#     slot model here is a *kernel slot* on SPI NAND, not an SD partition set.
+#
+# This defconfig produces a rootfs for the NFS/TFTP development workflow; the
+# runtime kernel is built separately (see board/rk68/README.md). Existing
+# targets (rpi3b_64, qemu_virt) are untouched.
+
+# Architecture / toolchain (aarch64). ARM external aarch64 toolchain (download).
+BR2_aarch64=y
+BR2_cortex_a55=y
+BR2_ARM_FPU_VFPV4=y
+BR2_TOOLCHAIN_EXTERNAL=y
+BR2_TOOLCHAIN_EXTERNAL_ARM_AARCH64=y
+BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
+
+# Kernel: Rockchip Linux tree (arm64 Image + rk3568 DTBs). The kernel is built
+# for `booti` — the Image is flashed to SPI NAND offset 0xF80000; the DTB
+# (rk3568-nvr-demo-v12.dtb) is loaded to fdt_addr_r before boot.
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,rockchip-linux,kernel,develop-5.10)/kernel-develop-5.10.tar.gz"
+BR2_LINUX_KERNEL_DEFCONFIG="rockchip_linux_defconfig"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="rockchip/rk3568-nvr-demo-v12"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+# BalanSir kernel fragment (USB Ethernet/Wi-Fi/MPTCP/NFQUEUE — same stack as
+# the RPi target so the policy engine behaves identically).
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_BALANSIR_PATH)/board/rk68/linux.fragment"
+
+# Init: systemd (uses project deploy/systemd units, ADR-030)
+BR2_INIT_SYSTEMD=y
+
+# System
+BR2_TARGET_GENERIC_HOSTNAME="balansir-rk68"
+BR2_TARGET_GENERIC_ISSUE="BalanSir Network Policy Engine (RK3568)"
+
+# Debug UART: serial console on ttyS0 (NS16550 @ 0xFE660000) @115200.
+BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
+BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
+
+# Rootfs overlay + post-build hook (shared balansir.toml, systemd units).
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_BALANSIR_PATH)/board/rk68/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_BALANSIR_PATH)/board/rk68/post-build.sh"
+
+# BalanSir + runtime deps
+BR2_PACKAGE_BALANSIR=y
+BR2_PACKAGE_BALANSIR_OTA=y
+BR2_PACKAGE_HOST_RUSTC=y
+BR2_PACKAGE_NFTABLES=y
+BR2_PACKAGE_IPROUTE2=y
+BR2_PACKAGE_IPTABLES=y
+BR2_PACKAGE_OPENSSH=y
+# Wi-Fi (mission §3-4)
+BR2_PACKAGE_IW=y
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_WEXT=y
+
+# Rootfs: ext4 (NFS/TFTP workflow root), no tar
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="700M"
+# BR2_TARGET_ROOTFS_TAR is not set
+
+# Host tools for image assembly
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_KMOD_XZ=y
+BR2_PACKAGE_HOST_MTOOLS=y
+
+# Reproducible builds (ADR-029 principle; timestamps pinned)
+BR2_REPRODUCIBLE=y
