@@ -65,6 +65,12 @@ BR2_PACKAGE_IPROUTE2=y
 # (linuxfw: clear ip6tables). Without it the daemon exits at startup.
 BR2_PACKAGE_IPTABLES=y
 BR2_PACKAGE_OPENSSH=y
+# Wi-Fi (mission §3-4): iw (scan/connect for open networks) + wpa_supplicant
+# (WPA2/WPA3/EAP). USB adapters (TP-Link TL-WN727N and other Linux-compatible
+# 802.11 USB dongles) work through the executor's capability-based backend.
+BR2_PACKAGE_IW=y
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_WEXT=y
 
 # Operator tools
 BR2_PACKAGE_TAILSCALE=y
@@ -84,9 +90,6 @@ BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_GENIMAGE=y
 BR2_PACKAGE_HOST_KMOD_XZ=y
 BR2_PACKAGE_HOST_MTOOLS=y
-
-# OTA image size
-BR2_TARGET_ROOTFS_EXT2_OTA_SIZE="2048M"
 
 # Reproducible builds (ADR-029 principle; timestamps pinned)
 BR2_REPRODUCIBLE=y

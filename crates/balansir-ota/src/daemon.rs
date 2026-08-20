@@ -23,7 +23,10 @@ fn default_boot_mount() -> String {
 }
 
 /// OTA installer. Instantiated per `install` call; holds no long-lived state.
-pub struct OtaDaemon;
+pub struct OtaDaemon {
+    boot_partition: BootPartition,
+    config: OtaConfig,
+}
 
 impl OtaDaemon {
     /// Create the installer and ensure A/B cmdline files exist on the boot
@@ -38,7 +41,20 @@ impl OtaDaemon {
         let boot_partition = BootPartition::new(&config.boot_mount);
         boot_partition.ensure_slot_cmdlines(&cmdline_a, &cmdline_b)?;
 
-        Ok(Self)
+        Ok(Self {
+            boot_partition,
+            config,
+        })
+    }
+
+    /// Access to the boot partition manager (for cmdline switching).
+    pub fn boot_partition(&self) -> &BootPartition {
+        &self.boot_partition
+    }
+
+    /// The installer configuration (boot mount point, etc.).
+    pub fn config(&self) -> &OtaConfig {
+        &self.config
     }
 
     /// Install the image to the inactive slot.
@@ -90,24 +106,54 @@ impl OtaDaemon {
             return Err(Error::Fatal(format!("dd failed: {}", stderr)));
         }
 
-        // Verify written image by reading back and checking hash
+        // Verify the written image: hash the source image up front and compare
+        // against the partition read-back. A mismatch is fatal (fail closed) —
+        // an unverified slot must never be marked bootable.
         info!("Verifying written image...");
-        let verify_output = Command::new("sha256sum")
-            .arg(&target_partition)
-            .output()
-            .map_err(|e| Error::Fatal(format!("sha256sum: {e}")))?;
-
-        if !verify_output.status.success() {
-            return Err(Error::Fatal("sha256sum verification failed".into()));
+        let source_hash = sha256_hex(&image);
+        let written_prefix_hash = hash_partition_prefix(&target_partition, image.len())?;
+        if written_prefix_hash != source_hash {
+            return Err(Error::Fatal(format!(
+                "image verification failed: written {written_prefix_hash} != source {source_hash}"
+            )));
         }
 
-        let _written_hash = String::from_utf8_lossy(&verify_output.stdout)
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string();
-
-        info!("Installation complete on slot {}", target_slot);
+        info!("Installation complete on slot {target_slot} (verified {source_hash})");
         Ok(())
     }
+}
+
+/// Compute the hex sha256 of a byte slice (pure Rust, no shell).
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Hash the first `len` bytes of a partition (read-back verification). The
+/// slot partition is larger than the image, so only the image-length prefix is
+/// compared — trailing filesystem padding must not be included.
+fn hash_partition_prefix(partition: &str, len: usize) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(partition).map_err(Error::Io)?;
+    use std::io::Read;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    let mut remaining = len;
+    while remaining > 0 {
+        let chunk = remaining.min(buf.len());
+        let n = file.read(&mut buf[..chunk]).map_err(Error::Io)?;
+        if n == 0 {
+            break; // EOF before the expected length — write is truncated
+        }
+        hasher.update(&buf[..n]);
+        remaining -= n;
+    }
+    if remaining > 0 {
+        return Err(Error::Fatal(format!(
+            "image verification failed: partition shorter than image ({remaining} bytes missing)"
+        )));
+    }
+    Ok(hex::encode(hasher.finalize()))
 }

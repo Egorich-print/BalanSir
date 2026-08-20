@@ -10,7 +10,7 @@
 //!   balansir-ota boot-confirm          # confirm current slot is healthy
 
 use balansir_ota::daemon::{OtaConfig, OtaDaemon};
-use balansir_ota::slot::BootMetadata;
+use balansir_ota::slot::{BootMetadata, BootPartition};
 
 fn usage() {
     eprintln!("Usage: balansir-ota <command>");
@@ -45,36 +45,74 @@ fn cmd_status() -> Result<(), String> {
 
 fn cmd_boot_confirm() -> Result<(), String> {
     let mut meta = load_metadata()?;
+    // Only meaningful when an update is pending/trying: confirm the slot that
+    // actually booted. When state is Confirmed this is a no-op (idempotent).
+    let boot = BootPartition::new(boot_mount());
+    let booted = boot.detect_current_slot().unwrap_or(meta.active_slot());
     let version = env!("CARGO_PKG_VERSION").to_string();
-    meta.confirm_boot(version)
-        .map_err(|e| format!("confirm: {e}"))?;
-    meta.save().map_err(|e| format!("save: {e}"))?;
-    println!("Slot {} confirmed", meta.active_slot());
+    // If the booted slot differs from the confirmed active slot, promote it.
+    if booted != meta.active_slot() {
+        meta.active_slot = booted;
+        meta.active_version = version;
+        meta.state = balansir_ota::slot::BootState::Confirmed;
+        meta.tries_remaining = 3;
+        meta.save().map_err(|e| format!("save: {e}"))?;
+        println!("Boot confirmed for slot {}", meta.active_slot());
+    } else {
+        // Same slot: normal confirm path.
+        meta.confirm_boot(version)
+            .map_err(|e| format!("confirm: {e}"))?;
+        meta.save().map_err(|e| format!("save: {e}"))?;
+        println!("Slot {} confirmed", meta.active_slot());
+    }
     Ok(())
 }
 
 fn cmd_rollback() -> Result<(), String> {
     let mut meta = load_metadata()?;
+    let target = meta.active_slot();
     meta.force_rollback("manual rollback via CLI".to_string())
         .map_err(|e| format!("rollback: {e}"))?;
+    // Roll back the boot cmdline to the confirmed slot and make the next boot
+    // land there (fail-safe: the slot marked active is what we boot).
+    let boot = BootPartition::new(boot_mount());
+    boot.switch_to_slot(target)
+        .map_err(|e| format!("switch boot slot: {e}"))?;
     meta.save().map_err(|e| format!("save: {e}"))?;
-    println!("Rolled back to slot {}", meta.active_slot());
+    println!("Rolled back to slot {}", target);
     println!("Reboot required to apply");
     Ok(())
 }
 
+fn boot_mount() -> String {
+    std::env::var("BALANSIR_BOOT_MOUNT").unwrap_or_else(|_| "/boot".to_string())
+}
+
 async fn cmd_update(image_path: &str, config: &OtaConfig) -> Result<(), String> {
     let image = std::fs::read(image_path).map_err(|e| format!("read image: {e}"))?;
-    let meta = load_metadata()?;
-    let inactive = meta.next_slot();
+    let mut meta = load_metadata()?;
+    // The target slot is the one NOT currently active (mission §13: install to
+    // the free slot, never the running one).
+    let inactive = meta.active_slot().other();
     println!("Installing to slot {inactive} ({} bytes)...", image.len());
     let daemon = OtaDaemon::new(config.clone()).map_err(|e| format!("init OTA daemon: {e}"))?;
     daemon
         .install(image, inactive)
         .await
         .map_err(|e| format!("install failed: {e}"))?;
+    // Mark the slot for boot on the next reboot: switch the boot cmdline and
+    // record the Pending state so `boot-confirm`/`rollback` have a real
+    // decision to make.
+    let boot = daemon.boot_partition();
+    boot.switch_to_slot(inactive)
+        .map_err(|e| format!("switch boot slot: {e}"))?;
+    meta.next_slot = inactive;
+    meta.state = balansir_ota::slot::BootState::Pending;
+    meta.tries_remaining = 3;
+    meta.save().map_err(|e| format!("save metadata: {e}"))?;
     println!("Image installed to slot {inactive}");
-    println!("Reboot required to activate");
+    println!("Boot switched to slot {inactive}; reboot required to activate");
+    println!("After boot, run `balansir-ota boot-confirm` to confirm the slot");
     Ok(())
 }
 

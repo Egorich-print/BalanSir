@@ -73,3 +73,24 @@ CONFIG_NETLINK_DIAG=y
 CONFIG_USB_NET_DRIVERS=y
 CONFIG_USB_NET_AX8817X=y
 CONFIG_USB_RTL8152=y
+
+# Wi-Fi (mission §3-4): USB 802.11 adapters (RTL8188/8189, MT7601, AR9271,
+# ...). Built as modules so any Linux-compatible dongle the operator plugs in
+# loads its driver automatically; the executor's capability-based backend
+# works with all of them (no vendor pinning).
+CONFIG_WIRELESS=y
+CONFIG_CFG80211=y
+CONFIG_MAC80211=y
+CONFIG_RT2X00=y
+CONFIG_RT2800USB=y
+CONFIG_RTL8187=y
+CONFIG_MT7601U=m
+CONFIG_USB_NET_RNDIS_HOST=y
+CONFIG_USB_NET_CDCETHER=y
+
+# MPTCP (mission §5): native kernel Multipath TCP for path diversification and
+# failover across the WAN/LAN links.
+CONFIG_MPTCP=y
+CONFIG_INET_MPTCP_DIAG=y
+CONFIG_MPTCP_PM_ADDR_TYPE=y
+CONFIG_MPTCP_IPV6=y

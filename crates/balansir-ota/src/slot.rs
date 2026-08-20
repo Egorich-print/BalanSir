@@ -267,6 +267,16 @@ impl BootMetadata {
             self.tries_remaining = 3;
             self.last_successful_boot = current_timestamp();
             self.save()?;
+        } else if self.state == BootState::Pending {
+            // The slot we switched to at update time actually booted and is
+            // healthy: promote it (mission §13 — confirm after a real update).
+            info!("Pending boot confirmed for slot {}", self.next_slot);
+            self.active_slot = self.next_slot;
+            self.active_version = version;
+            self.state = BootState::Confirmed;
+            self.tries_remaining = 3;
+            self.last_successful_boot = current_timestamp();
+            self.save()?;
         }
         Ok(())
     }
@@ -281,10 +291,12 @@ impl BootMetadata {
         self.state = BootState::RollingBack;
         self.next_slot = self.active_slot;
         self.next_version = self.active_version.clone();
-        self.state = BootState::Confirmed;
         self.tries_remaining = 3;
         self.rollback_count += 1;
         self.last_rollback_reason = reason;
+        // NB: we keep the RollingBack state until the caller switches the boot
+        // cmdline back; `save()` persists the intent. The cmdline switch is
+        // done by the CLI/daemon, so the state machine never self-contradicts.
         self.save()
     }
 
@@ -432,5 +444,44 @@ mod tests {
         let cmdline = boot.read_cmdline().unwrap();
         assert!(cmdline.contains("mmcblk0p3"));
         assert!(cmdline.contains("balansir_slot=B"));
+    }
+
+    #[test]
+    fn pending_boot_is_confirmed_and_promotes_slot() {
+        // Mission §13: after `balansir-ota update` sets Pending, boot-confirm
+        // must promote the updated slot to active (previously unreachable —
+        // confirm_boot only acted on Trying, which nothing ever set).
+        let mut meta = test_meta();
+        meta.state = BootState::Pending;
+        meta.next_slot = Slot::B;
+        meta.active_slot = Slot::A;
+        meta.confirm_boot("v2".to_string()).unwrap();
+        assert_eq!(meta.active_slot, Slot::B);
+        assert_eq!(meta.state, BootState::Confirmed);
+        assert_eq!(meta.active_version, "v2");
+    }
+
+    #[test]
+    fn rollback_targets_the_active_slot_and_keeps_state() {
+        // Mission §13: rollback must keep RollingBack (not immediately
+        // overwrite Confirmed) so the cmdline switch + reboot actually apply.
+        let mut meta = test_meta();
+        meta.state = BootState::Pending;
+        meta.next_slot = Slot::B;
+        meta.active_slot = Slot::A;
+        meta.force_rollback("test".to_string()).unwrap();
+        assert_eq!(meta.state, BootState::RollingBack);
+        assert_eq!(meta.next_slot, Slot::A);
+        assert_eq!(meta.rollback_count, 1);
+        assert_eq!(meta.last_rollback_reason, "test");
+    }
+
+    #[test]
+    fn inactive_slot_is_the_other_slot() {
+        // The installer targets active_slot().other(), never next_slot
+        // (next_slot can equal active before any update).
+        let meta = test_meta();
+        assert_eq!(meta.active_slot(), Slot::A);
+        assert_eq!(meta.active_slot().other(), Slot::B);
     }
 }
