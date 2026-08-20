@@ -726,7 +726,6 @@ mod tests {
         let store = balansir_common::state::FileStateStore::new(
             &balansir_common::state::StateStoreConfig {
                 base_path: dir.path().join("state"),
-                ..Default::default()
             },
         )
         .await

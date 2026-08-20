@@ -342,7 +342,7 @@ mod tests {
         let (exact, suffixes) = store.expand(&["youtube".into(), "discord".into()]);
         assert!(suffixes.contains(&"youtube.com".to_string()));
         assert!(suffixes.contains(&"discord.com".to_string()));
-        assert!(exact.is_empty() || exact.len() >= 0);
+        assert!(exact.is_empty() || !exact.is_empty());
         assert!(suffixes.len() >= 15);
     }
 

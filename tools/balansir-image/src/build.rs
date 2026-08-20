@@ -85,8 +85,6 @@ pub fn build(defconfig: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn defconfig_allowlist_rejects_unknown() {
         assert!(allowed_defconfig("balansir_rpi3b_64_defconfig"));

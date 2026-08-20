@@ -156,9 +156,11 @@ mod tests {
     use super::*;
 
     fn sample_set() -> B4Set {
-        let mut set = crate::set::B4Set::default();
-        set.enabled = true;
-        set.name = "test".into();
+        let mut set = crate::set::B4Set {
+            enabled: true,
+            name: "test".into(),
+            ..Default::default()
+        };
         set.tcp.drop_sack = true;
         set.tcp.syn_ttl = 7;
         set.udp.mode = "fake".into();
@@ -208,7 +210,7 @@ mod tests {
         // Build a TCP packet with 100 bytes of payload.
         let raw = crate::packet::tests_synth_syn();
         let mut pkt = TcpPacket::parse(&raw).unwrap();
-        pkt.raw.extend_from_slice(&vec![0x16u8; 100]);
+        pkt.raw.extend_from_slice(&[0x16u8; 100]);
         // Re-parse with payload.
         let pkt = TcpPacket::parse(&pkt.raw).unwrap();
         assert!(pkt.tcp_payload().len() >= 100);

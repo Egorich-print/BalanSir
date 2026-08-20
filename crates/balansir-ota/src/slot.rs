@@ -159,13 +159,15 @@ impl BootMetadata {
         let path = path.as_ref();
         if !path.exists() {
             info!("No OTA boot metadata found, creating default (Slot A)");
-            let mut meta = Self::default();
-            meta.test_save_path = Some(path.to_path_buf());
+            let meta = Self {
+                test_save_path: Some(path.to_path_buf()),
+                ..Self::default()
+            };
             meta.save()?;
             return Ok(meta);
         }
 
-        let content = fs::read_to_string(path).map_err(|e| Error::Io(e))?;
+        let content = fs::read_to_string(path).map_err(Error::Io)?;
         let mut meta: BootMetadata = toml::from_str(&content)
             .map_err(|e| Error::Misconfiguration(format!("parse boot metadata: {e}")))?;
         meta.test_save_path = Some(path.to_path_buf());
@@ -181,7 +183,7 @@ impl BootMetadata {
     pub fn save_to(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| Error::Io(e))?;
+            fs::create_dir_all(parent).map_err(Error::Io)?;
         }
 
         let content = toml::to_string_pretty(self)
@@ -189,8 +191,8 @@ impl BootMetadata {
 
         // Atomic write: write to temp then rename
         let tmp_path = path.with_extension("toml.tmp");
-        fs::write(&tmp_path, content).map_err(|e| Error::Io(e))?;
-        fs::rename(&tmp_path, path).map_err(|e| Error::Io(e))?;
+        fs::write(&tmp_path, content).map_err(Error::Io)?;
+        fs::rename(&tmp_path, path).map_err(Error::Io)?;
 
         debug!(
             "Saved OTA boot metadata: active={} state={:?} tries={}",
