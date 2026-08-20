@@ -73,6 +73,12 @@ pub enum MsgType {
     // LAN); the executor installs the DNAT `nat prerouting` rules. Payloads are
     // postcard `UpnpOp` / `UpnpOpResult`.
     UpnpOp,
+    // Wi-Fi driver: scan / connect / status / disconnect. Payloads are
+    // postcard `WifiOp` / `WifiResult`.
+    WifiOp,
+    // MPTCP: enable/disable the kernel MPTCP stack and manage paths. Payloads
+    // are postcard `MptcpOp` / `MptcpResult`.
+    MptcpOp,
     ResponseOk,
     ResponseError,
     ResponseData,

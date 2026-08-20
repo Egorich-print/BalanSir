@@ -107,6 +107,44 @@ impl NetlinkInterfaceBackend {
         Ok(links)
     }
 
+    /// Dump all IPv4/IPv6 addresses on an interface (RTM_GETADDR). Returns a
+    /// map of interface index → list of "ip/prefix" strings.
+    async fn dump_addresses(&self, ifindex: u32) -> Result<Vec<String>, String> {
+        let handle = self.handle.lock().await;
+        let mut req = handle.address().get().execute();
+        let mut out = Vec::new();
+        while let Some(addr) = req.try_next().await.map_err(|e| e.to_string())? {
+            let attrs = addr.attributes;
+            if addr.header.index != ifindex {
+                continue;
+            }
+            let Some(addr_bytes) = attrs.iter().find_map(|a| match a {
+                netlink_packet_route::address::AddressAttribute::Address(b) => Some(b),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let prefix = addr.header.prefix_len;
+            match addr.header.family {
+                2 /* AF_INET */ => {
+                    if addr_bytes.len() == 4 {
+                        out.push(format!(
+                            "{}.{}.{}.{}/{}",
+                            addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3], prefix
+                        ));
+                    }
+                }
+                10 /* AF_INET6 */ => {
+                    if addr_bytes.len() == 16 {
+                        out.push(format!("{}/{}", ipv6_to_string(addr_bytes), prefix));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
     async fn find_index(&self, name: &str) -> Result<u32, String> {
         let links = self.dump_links(name).await?;
         links
@@ -145,6 +183,141 @@ impl NetlinkInterfaceBackend {
         }
         None
     }
+}
+
+/// Format an IPv6 byte array as `2001:db8::1`.
+#[cfg(target_os = "linux")]
+pub fn ipv6_to_string(bytes: &[u8]) -> String {
+    use std::net::Ipv6Addr;
+    let mut octets = [0u8; 16];
+    octets.copy_from_slice(bytes);
+    Ipv6Addr::from(octets).to_string()
+}
+
+/// Fill device identity fields (driver/bus/vendor/product/model, USB flag,
+/// Wi-Fi info) from sysfs. `/sys/class/net/<name>/device/` is a symlink to the
+/// PCI/USB device node; the real adapter model is found one level up (the
+/// USB interface → the USB device).
+#[cfg(target_os = "linux")]
+fn enrich_device_info(name: &str, info: &mut InterfaceInfo) {
+    let base = format!("/sys/class/net/{name}");
+    let read = |p: &str| -> Option<String> {
+        std::fs::read_to_string(p)
+            .ok()
+            .map(|s| s.trim().to_string())
+    };
+    let device = format!("{base}/device");
+    let driver = format!("{device}/driver");
+
+    // Driver: the symlink target of .../device/driver (last path component).
+    if let Ok(target) = std::fs::read_link(&driver) {
+        info.driver = target.file_name().map(|s| s.to_string_lossy().to_string());
+    }
+    // USB devices carry idVendor/idProduct/ manufacturer/product at the USB
+    // device level (../../idVendor from the interface node).
+    let dev_uevent = read(&format!("{device}/uevent"));
+    if let Some(uevent) = dev_uevent {
+        for line in uevent.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                match k {
+                    "PCI_ID" => {
+                        let mut parts = v.split(':');
+                        info.vendor_id = parts.next().map(|s| s.to_string());
+                        info.product_id = parts.next().map(|s| s.to_string());
+                    }
+                    "USB_ID" => {
+                        let mut parts = v.split(':');
+                        info.vendor_id = parts.next().map(|s| s.to_string());
+                        info.product_id = parts.next().map(|s| s.to_string());
+                    }
+                    "DEVTYPE" => {}
+                    "DRIVER" => {
+                        if info.driver.is_none() {
+                            info.driver = Some(v.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // The USB bus is where idVendor/idProduct/product live; walk up to the
+    // USB device node (the net device sits under the USB interface).
+    let mut probe = std::path::PathBuf::from(&device);
+    for _ in 0..4 {
+        let vid = read(&probe.join("idVendor"));
+        let pid = read(&probe.join("idProduct"));
+        let product = read(&probe.join("product"));
+        let manufacturer = read(&probe.join("manufacturer"));
+        if vid.is_some() || pid.is_some() {
+            info.vendor_id = vid.or(info.vendor_id);
+            info.product_id = pid.or(info.product_id);
+            if product.is_some() {
+                info.device_model = product;
+            } else {
+                info.device_model = info.device_model.or(manufacturer);
+            }
+            info.usb = true;
+            info.bus = Some("usb".into());
+            break;
+        }
+        // Walk one level up (USB interface → USB device).
+        let Some(parent) = probe.parent() else { break };
+        probe = parent.to_path_buf();
+    }
+    if info.bus.is_none() {
+        info.bus = read(&format!("{device}/bus"))
+            .and_then(|p| p.rsplit('/').next().map(|s| s.to_string()));
+    }
+    // PCI devices report vendor/device at the device node itself.
+    if info.vendor_id.is_none() {
+        info.vendor_id = read(&format!("{device}/vendor"))
+            .and_then(|s| s.strip_prefix("0x").map(|s| s.to_string()));
+        info.product_id = read(&format!("{device}/device"))
+            .and_then(|s| s.strip_prefix("0x").map(|s| s.to_string()));
+    }
+    // Wi-Fi presence: netlink kind reports wlan/wifi; also check the wireless
+    // sysfs dir (present on 802.11 devices) and /proc/net/wireless.
+    if info
+        .kind
+        .as_deref()
+        .map(|k| k.contains("wlan") || k == "wifi")
+        .unwrap_or(false)
+        || std::path::Path::new(&format!("{base}/wireless")).exists()
+    {
+        info.wifi = Some(read_wifi_state(name));
+    }
+}
+
+/// Read Wi-Fi state from `/proc/net/wireless` + sysfs for one interface.
+#[cfg(target_os = "linux")]
+fn read_wifi_state(name: &str) -> balansir_common::network::WifiInfo {
+    use balansir_common::network::WifiInfo;
+    let mut info = WifiInfo {
+        present: true,
+        ..Default::default()
+    };
+    let base = format!("/sys/class/net/{name}");
+    if let Ok(w) = std::fs::read_to_string(format!("{base}/wireless")) {
+        let mut lines = w.lines();
+        let _ = lines.next(); // header
+        let _ = lines.next(); // separator
+        if let Some(line) = lines.next() {
+            // Interface name, status, link(%), level(dBm), noise(dBm), discarded counters
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 4 {
+                if let Ok(link) = fields[2].trim_end_matches('.').parse::<u8>() {
+                    info.quality_pct = link;
+                }
+                if let Ok(level) = fields[3].trim_end_matches('.').parse::<i32>() {
+                    info.signal_dbm = level;
+                }
+            }
+        }
+    }
+    // ssid via `iw` is a shell call; the daemon's Wi-Fi manager reports it
+    // through WifiOp::Status instead. Here we only surface presence/link.
+    info
 }
 
 #[cfg(target_os = "linux")]
@@ -212,13 +385,36 @@ fn link_to_info(name: String, header: LinkHeader, attrs: Vec<LinkAttribute>) -> 
                 for li in infos {
                     if let netlink_packet_route::link::LinkInfo::Kind(kind) = li {
                         info.kind = Some(kind.to_string());
+                        info.if_type = Some(kind.to_string());
                     }
                 }
             }
             _ => {}
         }
     }
+    enrich_device_info(&info.name, &mut info);
     info
+}
+
+/// Fill link speed (Mbps) and duplex from sysfs. `/sys/class/net/<name>/speed`
+/// holds the negotiated link speed in Mbps (`-1` = unknown), and `duplex` is
+/// `full`/`half`. Also fills device identity fields when missing.
+#[cfg(target_os = "linux")]
+fn fill_speed_duplex(info: &mut InterfaceInfo) {
+    let base = format!("/sys/class/net/{}", info.name);
+    if let Ok(s) = std::fs::read_to_string(format!("{base}/speed")) {
+        if let Ok(speed) = s.trim().parse::<i64>() {
+            if speed > 0 {
+                info.speed_mbps = Some(speed as u64);
+            }
+        }
+    }
+    if let Ok(d) = std::fs::read_to_string(format!("{base}/duplex")) {
+        let d = d.trim().to_string();
+        if d == "full" || d == "half" {
+            info.duplex = Some(d);
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -239,21 +435,34 @@ fn apply_stats64(info: &mut InterfaceInfo, s: Stats64) {
 impl InterfaceBackend for NetlinkInterfaceBackend {
     async fn info(&self, interface: &str) -> Result<Vec<InterfaceInfo>, String> {
         let links = self.dump_links(interface).await?;
-        Ok(links
-            .into_iter()
-            .map(|(header, attrs)| {
-                let name = attrs
-                    .iter()
-                    .find_map(|a| match a {
-                        LinkAttribute::IfName(n) => Some(n.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| format!("link{}", header.index));
-                let mut info = link_to_info(name, header, attrs);
-                info.previous_mac = remembered_previous_mac(&info.name);
-                info
-            })
-            .collect())
+        let mut out = Vec::new();
+        for (header, attrs) in links {
+            let name = attrs
+                .iter()
+                .find_map(|a| match a {
+                    LinkAttribute::IfName(n) => Some(n.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| format!("link{}", header.index));
+            let mut info = link_to_info(name, header, attrs);
+            info.previous_mac = remembered_previous_mac(&info.name);
+            // Addresses (RTM_GETADDR) — separate netlink dump.
+            if let Ok(addrs) = self.dump_addresses(info.index as u32).await {
+                for a in addrs {
+                    if a.contains(':') {
+                        info.ipv6.push(a);
+                    } else {
+                        info.ipv4.push(a);
+                    }
+                }
+            }
+            // Speed + duplex from sysfs (kernel exposes IFLA_INFO_DATA ether
+            // speed in netlink-packet-route's LinkInfo, but the value is also
+            // available via sysfs which is simpler and works for any device).
+            fill_speed_duplex(&mut info);
+            out.push(info);
+        }
+        Ok(out)
     }
 
     async fn set_mac(&self, interface: &str, mac: &str) -> Result<InterfaceResult, String> {

@@ -118,6 +118,10 @@ pub struct SubsystemManager {
     xray: RwLock<Option<crate::xray_manager::XrayManagerHandle>>,
     /// VPN pool control handle (pause/refresh/rotate/pin for the API seam).
     vpn: RwLock<Option<crate::vpn_manager::VpnManagerHandle>>,
+    /// Wi-Fi manager (mission §3, §4): scan/connect/status via the executor.
+    wifi: RwLock<Option<crate::wifi_manager::WifiManager>>,
+    /// MPTCP manager (mission §5): kernel stack state, paths, subflow health.
+    mptcp: RwLock<Option<crate::mptcp_manager::MptcpManager>>,
     /// Previous CPU sample for utilization deltas.
     cpu_prev: RwLock<Option<crate::system_stats::CpuSample>>,
     /// Previous interface counters for throughput deltas: name → (rx, tx, ms).
@@ -167,6 +171,8 @@ impl SubsystemManager {
             #[cfg(feature = "xray")]
             xray: RwLock::new(None),
             vpn: RwLock::new(None),
+            wifi: RwLock::new(None),
+            mptcp: RwLock::new(None),
             cpu_prev: RwLock::new(None),
             last_counters: RwLock::new(std::collections::HashMap::new()),
             capabilities: RwLock::new(None),
@@ -202,6 +208,16 @@ impl SubsystemManager {
     /// Attach the VPN pool control handle (pause/refresh/rotate/pin).
     pub async fn set_vpn_handle(&self, handle: crate::vpn_manager::VpnManagerHandle) {
         *self.vpn.write().await = Some(handle);
+    }
+
+    /// Attach the Wi-Fi manager (mission §3).
+    pub async fn set_wifi_manager(&self, manager: crate::wifi_manager::WifiManager) {
+        *self.wifi.write().await = Some(manager);
+    }
+
+    /// Attach the MPTCP manager (mission §5).
+    pub async fn set_mptcp_manager(&self, manager: crate::mptcp_manager::MptcpManager) {
+        *self.mptcp.write().await = Some(manager);
     }
 
     pub fn snapshot(&self) -> SharedSubsystemSnapshot {
@@ -276,6 +292,11 @@ impl SubsystemManager {
                 });
             }
         }
+
+        // Wi-Fi + MPTCP subsystem views (mission §3, §5): driven by the same
+        // interface snapshot; the managers forward typed ops to the executor.
+        self.refresh_wifi().await;
+        self.refresh_mptcp().await;
 
         // Capability profile (detected once, hardware-derived) ---------------
         if self.capabilities.read().await.is_none() {
@@ -433,6 +454,68 @@ impl SubsystemManager {
         drop(map);
 
         self.snapshot.update(|s| s.interface_rates = rates).await;
+    }
+
+    /// Publish the Wi-Fi manager snapshot into the unified subsystem view.
+    pub async fn publish_wifi(&self) {
+        let wifi = self.wifi.read().await;
+        if let Some(w) = wifi.as_ref() {
+            let snap = w.snapshot().read().await.clone();
+            self.snapshot
+                .update(|s| {
+                    s.wifi = balansir_common::subsystems::WifiSubsystemView {
+                        interfaces: snap.interfaces,
+                        networks: snap.networks,
+                        states: snap.states,
+                        last_error: snap.last_error,
+                        busy: snap.busy,
+                    };
+                })
+                .await;
+        }
+    }
+
+    /// Publish the MPTCP manager snapshot into the unified subsystem view.
+    pub async fn publish_mptcp(&self) {
+        let mptcp = self.mptcp.read().await;
+        if let Some(m) = mptcp.as_ref() {
+            let snap = m.snapshot().read().await.clone();
+            self.snapshot
+                .update(|s| {
+                    s.mptcp = balansir_common::subsystems::MptcpSubsystemView {
+                        enabled: snap.enabled,
+                        endpoints: snap.endpoints,
+                        subflows: snap.subflows,
+                        flow_health: snap.flow_health,
+                        throughput_mbps: snap.throughput_mbps,
+                        last_error: snap.last_error,
+                        busy: snap.busy,
+                    };
+                })
+                .await;
+        }
+    }
+
+    /// Detect Wi-Fi interfaces and refresh the Wi-Fi manager, then publish.
+    pub async fn refresh_wifi(&self) {
+        let interfaces = self.snapshot.read().await.interfaces.clone();
+        let wifi_interfaces = crate::wifi_manager::WifiManager::detect_wifi_interfaces(&interfaces);
+        let wifi = self.wifi.read().await;
+        if let Some(w) = wifi.as_ref() {
+            w.refresh(&wifi_interfaces).await;
+        }
+        drop(wifi);
+        self.publish_wifi().await;
+    }
+
+    /// Refresh the MPTCP manager and publish.
+    pub async fn refresh_mptcp(&self) {
+        let mptcp = self.mptcp.read().await;
+        if let Some(m) = mptcp.as_ref() {
+            m.refresh().await;
+        }
+        drop(mptcp);
+        self.publish_mptcp().await;
     }
 
     /// Run the periodic observation loop until the task is aborted.
@@ -826,6 +909,97 @@ impl balansir_common::subsystems::SubsystemControl for ControlImpl {
                 Ok(())
             }
             None => Err("VPN pool not configured (set BALANSIR_VPN_CONFIG)".to_string()),
+        }
+    }
+
+    // --- Wi-Fi (mission §3, §4) ---
+
+    async fn wifi_scan(
+        &self,
+        interface: &str,
+    ) -> Result<balansir_common::network::WifiResult, String> {
+        let manager = self.manager.wifi.read().await;
+        match manager.as_ref() {
+            Some(w) => {
+                let result = w.scan(interface).await?;
+                self.manager.publish_wifi().await;
+                Ok(result)
+            }
+            None => Err("Wi-Fi manager not attached".to_string()),
+        }
+    }
+
+    async fn wifi_connect(
+        &self,
+        interface: &str,
+        ssid: &str,
+        password: Option<String>,
+        identity: Option<String>,
+        security: Option<String>,
+    ) -> Result<balansir_common::network::WifiResult, String> {
+        let manager = self.manager.wifi.read().await;
+        match manager.as_ref() {
+            Some(w) => {
+                let result = w
+                    .connect(
+                        interface,
+                        ssid,
+                        password.as_deref(),
+                        identity.as_deref(),
+                        security.as_deref(),
+                    )
+                    .await?;
+                self.manager.publish_wifi().await;
+                Ok(result)
+            }
+            None => Err("Wi-Fi manager not attached".to_string()),
+        }
+    }
+
+    async fn wifi_disconnect(
+        &self,
+        interface: &str,
+    ) -> Result<balansir_common::network::WifiResult, String> {
+        let manager = self.manager.wifi.read().await;
+        match manager.as_ref() {
+            Some(w) => {
+                let result = w.disconnect(interface).await?;
+                self.manager.publish_wifi().await;
+                Ok(result)
+            }
+            None => Err("Wi-Fi manager not attached".to_string()),
+        }
+    }
+
+    // --- MPTCP (mission §5) ---
+
+    async fn mptcp_set_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<balansir_common::network::MptcpResult, String> {
+        let manager = self.manager.mptcp.read().await;
+        match manager.as_ref() {
+            Some(m) => {
+                let result = m.set_enabled(enabled).await?;
+                self.manager.publish_mptcp().await;
+                Ok(result)
+            }
+            None => Err("MPTCP manager not attached".to_string()),
+        }
+    }
+
+    async fn mptcp_set_endpoints(
+        &self,
+        endpoints: Vec<(String, String)>,
+    ) -> Result<balansir_common::network::MptcpResult, String> {
+        let manager = self.manager.mptcp.read().await;
+        match manager.as_ref() {
+            Some(m) => {
+                let result = m.set_endpoints(endpoints).await?;
+                self.manager.publish_mptcp().await;
+                Ok(result)
+            }
+            None => Err("MPTCP manager not attached".to_string()),
         }
     }
 }

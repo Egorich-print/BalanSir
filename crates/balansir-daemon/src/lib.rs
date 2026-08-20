@@ -6,6 +6,8 @@ pub mod capability;
 pub mod dns;
 pub mod dns_plane;
 pub mod driver;
+pub mod interface_probe;
+pub mod mptcp_manager;
 pub mod network_config;
 pub mod path_decision;
 pub mod policy;
@@ -18,6 +20,7 @@ pub mod system_stats;
 pub mod upnp;
 pub mod vpn_manager;
 pub mod wan_identity;
+pub mod wifi_manager;
 #[cfg(feature = "xray")]
 pub mod xray;
 #[cfg(feature = "xray")]

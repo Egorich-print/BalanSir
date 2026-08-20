@@ -120,7 +120,10 @@ async fn main() -> Result<()> {
     ));
 
     let services = std::sync::Arc::new(
-        ExecutorServices::new(executor, qos, interface, tailscale).with_gateway(gateway_backend),
+        ExecutorServices::new(executor, qos, interface, tailscale)
+            .with_gateway(gateway_backend)
+            .with_wifi(Box::new(balansir_executor::wifi::IwWifiBackend))
+            .with_mptcp(Box::new(balansir_executor::mptcp::IpTcpBackend)),
     );
 
     loop {

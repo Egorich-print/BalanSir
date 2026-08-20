@@ -32,7 +32,7 @@ balansir-control = { path = "../balansir-control" }
 balansir-api = { path = "../balansir-api" }
 balansir-b4 = { path = "../balansir-b4" }
 balansir-vpn = { path = "../balansir-vpn" }
-tokio = { workspace = true, features = ["rt", "net", "macros", "io-util", "fs", "time", "signal"] }
+tokio = { workspace = true, features = ["rt", "net", "macros", "io-util", "fs", "time", "signal", "process"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true

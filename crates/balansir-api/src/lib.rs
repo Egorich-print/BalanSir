@@ -172,6 +172,14 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
             post(subsystems::tailscale_reconnect),
         )
         .route("/tailscale/routes", post(subsystems::tailscale_set_routes))
+        // Wi-Fi (mission §3, §4) + MPTCP (mission §5).
+        .route("/wifi", get(subsystems::get_wifi))
+        .route("/wifi/scan", post(subsystems::wifi_scan))
+        .route("/wifi/connect", post(subsystems::wifi_connect))
+        .route("/wifi/disconnect", post(subsystems::wifi_disconnect))
+        .route("/mptcp", get(subsystems::get_mptcp))
+        .route("/mptcp/enabled", post(subsystems::set_mptcp_enabled))
+        .route("/mptcp/endpoints", post(subsystems::set_mptcp_endpoints))
         .with_state(state.clone())
         // Token auth is opt-in: only enforced when BALANSIR_API_TOKEN is set,
         // so it does not break health probes or local unauthenticated installs.

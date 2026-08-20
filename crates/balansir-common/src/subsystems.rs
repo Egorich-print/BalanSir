@@ -420,6 +420,44 @@ pub struct PathDecision {
     pub dpi_active: bool,
 }
 
+/// Wi-Fi subsystem view (detected interfaces, scan results, association state).
+/// No credentials are ever serialized into this view.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WifiSubsystemView {
+    /// Interfaces that look like Wi-Fi (kind `wlan`/`wifi`).
+    #[serde(default)]
+    pub interfaces: Vec<String>,
+    /// Most recent scan results.
+    #[serde(default)]
+    pub networks: Vec<crate::network::WifiNetwork>,
+    /// Association state per interface: `"connected"` / `"disconnected"`.
+    #[serde(default)]
+    pub states: Vec<(String, String)>,
+    pub last_error: Option<String>,
+    pub busy: bool,
+}
+
+/// MPTCP subsystem view (kernel stack state, paths, subflow health).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MptcpSubsystemView {
+    /// Whether the kernel MPTCP stack is enabled.
+    pub enabled: bool,
+    /// Local endpoints (paths) currently advertised.
+    #[serde(default)]
+    pub endpoints: Vec<crate::network::MptcpEndpoint>,
+    /// Live subflows observed in `/proc/net/mptcp`.
+    #[serde(default)]
+    pub subflows: Vec<crate::network::MptcpSubflow>,
+    /// Health per subflow: `"established"` / `"syn-sent"` / `"failing"`.
+    #[serde(default)]
+    pub flow_health: Vec<(String, String)>,
+    /// Estimated per-path throughput in Mbps.
+    #[serde(default)]
+    pub throughput_mbps: Vec<(String, u64)>,
+    pub last_error: Option<String>,
+    pub busy: bool,
+}
+
 /// A consistent point-in-time view of all non-policy subsystems.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubsystemSnapshot {
@@ -438,6 +476,12 @@ pub struct SubsystemSnapshot {
     /// VPN alternative-path pool (health-aware selection, rotation, LB).
     #[serde(default)]
     pub vpn_pool: VpnSnapshot,
+    /// Wi-Fi subsystem (detected interfaces, scan results, association state).
+    #[serde(default)]
+    pub wifi: WifiSubsystemView,
+    /// MPTCP subsystem (kernel stack enabled state, paths, subflow health).
+    #[serde(default)]
+    pub mptcp: MptcpSubsystemView,
     /// Unified path decision (direct / B4 / VPN) — one authoritative answer.
     #[serde(default)]
     pub path_decision: PathDecision,
@@ -534,4 +578,26 @@ pub trait SubsystemControl: Send + Sync {
     async fn vpn_rotate(&self) -> Result<(), String>;
     /// Pin a profile (by profile_id) for the pool's active selection.
     async fn vpn_set_pin(&self, profile_id: Option<String>) -> Result<(), String>;
+    /// Scan a Wi-Fi interface and return the scan results.
+    async fn wifi_scan(&self, interface: &str) -> Result<crate::network::WifiResult, String>;
+    /// Connect a Wi-Fi interface to a network (open / WPA / WPA2 / WPA3 /
+    /// EAP). `security` is auto-detected when None.
+    async fn wifi_connect(
+        &self,
+        interface: &str,
+        ssid: &str,
+        password: Option<String>,
+        identity: Option<String>,
+        security: Option<String>,
+    ) -> Result<crate::network::WifiResult, String>;
+    /// Disconnect a Wi-Fi interface.
+    async fn wifi_disconnect(&self, interface: &str) -> Result<crate::network::WifiResult, String>;
+    /// Set the MPTCP stack enabled/disabled.
+    async fn mptcp_set_enabled(&self, enabled: bool)
+        -> Result<crate::network::MptcpResult, String>;
+    /// Set the MPTCP local endpoints (`(address, interface)` list).
+    async fn mptcp_set_endpoints(
+        &self,
+        endpoints: Vec<(String, String)>,
+    ) -> Result<crate::network::MptcpResult, String>;
 }

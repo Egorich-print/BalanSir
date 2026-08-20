@@ -30,6 +30,8 @@ pub struct ExecutorServices {
     pub interface: Box<dyn crate::interface::InterfaceBackend>,
     pub tailscale: Box<dyn crate::tailscale::TailscaleDriver>,
     pub gateway: Box<dyn crate::gateway::GatewayBackend>,
+    pub wifi: Box<dyn crate::wifi::WifiBackend>,
+    pub mptcp: Box<dyn crate::mptcp::MptcpBackend>,
 }
 
 impl ExecutorServices {
@@ -45,11 +47,23 @@ impl ExecutorServices {
             interface,
             tailscale,
             gateway: Box::new(crate::gateway::RecordOnlyGatewayBackend::default()),
+            wifi: Box::new(crate::wifi::IwWifiBackend),
+            mptcp: Box::new(crate::mptcp::ReadOnlyMptcpBackend),
         }
     }
 
     pub fn with_gateway(mut self, gateway: Box<dyn crate::gateway::GatewayBackend>) -> Self {
         self.gateway = gateway;
+        self
+    }
+
+    pub fn with_wifi(mut self, wifi: Box<dyn crate::wifi::WifiBackend>) -> Self {
+        self.wifi = wifi;
+        self
+    }
+
+    pub fn with_mptcp(mut self, mptcp: Box<dyn crate::mptcp::MptcpBackend>) -> Self {
+        self.mptcp = mptcp;
         self
     }
 }
@@ -583,6 +597,8 @@ fn is_allowlisted(msg_type: MsgType) -> bool {
             | MsgType::DpiOp
             | MsgType::GatewayOp
             | MsgType::UpnpOp
+            | MsgType::WifiOp
+            | MsgType::MptcpOp
     )
 }
 
@@ -868,6 +884,59 @@ pub async fn dispatch(msg: &IpcMessage, services: &ExecutorServices) -> IpcMessa
             };
             match executor.upnp_op(&op).await {
                 Ok(result) => data_response(msg.correlation_id, &result),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+            }
+        }
+        // Wi-Fi driver: scan / connect / status / disconnect. All arguments are
+        // validated before any `iw`/`wpa_cli` spawn (see wifi.rs).
+        MsgType::WifiOp => {
+            let Ok(op) = postcard::from_bytes::<balansir_common::network::WifiOp>(&msg.payload)
+            else {
+                return IpcMessage::response_error(msg.correlation_id, "invalid WifiOp payload");
+            };
+            let result = match &op {
+                balansir_common::network::WifiOp::Scan { interface } => {
+                    services.wifi.scan(interface).await
+                }
+                balansir_common::network::WifiOp::Connect { .. } => {
+                    services.wifi.connect(&op).await
+                }
+                balansir_common::network::WifiOp::Status { interface } => {
+                    services.wifi.status(interface).await
+                }
+                balansir_common::network::WifiOp::Disconnect { interface } => {
+                    services.wifi.disconnect(interface).await
+                }
+            };
+            match result {
+                Ok(r) => data_response(msg.correlation_id, &r),
+                Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
+            }
+        }
+        // MPTCP: sysctl + `ip mptcp endpoint` management. The daemon only
+        // sends typed requests; the executor owns all MPTCP kernel state.
+        MsgType::MptcpOp => {
+            let Ok(op) = postcard::from_bytes::<balansir_common::network::MptcpOp>(&msg.payload)
+            else {
+                return IpcMessage::response_error(msg.correlation_id, "invalid MptcpOp payload");
+            };
+            let result = match &op {
+                balansir_common::network::MptcpOp::SetEnabled { enabled } => {
+                    services.mptcp.set_enabled(*enabled).await
+                }
+                balansir_common::network::MptcpOp::AddEndpoint { address, interface } => {
+                    services
+                        .mptcp
+                        .add_endpoint(address, interface.as_deref().unwrap_or(""))
+                        .await
+                }
+                balansir_common::network::MptcpOp::RemoveEndpoint { address } => {
+                    services.mptcp.remove_endpoint(address).await
+                }
+                balansir_common::network::MptcpOp::Status => services.mptcp.status().await,
+            };
+            match result {
+                Ok(r) => data_response(msg.correlation_id, &r),
                 Err(e) => IpcMessage::response_error(msg.correlation_id, &e.to_string()),
             }
         }

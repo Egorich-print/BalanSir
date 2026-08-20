@@ -191,6 +191,30 @@ async fn main() -> Result<()> {
             .set_interface_filter(std::env::var("BALANSIR_INTERFACES").unwrap_or_default())
             .await;
 
+        // Wi-Fi subsystem (mission §3, §4): scan/connect/status/disconnect via
+        // the executor. The manager is attached unconditionally so the WebUI
+        // always has a Wi-Fi tab even when no adapter is present.
+        {
+            let exec: std::sync::Arc<dyn balansir_daemon::wifi_manager::WifiExec> = executor_client
+                .clone()
+                as std::sync::Arc<dyn balansir_daemon::wifi_manager::WifiExec>;
+            let wifi = balansir_daemon::wifi_manager::WifiManager::new(exec);
+            manager.set_wifi_manager(wifi).await;
+        }
+
+        // MPTCP subsystem (mission §5): kernel stack state, paths, subflow
+        // health. Attached unconditionally; status reports "unsupported" when
+        // the kernel lacks MPTCP.
+        {
+            let exec: std::sync::Arc<dyn balansir_daemon::mptcp_manager::MptcpExec> =
+                executor_client.clone()
+                    as std::sync::Arc<dyn balansir_daemon::mptcp_manager::MptcpExec>;
+            let mptcp = balansir_daemon::mptcp_manager::MptcpManager::new(exec);
+            // Default intent: enable MPTCP when the kernel supports it.
+            let _ = mptcp.set_enabled(true).await;
+            manager.set_mptcp_manager(mptcp).await;
+        }
+
         // P7.2 (ADR-026) B4 component: policy-controlled connectivity
         // adaptation. Loads the optional B4 config (BALANSIR_B4_CONFIG). The
         // B4Manager runs the engine per configured flow, executes MTU/DNS-path

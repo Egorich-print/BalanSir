@@ -622,3 +622,151 @@ pub async fn events_stream(State(state): State<Arc<ApiState>>) -> impl IntoRespo
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(20)))
         .into_response()
 }
+
+/// `GET /wifi` — Wi-Fi subsystem view (detected interfaces, scan results,
+/// association state). No credentials ever cross the API.
+pub async fn get_wifi(State(state): State<Arc<ApiState>>) -> Response {
+    let snapshot = match snapshot_or_unavailable(&state).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    Json(snapshot.wifi).into_response()
+}
+
+/// Body for `POST /wifi/scan`.
+#[derive(Deserialize)]
+pub struct WifiScanBody {
+    pub interface: String,
+}
+
+/// `POST /wifi/scan` — scan a Wi-Fi interface.
+pub async fn wifi_scan(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<WifiScanBody>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match control.wifi_scan(&body.interface).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => error_response(&e),
+    }
+}
+
+/// Body for `POST /wifi/connect`.
+#[derive(Deserialize)]
+pub struct WifiConnectBody {
+    pub interface: String,
+    pub ssid: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub identity: Option<String>,
+    #[serde(default)]
+    pub security: Option<String>,
+}
+
+/// `POST /wifi/connect` — connect a Wi-Fi interface (open / WPA / WPA2 /
+/// WPA3 / EAP). Security is auto-detected from the last scan when omitted.
+pub async fn wifi_connect(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<WifiConnectBody>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match control
+        .wifi_connect(
+            &body.interface,
+            &body.ssid,
+            body.password,
+            body.identity,
+            body.security,
+        )
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => error_response(&e),
+    }
+}
+
+/// Body for `POST /wifi/disconnect`.
+#[derive(Deserialize)]
+pub struct WifiDisconnectBody {
+    pub interface: String,
+}
+
+/// `POST /wifi/disconnect`.
+pub async fn wifi_disconnect(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<WifiDisconnectBody>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match control.wifi_disconnect(&body.interface).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => error_response(&e),
+    }
+}
+
+/// `GET /mptcp` — MPTCP subsystem view.
+pub async fn get_mptcp(State(state): State<Arc<ApiState>>) -> Response {
+    let snapshot = match snapshot_or_unavailable(&state).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    Json(snapshot.mptcp).into_response()
+}
+
+/// Body for `POST /mptcp/enabled`.
+#[derive(Deserialize)]
+pub struct MptcpEnabledBody {
+    pub enabled: bool,
+}
+
+/// `POST /mptcp/enabled` — enable/disable the kernel MPTCP stack.
+pub async fn set_mptcp_enabled(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<MptcpEnabledBody>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match control.mptcp_set_enabled(body.enabled).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => error_response(&e),
+    }
+}
+
+/// Body for `POST /mptcp/endpoints`.
+#[derive(Deserialize)]
+pub struct MptcpEndpointsBody {
+    /// List of `(address, interface)` pairs to advertise as MPTCP paths.
+    #[serde(default)]
+    pub endpoints: Vec<(String, String)>,
+}
+
+/// `POST /mptcp/endpoints` — set the MPTCP local endpoints (paths).
+pub async fn set_mptcp_endpoints(
+    State(state): State<Arc<ApiState>>,
+    Json(body): Json<MptcpEndpointsBody>,
+) -> Response {
+    let control = match control_or_unavailable(&state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    for (addr, _) in &body.endpoints {
+        if addr.parse::<std::net::IpAddr>().is_err() {
+            return error_response(&format!("invalid endpoint address: {addr}"));
+        }
+    }
+    match control.mptcp_set_endpoints(body.endpoints).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => error_response(&e),
+    }
+}

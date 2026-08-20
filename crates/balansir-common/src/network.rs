@@ -62,7 +62,43 @@ pub struct InterfaceInfo {
     /// Link is administratively UP and carrier present.
     pub link_up: bool,
     pub mtu: u32,
+    /// Link speed in Mbps reported by the kernel (netlink `IFLA_INFO_DATA`
+    /// ether speed, or sysfs `speed`). `None` for virtual/unknown devices.
     pub speed_mbps: Option<u64>,
+    /// Negotiated duplex: `"full"`, `"half"`, or `None` when unknown.
+    #[serde(default)]
+    pub duplex: Option<String>,
+    /// Maximum throughput the adapter can actually achieve, measured in Mbps.
+    /// Measured with iperf3 (when available) or the Rust-native probe; the
+    /// mission requires a real measurement, not just the advertised link speed.
+    #[serde(default)]
+    pub max_throughput_mbps: Option<u64>,
+    /// Whether the interface is USB-backed (sysfs `device/bus == usb`).
+    #[serde(default)]
+    pub usb: bool,
+    /// Kernel driver bound to the device (sysfs `device/driver`), e.g.
+    /// `r8152`, `ax88179_178a`, `mt76x0u`.
+    #[serde(default)]
+    pub driver: Option<String>,
+    /// Physical bus the device sits on: `usb`, `pci`, `platform`, ...
+    #[serde(default)]
+    pub bus: Option<String>,
+    /// Vendor identifier (USB `idVendor` / PCI `vendor`), hex without `0x`.
+    #[serde(default)]
+    pub vendor_id: Option<String>,
+    /// Product identifier (USB `idProduct` / PCI `device`), hex without `0x`.
+    #[serde(default)]
+    pub product_id: Option<String>,
+    /// Human-readable device model/product name (sysfs `device/product` or
+    /// USB `product`), e.g. `Realtek USB 2.5GbE Family Controller`.
+    #[serde(default)]
+    pub device_model: Option<String>,
+    /// Interface type (netlink `IFLA_INFO_KIND`), e.g. `wlan`, `ether`.
+    #[serde(default)]
+    pub if_type: Option<String>,
+    /// Wi-Fi link data when this is a wireless interface.
+    #[serde(default)]
+    pub wifi: Option<WifiInfo>,
     pub ipv4: Vec<String>,
     pub ipv6: Vec<String>,
     /// Live counters (if available).
@@ -77,6 +113,29 @@ pub struct InterfaceInfo {
     pub multicast: u64,
     pub qdisc: Option<String>,
     pub oper_state: Option<String>,
+}
+
+/// Wi-Fi link information (802.11). Populated for wireless interfaces from
+/// `iw`/nl80211 and `/proc/net/wireless`. Never assumes a specific chipset:
+/// works for any Linux-compatible adapter.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiInfo {
+    /// Whether a wireless device is present behind this interface.
+    pub present: bool,
+    /// Currently connected SSID (empty when not associated).
+    pub ssid: String,
+    /// Frequency in MHz of the current channel (0 when not associated).
+    pub freq_mhz: u32,
+    /// Channel number derived from frequency.
+    pub channel: u32,
+    /// Signal strength in dBm (0 when unknown).
+    pub signal_dbm: i32,
+    /// Link quality percentage (0-100).
+    pub quality_pct: u8,
+    /// Authentication mode when associated: `open`, `wpa2`, `wpa3`, ...
+    pub auth: String,
+    /// Whether the interface is in AP (hostapd) mode.
+    pub ap_mode: bool,
 }
 
 /// WAN identity: how the device presents itself to the ISP.
@@ -193,6 +252,106 @@ pub struct InterfaceResult {
     pub previous_mac: Option<String>,
 }
 
+/// Wi-Fi connection operation (`MsgType::WifiOp`). The executor is the only
+/// component that talks to `iw`/`wpa_supplicant`/`wpa_cli`; the daemon sends a
+/// typed request and gets a typed result back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WifiOp {
+    /// Scan for networks on the interface (returns a list of scan results).
+    Scan { interface: String },
+    /// Connect to a network. `password` may be empty for open networks;
+    /// `identity`/`password` for EAP networks. Security mode is auto-detected.
+    Connect {
+        interface: String,
+        ssid: String,
+        password: Option<String>,
+        identity: Option<String>,
+        /// Optional explicit security mode override (`open`/`wpa`/`wpa2`/
+        /// `wpa3`/`eap`). When absent, auto-detected from scan results.
+        security: Option<String>,
+    },
+    /// Report association/connection state.
+    Status { interface: String },
+    /// Disconnect from the current network.
+    Disconnect { interface: String },
+}
+
+/// Result of a Wi-Fi operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiResult {
+    pub ok: bool,
+    pub detail: String,
+    /// Scan results when the operation was a scan.
+    #[serde(default)]
+    pub networks: Vec<WifiNetwork>,
+}
+
+/// One Wi-Fi network from a scan.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiNetwork {
+    pub ssid: String,
+    pub bssid: String,
+    pub signal_dbm: i32,
+    pub freq_mhz: u32,
+    pub security: String,
+    /// Whether this is the currently associated network.
+    pub selected: bool,
+}
+
+/// MPTCP operation (`MsgType::MptcpOp`). The executor is the only component
+/// that touches the kernel MPTCP stack (sysctl + `ip mptcp` netlink); the
+/// daemon sends typed requests. Linux kernels ≥ 5.6 have native MPTCP.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MptcpOp {
+    /// Enable/disable the kernel MPTCP stack (`net.mptcp.enabled`) and report
+    /// the resulting state.
+    SetEnabled { enabled: bool },
+    /// Add an MPTCP local endpoint (`ip mptcp endpoint add <addr> dev <dev>`).
+    AddEndpoint {
+        /// Local address to advertise as an MPTCP path.
+        address: String,
+        /// Interface the endpoint binds to (empty = kernel default).
+        interface: Option<String>,
+    },
+    /// Remove a local MPTCP endpoint by address.
+    RemoveEndpoint { address: String },
+    /// Report MPTCP stack state, endpoints and live subflows.
+    Status,
+}
+
+/// One MPTCP endpoint / subflow.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MptcpEndpoint {
+    pub address: String,
+    pub iface: String,
+    pub local_id: u32,
+    /// `subflow` / `signal` / `backup` flags summary.
+    pub flags: Vec<String>,
+}
+
+/// One live MPTCP subflow (from `/proc/net/mptcp`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MptcpSubflow {
+    pub remote: String,
+    pub local: String,
+    /// TCP state: `ESTABLISHED`, `SYN-SENT`, ...
+    pub state: String,
+    pub backup: bool,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+/// Result of an MPTCP operation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MptcpResult {
+    pub ok: bool,
+    pub detail: String,
+    /// Kernel MPTCP enabled state (after the operation, when known).
+    pub enabled: Option<bool>,
+    pub endpoints: Vec<MptcpEndpoint>,
+    pub subflows: Vec<MptcpSubflow>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +361,104 @@ mod tests {
         let info = InterfaceInfo::default();
         assert!(info.ipv4.is_empty() && info.ipv6.is_empty());
         assert_eq!(info.index, 0);
+    }
+
+    #[test]
+    fn wifi_info_default_is_safe() {
+        let w = WifiInfo::default();
+        assert!(!w.present);
+        assert!(w.ssid.is_empty());
+        assert_eq!(w.signal_dbm, 0);
+    }
+
+    #[test]
+    fn interface_info_with_device_fields_roundtrips() {
+        let mut info = InterfaceInfo {
+            name: "enx1234".into(),
+            kind: Some("eth".into()),
+            driver: Some("r8152".into()),
+            bus: Some("usb".into()),
+            vendor_id: Some("0bda".into()),
+            product_id: Some("8156".into()),
+            device_model: Some("Realtek USB 2.5GbE Family Controller".into()),
+            speed_mbps: Some(2500),
+            duplex: Some("full".into()),
+            max_throughput_mbps: Some(2250),
+            usb: true,
+            wifi: Some(WifiInfo {
+                present: true,
+                ssid: "home".into(),
+                signal_dbm: -45,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        info.ipv4.push("192.168.1.10".into());
+        let bytes = postcard::to_allocvec(&info).unwrap();
+        let back: InterfaceInfo = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back.driver.as_deref(), Some("r8152"));
+        assert_eq!(back.speed_mbps, Some(2500));
+        assert_eq!(back.max_throughput_mbps, Some(2250));
+        assert!(back.usb);
+        assert_eq!(back.wifi.as_ref().unwrap().ssid, "home");
+        assert_eq!(back.ipv4, vec!["192.168.1.10"]);
+    }
+
+    #[test]
+    fn wifi_op_roundtrips() {
+        let op = WifiOp::Connect {
+            interface: "wlan0".into(),
+            ssid: "guest".into(),
+            password: Some("secret".into()),
+            identity: None,
+            security: Some("wpa2".into()),
+        };
+        let bytes = postcard::to_allocvec(&op).unwrap();
+        let back: WifiOp = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            back,
+            WifiOp::Connect {
+                interface: "wlan0".into(),
+                ssid: "guest".into(),
+                password: Some("secret".into()),
+                identity: None,
+                security: Some("wpa2".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn mptcp_op_roundtrips() {
+        let op = MptcpOp::AddEndpoint {
+            address: "192.168.1.5".into(),
+            interface: Some("eth0".into()),
+        };
+        let bytes = postcard::to_allocvec(&op).unwrap();
+        let back: MptcpOp = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, op);
+
+        let result = MptcpResult {
+            ok: true,
+            detail: "ok".into(),
+            enabled: Some(true),
+            endpoints: vec![MptcpEndpoint {
+                address: "192.168.1.5".into(),
+                iface: "eth0".into(),
+                local_id: 1,
+                flags: vec!["signal".into()],
+            }],
+            subflows: vec![MptcpSubflow {
+                remote: "10.0.0.1:443".into(),
+                local: "192.168.1.5:12345".into(),
+                state: "ESTABLISHED".into(),
+                backup: false,
+                rx_bytes: 100,
+                tx_bytes: 200,
+            }],
+        };
+        let bytes = postcard::to_allocvec(&result).unwrap();
+        let back: MptcpResult = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, result);
     }
 
     #[test]

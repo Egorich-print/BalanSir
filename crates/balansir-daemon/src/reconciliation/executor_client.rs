@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use balansir_common::gateway::{GatewayConfig, GatewayResult, GatewayStatus};
 use balansir_common::ipc::{IpcClientConnection, IpcMessage, MsgType};
 use balansir_common::network::{
-    InterfaceInfo, InterfaceOp, InterfaceResult, TailscaleOp, TailscaleResult, TailscaleStatus,
+    InterfaceInfo, InterfaceOp, InterfaceResult, MptcpOp, MptcpResult, TailscaleOp,
+    TailscaleResult, TailscaleStatus, WifiOp, WifiResult,
 };
 use balansir_common::qos::{AppliedQdisc, QosCapabilities, QosOp, QosResult};
 use balansir_common::{ActionRequest, ActionResult, PathMtu, Result, UpnpOp, UpnpOpResult};
@@ -308,6 +309,24 @@ impl ExecutorClient {
         let payload = Self::encode(&op)?;
         let resp = self
             .typed_request(MsgType::TailscaleOp, payload, "TailscaleOp")
+            .await?;
+        Self::decode(&resp)
+    }
+
+    /// Wi-Fi operation (scan/connect/status/disconnect).
+    pub async fn wifi_op(&self, op: &WifiOp) -> Result<WifiResult> {
+        let payload = Self::encode(op)?;
+        let resp = self
+            .typed_request(MsgType::WifiOp, payload, "WifiOp")
+            .await?;
+        Self::decode(&resp)
+    }
+
+    /// MPTCP operation (enable/disable/add/remove endpoint/status).
+    pub async fn mptcp_op(&self, op: &MptcpOp) -> Result<MptcpResult> {
+        let payload = Self::encode(op)?;
+        let resp = self
+            .typed_request(MsgType::MptcpOp, payload, "MptcpOp")
             .await?;
         Self::decode(&resp)
     }
