@@ -125,21 +125,14 @@ impl NetlinkInterfaceBackend {
                 continue;
             };
             let prefix = addr.header.prefix_len;
-            match addr.header.family {
-                2 /* AF_INET */ => {
-                    if addr_bytes.len() == 4 {
-                        out.push(format!(
-                            "{}.{}.{}.{}/{}",
-                            addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3], prefix
-                        ));
-                    }
+            match addr_bytes {
+                std::net::IpAddr::V4(v4) => {
+                    let o = v4.octets();
+                    out.push(format!("{}.{}.{}.{}/{}", o[0], o[1], o[2], o[3], prefix));
                 }
-                10 /* AF_INET6 */ => {
-                    if addr_bytes.len() == 16 {
-                        out.push(format!("{}/{}", ipv6_to_string(addr_bytes), prefix));
-                    }
+                std::net::IpAddr::V6(v6) => {
+                    out.push(format!("{}/{}", v6, prefix));
                 }
-                _ => {}
             }
         }
         Ok(out)
