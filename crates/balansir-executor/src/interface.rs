@@ -238,10 +238,10 @@ fn enrich_device_info(name: &str, info: &mut InterfaceInfo) {
     // USB device node (the net device sits under the USB interface).
     let mut probe = std::path::PathBuf::from(&device);
     for _ in 0..4 {
-        let vid = read(&probe.join("idVendor"));
-        let pid = read(&probe.join("idProduct"));
-        let product = read(&probe.join("product"));
-        let manufacturer = read(&probe.join("manufacturer"));
+        let vid = read(probe.join("idVendor").to_str().unwrap_or(""));
+        let pid = read(probe.join("idProduct").to_str().unwrap_or(""));
+        let product = read(probe.join("product").to_str().unwrap_or(""));
+        let manufacturer = read(probe.join("manufacturer").to_str().unwrap_or(""));
         if vid.is_some() || pid.is_some() {
             info.vendor_id = vid.or(info.vendor_id);
             info.product_id = pid.or(info.product_id);
