@@ -48,6 +48,13 @@ pub struct NetworkConfig {
     pub wan_interface: Option<String>,
     /// The interface facing the router (LAN).
     pub lan_interface: Option<String>,
+    /// Hardware-identity matcher for the WAN port (mission §4–§7). Survives
+    /// interface renames, USB reconnects and kernel updates — unlike names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wan_match: Option<IfaceMatcher>,
+    /// Hardware-identity matcher for the LAN port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lan_match: Option<IfaceMatcher>,
     /// Explicit MAC to clone onto the WAN interface. When absent, the daemon
     /// tries to learn the L2 peer from the LAN port; if that fails it does not
     /// change the MAC (warn, never guess).
@@ -59,6 +66,142 @@ pub struct NetworkConfig {
     /// `192.168.3.0/24` per the target topology).
     #[serde(default = "default_lan_subnet")]
     pub lan_subnet: String,
+}
+
+/// Hardware-identity matcher for a gateway role (mission §4: interface
+/// identity = physical + driver + MAC, never the transient name).
+///
+/// All specified fields must match (AND). At least one field required.
+/// Matching more than one live interface is ambiguity → fail closed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IfaceMatcher {
+    /// Interface name as currently known (legacy escape hatch; unstable
+    /// across reboots/USB reconnects — prefer hardware fields).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// MAC address (canonical lowercase, colon-separated). Compared against
+    /// both current and permanent (factory) MAC so a cloned adapter still
+    /// matches its configured identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    /// Kernel driver name, e.g. `r8152`, `ax88179_178a`, `smsc95xx`, `genet`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// USB identity as `vid:pid` (hex, case-insensitive), e.g. `"0bda:8156"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usb: Option<String>,
+}
+
+impl IfaceMatcher {
+    /// Whether at least one criterion is set.
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none() && self.mac.is_none() && self.driver.is_none() && self.usb.is_none()
+    }
+
+    /// Does this matcher unambiguously select exactly one live interface?
+    ///
+    /// Returns `Ok(name)` on a unique match, `Err(Ambiguous(candidates))`
+    /// when several interfaces match, `Err(NoMatch)` when none do.
+    pub fn resolve(&self, interfaces: &[InterfaceInfo]) -> Result<String, RoleResolveError> {
+        if self.is_empty() {
+            return Err(RoleResolveError::NoMatch {
+                reason: "matcher has no criteria".into(),
+            });
+        }
+        let want_mac = self.mac.as_deref().map(|m| m.to_ascii_lowercase());
+        let want_usb = self.usb.as_deref().map(|u| u.to_ascii_lowercase());
+
+        let mut matched: Vec<&InterfaceInfo> = interfaces
+            .iter()
+            .filter(|i| {
+                if let Some(name) = &self.name {
+                    if &i.name != name {
+                        return false;
+                    }
+                }
+                if let Some(want) = &want_mac {
+                    let cur_matches = i.mac.as_deref() == Some(want.as_str());
+                    let perm_matches = i.hardware_mac.as_deref() == Some(want.as_str());
+                    if !cur_matches && !perm_matches {
+                        return false;
+                    }
+                }
+                if let Some(driver) = &self.driver {
+                    if i.driver.as_deref() != Some(driver.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(usb) = &want_usb {
+                    // `vid` or `vid:pid`, hex, case-insensitive; optional 0x.
+                    let norm = |s: &str| s.trim_start_matches("0x").to_ascii_lowercase();
+                    let (wvid, wpid) = match usb.split_once(':') {
+                        Some((v, p)) => (v, p),
+                        None => (usb.as_str(), ""),
+                    };
+                    let ids = (
+                        i.vendor_id.as_deref().map(norm).unwrap_or_default(),
+                        i.product_id.as_deref().map(norm).unwrap_or_default(),
+                    );
+                    if !(norm(wvid) == ids.0 && (wpid.is_empty() || norm(wpid) == ids.1)) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        match matched.len() {
+            0 => Err(RoleResolveError::NoMatch {
+                reason: format!("no live interface matches {:?}", self.describe()),
+            }),
+            1 => Ok(matched.remove(0).name.clone()),
+            _ => Err(RoleResolveError::Ambiguous {
+                candidates: matched.iter().map(|i| i.name.clone()).collect(),
+            }),
+        }
+    }
+
+    /// Human-readable criteria summary for logs/explain.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(n) = &self.name {
+            parts.push(format!("name={n}"));
+        }
+        if let Some(m) = &self.mac {
+            parts.push(format!("mac={m}"));
+        }
+        if let Some(d) = &self.driver {
+            parts.push(format!("driver={d}"));
+        }
+        if let Some(u) = &self.usb {
+            parts.push(format!("usb={u}"));
+        }
+        parts.join(",")
+    }
+}
+
+/// Why a role could not be resolved to exactly one interface.
+#[derive(Debug, Clone)]
+pub enum RoleResolveError {
+    /// Zero live interfaces satisfy the matcher.
+    NoMatch { reason: String },
+    /// Several live interfaces satisfy it — refusing to guess (fail-closed).
+    Ambiguous { candidates: Vec<String> },
+}
+
+impl std::fmt::Display for RoleResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoMatch { reason } => write!(f, "no match: {reason}"),
+            Self::Ambiguous { candidates } => write!(
+                f,
+                "ambiguous: {} interfaces match ({})",
+                candidates.len(),
+                candidates.join(", ")
+            ),
+        }
+    }
 }
 
 fn default_lan_subnet() -> String {
@@ -114,30 +257,29 @@ impl NetworkConfig {
     /// Fail-closed (mission §12): when roles are incomplete or ambiguous, the
     /// gateway must not start guessing. Every failure names the exact problem.
     pub fn validate(&self, interfaces: &[InterfaceInfo]) -> Result<(), String> {
-        // Neither role configured → gateway mode is simply off.
-        if self.wan_interface.is_none() && self.lan_interface.is_none() {
+        // Neither role configured (by name or matcher) → gateway mode is off.
+        let has_names = self.wan_interface.is_some() || self.lan_interface.is_some();
+        let has_matchers = self.wan_match.is_some() || self.lan_match.is_some();
+        if !has_names && !has_matchers {
             return Ok(());
         }
 
-        let wan = self
-            .wan_interface
-            .as_ref()
-            .ok_or("network config: wan_interface is required when gateway roles are set")?;
-        let lan = self
-            .lan_interface
-            .as_ref()
-            .ok_or("network config: lan_interface is required when gateway roles are set")?;
+        // Resolve roles through the unified identity pipeline: matchers first,
+        // names as legacy fallback (mission §10). This validates that every
+        // configured role selects exactly one live interface — ambiguity is an
+        // error, never a guess.
+        let (wan, lan) = resolve_roles(self, interfaces)?;
 
         if wan == lan {
             return Err(format!(
-                "network config: wan_interface and lan_interface must differ (both {wan})"
+                "network config: wan and lan must differ (both resolve to {wan})"
             ));
         }
 
         for (role, name) in [("wan", wan), ("lan", lan)] {
             let info = interfaces
                 .iter()
-                .find(|i| &i.name == name)
+                .find(|i| i.name == *name)
                 .ok_or_else(|| format!("network config: {role}_interface {name} does not exist"))?;
             if !is_ethernet_like(info) {
                 return Err(format!(
@@ -328,21 +470,63 @@ fn default_route_interface() -> Option<String> {
     None
 }
 
-/// Resolve the effective gateway roles from config or, when no explicit roles
-/// are configured, from automatic detection. Fail-closed: explicit config
-/// always wins; auto-detection returns `None` on ambiguity.
+/// Resolve the effective gateway roles. Priority (mission §10–§11):
 ///
-/// Returns `(wan, lan)`.
+/// 1. hardware-identity matchers (`wan_match`/`lan_match`) — survive renames;
+/// 2. explicit interface names (`wan_interface`/`lan_interface`) — legacy;
+/// 3. automatic detection (`auto_assign_roles`) — only when nothing configured.
+///
+/// Identity matchers are fail-closed: ambiguity or zero matches is an error,
+/// never a guess. Returns `Ok((wan, lan))` or a human explanation.
 pub fn resolve_roles(
     config: &NetworkConfig,
     interfaces: &[InterfaceInfo],
-) -> Option<(String, String)> {
-    if config.wan_interface.is_some() || config.lan_interface.is_some() {
-        let wan = config.wan_interface.clone()?;
-        let lan = config.lan_interface.clone()?;
-        return Some((wan, lan));
+) -> Result<(String, String), String> {
+    let mut wan: Option<String> = None;
+    let mut lan: Option<String> = None;
+
+    // 1. Hardware-identity matchers win over names.
+    if let Some(m) = &config.wan_match {
+        wan = Some(
+            m.resolve(interfaces)
+                .map_err(|e| format!("wan_match ({}): {e}", m.describe()))?,
+        );
     }
-    auto_assign_roles(interfaces)
+    if let Some(m) = &config.lan_match {
+        lan = Some(
+            m.resolve(interfaces)
+                .map_err(|e| format!("lan_match ({}): {e}", m.describe()))?,
+        );
+    }
+
+    // 2. Legacy explicit names (used when no matcher for that role).
+    if wan.is_none() {
+        wan = config.wan_interface.clone();
+    }
+    if lan.is_none() {
+        lan = config.lan_interface.clone();
+    }
+
+    // Both resolved → check they differ.
+    if let (Some(w), Some(l)) = (&wan, &lan) {
+        if w == l {
+            return Err(format!(
+                "gateway roles collide: WAN and LAN both resolve to {w}"
+            ));
+        }
+        return Ok((w.clone(), l.clone()));
+    }
+
+    // 3. Nothing configured at all → auto-detect (existing heuristic).
+    if wan.is_none() && lan.is_none() {
+        return auto_assign_roles(interfaces).ok_or_else(|| {
+            "auto-detection ambiguous; configure [network.wan]/[network.lan] matchers".to_string()
+        });
+    }
+
+    Err(format!(
+        "incomplete gateway roles: wan={wan:?} lan={lan:?} — both roles must resolve"
+    ))
 }
 
 /// Validate a MAC address string; returns canonical lowercase form. Mirrors the
@@ -406,7 +590,7 @@ mod tests {
         let interfaces = vec![iface("eth1", Some("ether"))];
         let err = cfg.validate(&interfaces).unwrap_err();
         assert!(
-            err.contains("lan_interface"),
+            err.contains("incomplete gateway roles") && err.contains("lan=None"),
             "error must name the gap: {err}"
         );
     }
@@ -588,5 +772,159 @@ bogus = 1
         assign_roles(&mut list, &cfg);
         assert_eq!(list[0].role, balansir_common::network::InterfaceRole::Lan);
         assert_eq!(list[1].role, balansir_common::network::InterfaceRole::Wan);
+    }
+
+    /// Synthetic USB NIC builder for the permutation matrix (mission §9).
+    fn usb_iface(name: &str, mac: &str, driver: &str, vid: &str, pid: &str) -> InterfaceInfo {
+        InterfaceInfo {
+            name: name.into(),
+            kind: Some("ether".into()),
+            mac: Some(mac.into()),
+            driver: Some(driver.into()),
+            usb: true,
+            bus: Some("usb".into()),
+            vendor_id: Some(vid.into()),
+            product_id: Some(pid.into()),
+            ..Default::default()
+        }
+    }
+
+    fn onboard_iface(name: &str, mac: &str) -> InterfaceInfo {
+        InterfaceInfo {
+            name: name.into(),
+            kind: Some("ether".into()),
+            mac: Some(mac.into()),
+            driver: Some("smsc95xx".into()),
+            usb: true,
+            bus: Some("usb".into()),
+            vendor_id: Some("0424".into()),
+            product_id: Some("ec00".into()),
+            ..Default::default()
+        }
+    }
+
+    /// Scenario A–E (mission §9): role resolution follows hardware identity,
+    /// never the transient interface name. The same matchers must resolve to
+    /// the correct ports no matter how the kernel enumerated them.
+    #[test]
+    fn identity_matchers_survive_interface_renaming() {
+        // Physical reality: Realtek WAN, onboard LAN.
+        let realtek = || usb_iface("eth0", "00:e0:4c:68:02:24", "r8152", "0bda", "8156");
+        let onboard = || onboard_iface("eth1", "b8:27:eb:8a:4e:ba");
+
+        let cfg = NetworkConfig {
+            wan_match: Some(IfaceMatcher {
+                usb: Some("0bda:8156".into()),
+                ..Default::default()
+            }),
+            lan_match: Some(IfaceMatcher {
+                mac: Some("b8:27:eb:8a:4e:ba".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Scenario A: names as currently enumerated.
+        let (wan, lan) = resolve_roles(&cfg, &[realtek(), onboard()]).unwrap();
+        assert_eq!((wan.as_str(), lan.as_str()), ("eth0", "eth1"));
+
+        // Scenario B/E: kernel enumerates in reverse order after reboot.
+        let mut r_realtek = realtek();
+        r_realtek.name = "eth7".into();
+        let mut r_onboard = onboard();
+        r_onboard.name = "eth3".into();
+        let (wan, lan) = resolve_roles(&cfg, &[r_onboard, r_realtek]).unwrap();
+        assert_eq!((wan.as_str(), lan.as_str()), ("eth7", "eth3"));
+
+        // Scenario C/D: adapters swapped between roles must NOT silently
+        // satisfy the wrong matcher — the Realtek stays WAN by identity even
+        // if the operator moved cables, because the config pins the hardware,
+        // not the slot.
+        let mut swapped_realtek = realtek();
+        swapped_realtek.name = "eth1".into(); // now occupying the old onboard name
+        let mut swapped_onboard = onboard();
+        swapped_onboard.name = "eth0".into();
+        let (wan, lan) = resolve_roles(&cfg, &[swapped_onboard, swapped_realtek]).unwrap();
+        assert_eq!(wan, "eth1", "Realtek matched by USB id, not by name");
+        assert_eq!(lan, "eth0", "onboard matched by MAC, not by name");
+    }
+
+    #[test]
+    fn ambiguous_matcher_fails_closed() {
+        // Two identical RTL8156 adapters: a driver-only matcher cannot tell
+        // them apart and MUST refuse rather than guess.
+        let a = usb_iface("eth0", "00:e0:4c:68:02:24", "r8152", "0bda", "8156");
+        let b = usb_iface("eth1", "00:e0:4c:68:02:25", "r8152", "0bda", "8156");
+        let cfg_wan = IfaceMatcher {
+            driver: Some("r8152".into()),
+            ..Default::default()
+        };
+        match cfg_wan.resolve(&[a, b]) {
+            Err(RoleResolveError::Ambiguous { candidates }) => {
+                assert_eq!(candidates.len(), 2);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_matcher_names_the_gap() {
+        let cfg = IfaceMatcher {
+            usb: Some("0bda:8156".into()),
+            ..Default::default()
+        };
+        let onboard = onboard_iface("eth0", "b8:27:eb:8a:4e:ba");
+        match cfg.resolve(&[onboard]) {
+            Err(RoleResolveError::NoMatch { reason }) => {
+                assert!(reason.contains("usb=0bda:8156"), "{reason}");
+            }
+            other => panic!("expected NoMatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mac_matcher_matches_permanent_mac_after_cloning() {
+        // The current MAC was cloned to the router's; the factory MAC still
+        // identifies the adapter (mission §4: physical identity > runtime).
+        let mut cloned = usb_iface(
+            "eth5",
+            "90:98:38:52:ae:79", // cloned current MAC
+            "r8152",
+            "0bda",
+            "8156",
+        );
+        cloned.hardware_mac = Some("00:e0:4c:68:02:24".into()); // factory
+        let m = IfaceMatcher {
+            mac: Some("00:e0:4c:68:02:24".into()),
+            ..Default::default()
+        };
+        assert_eq!(m.resolve(&[cloned]).unwrap(), "eth5");
+    }
+
+    #[test]
+    fn virtual_interfaces_never_auto_selected() {
+        // tailscale0 / lo / tun must never become WAN or LAN via auto-detect.
+        let ts = InterfaceInfo {
+            name: "tailscale0".into(),
+            kind: Some("tun".into()),
+            link_up: true,
+            ipv4: vec!["100.122.153.80".into()],
+            ..Default::default()
+        };
+        let lo = InterfaceInfo {
+            name: "lo".into(),
+            kind: Some("loopback".into()),
+            link_up: true,
+            ipv4: vec!["127.0.0.1".into()],
+            ..Default::default()
+        };
+        let eth = iface("eth0", Some("ether"));
+        assert!(
+            auto_assign_roles(&[ts.clone(), lo.clone(), eth]).is_none()
+                || auto_assign_roles(&[ts, lo, iface("eth0", Some("ether"))])
+                    .map(|(w, l)| w != "tailscale0" && l != "lo")
+                    .unwrap_or(true),
+            "virtual interfaces must not take gateway roles"
+        );
     }
 }

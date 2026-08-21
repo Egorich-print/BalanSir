@@ -432,8 +432,12 @@ async fn main() -> Result<()> {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-                // Skip if no roles configured.
-                if cfg.wan_interface.is_none() && cfg.lan_interface.is_none() {
+                // Skip if no roles configured (matchers or names).
+                if cfg.wan_interface.is_none()
+                    && cfg.lan_interface.is_none()
+                    && cfg.wan_match.is_none()
+                    && cfg.lan_match.is_none()
+                {
                     continue;
                 }
                 let interfaces = match gw_executor.interface_info("").await {
@@ -446,14 +450,25 @@ async fn main() -> Result<()> {
                 if cfg.validate(&interfaces).is_err() {
                     continue;
                 }
+                // Identity-based resolution every tick (mission §12 hotplug):
+                // a USB NIC that reconnects under a new name still matches its
+                // hardware identity, so the datapath follows the device — not
+                // the stale name captured at boot.
+                let (wan_name, lan_name) =
+                    match balansir_daemon::network_config::resolve_roles(&cfg, &interfaces) {
+                        Ok(roles) => roles,
+                        Err(e) => {
+                            debug!("Gateway re-check: role resolution pending: {e}");
+                            continue;
+                        }
+                    };
                 // Skip if the gateway is already applied with this exact config:
                 // re-applying tears the datapath down and rebuilds it, which
                 // drops established mgmt/SSH connections. Only touch the kernel
                 // when the applied state actually differs.
-                let lan = cfg.lan_interface.as_deref().unwrap_or("eth0");
                 let gateway_cfg = balansir_common::gateway::GatewayConfig {
-                    wan_interface: cfg.wan_interface.unwrap_or_default(),
-                    lan_interface: lan.to_string(),
+                    wan_interface: wan_name.clone(),
+                    lan_interface: lan_name.clone(),
                     lan_subnet: cfg.lan_subnet,
                 };
                 let already_applied = match gw_executor.gateway_status().await {
@@ -600,8 +615,17 @@ async fn apply_network_config(executor: &Arc<ExecutorClient>) {
         return;
     }
 
-    let wan = config.wan_interface.as_deref().unwrap_or_default();
-    let lan = config.lan_interface.as_deref().unwrap_or_default();
+    // Identity-based role resolution (mission §4–§10): matchers survive
+    // interface renames; names are the legacy fallback. Fail-closed.
+    let (wan, lan) = match balansir_daemon::network_config::resolve_roles(&config, &interfaces) {
+        Ok(roles) => roles,
+        Err(e) => {
+            warn!("Gateway role resolution failed: {e} (running without gateway mode)");
+            return;
+        }
+    };
+    let wan = wan.as_str();
+    let lan = lan.as_str();
 
     // Link state is informational at startup: the provider cable may not be
     // plugged yet. A link-down port is a warning, not a fatal error — the roles
