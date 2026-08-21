@@ -1,0 +1,27 @@
+# DHCP server for the LAN interface in gateway mode.
+# dnsmasq provides DHCP only (port 0 disables its DNS server — BalanSir's
+# DNS forwarder owns port 53). Binding is restricted to the LAN interface
+# via --bind-dynamic so no DHCP leaks to WAN or Tailscale.
+[Unit]
+Description=BalanSir LAN DHCP server
+After=persistent.mount balansir-config-restore.service
+Before=balansir-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dnsmasq --no-daemon \
+  --pid-file=/run/balansir/dnsmasq.pid \
+  --dhcp-authoritative \
+  --dhcp-range=192.168.1.100,192.168.1.200,12h \
+  --dhcp-option=option:router,192.168.1.1 \
+  --dhcp-option=option:dns-server,192.168.1.1 \
+  --dhcp-option=option:netmask,255.255.255.0 \
+  --except-interface=lo \
+  --bind-dynamic \
+  --no-hosts --no-resolv --port=0
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
