@@ -243,12 +243,16 @@ fn enrich_device_info(name: &str, info: &mut InterfaceInfo) {
         let product = read(probe.join("product").to_str().unwrap_or(""));
         let manufacturer = read(probe.join("manufacturer").to_str().unwrap_or(""));
         if vid.is_some() || pid.is_some() {
-            info.vendor_id = vid.or(info.vendor_id);
-            info.product_id = pid.or(info.product_id);
+            if info.vendor_id.is_none() {
+                info.vendor_id = vid;
+            }
+            if info.product_id.is_none() {
+                info.product_id = pid;
+            }
             if product.is_some() {
                 info.device_model = product;
-            } else {
-                info.device_model = info.device_model.or(manufacturer);
+            } else if manufacturer.is_some() && info.device_model.is_none() {
+                info.device_model = manufacturer;
             }
             info.usb = true;
             info.bus = Some("usb".into());
