@@ -301,6 +301,34 @@ impl ProfileProbe for TcpConnectProbe {
     }
 }
 
+/// Protocol-aware L2 probe: verifies that a Reality/TLS endpoint actually
+/// speaks the expected protocol, not just accepts TCP. Used as a gate before
+/// promoting `Unknown → Healthy` and during recovery, so a server that opens
+/// its port but has a broken VLESS/Reality handshake is never marked Healthy.
+pub struct VlessHandshakeProbe {
+    pub timeout: std::time::Duration,
+    /// SNI to use in the ClientHello. Typically the profile's Reality SNI.
+    pub sni: String,
+}
+
+impl VlessHandshakeProbe {
+    pub fn new(sni: impl Into<String>) -> Self {
+        Self {
+            timeout: std::time::Duration::from_secs(5),
+            sni: sni.into(),
+        }
+    }
+
+    /// Run the L2 check. Returns Ok on protocol-alive, Err with reason on failure.
+    pub async fn verify(&self, server: &str, port: u16) -> Result<(), crate::l2_probe::L2Result> {
+        let result = crate::l2_probe::l2_tls_probe(server, port, &self.sni, self.timeout).await;
+        match result {
+            crate::l2_probe::L2Result::Alive => Ok(()),
+            other => Err(other),
+        }
+    }
+}
+
 /// Format `server:port` for socket resolution, bracketing bare IPv6 literals
 /// (`2001:db8::1` → `[2001:db8::1]:443`). Hostnames and IPv4 pass through.
 fn endpoint_addr(server: &str, port: u16) -> String {
@@ -599,7 +627,8 @@ impl VpnManager {
     /// success — so a dead endpoint is excluded from selection and enters
     /// cooldown instead of silently keeping 100% of the traffic.
     async fn health_cycle(&self, now_ms: i64) {
-        let endpoints: Vec<(String, String, u16)> = {
+        // Snapshot (id, server, port, sni) for each profile.
+        let endpoints: Vec<(String, String, u16, Option<String>)> = {
             let pool = self.pool.read().await;
             pool.profiles()
                 .iter()
@@ -608,16 +637,45 @@ impl VpnManager {
                         p.profile.profile_id.clone(),
                         p.profile.server.clone(),
                         p.profile.port,
+                        p.profile.sni.clone(),
                     )
                 })
                 .collect()
         };
 
         let mut probes = Vec::with_capacity(endpoints.len());
-        for (id, server, port) in endpoints {
+        for (id, server, port, sni) in endpoints {
             let probe = Arc::clone(&self.probe);
             probes.push(tokio::spawn(async move {
                 let sample = probe.probe(&server, port).await;
+
+                // L2 gate: if L1 succeeded and the endpoint was Unknown
+                // (first time seeing it), verify with a protocol-aware probe
+                // before allowing the health tracker to consider it alive.
+                if sample.reachable && sni.is_some() {
+                    let l2 = crate::l2_probe::l2_tls_probe(
+                        &server,
+                        port,
+                        sni.as_deref().unwrap_or(&server),
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await;
+                    match l2 {
+                        crate::l2_probe::L2Result::Alive => {
+                            // Protocol-alive: keep the positive L1 sample.
+                        }
+                        other => {
+                            tracing::debug!(
+                                server,
+                                port,
+                                result = ?other,
+                                "L2 probe failed; marking unreachable"
+                            );
+                            return (id, PathSample::failure());
+                        }
+                    }
+                }
+
                 (id, sample)
             }));
         }

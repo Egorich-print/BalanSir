@@ -8,6 +8,7 @@ pub mod dns;
 pub mod dns_plane;
 pub mod driver;
 pub mod interface_probe;
+pub mod l2_probe;
 pub mod mptcp_manager;
 pub mod network_config;
 pub mod path_decision;
