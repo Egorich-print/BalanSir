@@ -166,6 +166,22 @@
         {/each}
       </ul>
       <p class="meta">{upCount} link(s) up · RX {fmtBytes(totalRx)} · TX {fmtBytes(totalTx)}</p>
+      <table class="ifaces">
+        <thead>
+          <tr><th>Iface</th><th>State</th><th>Address</th><th>↓ / ↑</th></tr>
+        </thead>
+        <tbody>
+          {#each snapshot ? snapshot.interfaces : [] as i}
+            {@const rate = (snapshot.interface_rates || []).find((r) => r.interface === i.name)}
+            <tr>
+              <td><code>{i.name}</code></td>
+              <td><span class="ifbadge {i.link_up ? 'up' : 'down'}">{i.link_up ? 'UP' : 'DOWN'}</span></td>
+              <td class="muted">{i.ipv4 && i.ipv4.length ? i.ipv4[0] : '—'}</td>
+              <td class="muted">{rate ? `${fmtRate(rate.rx_bps)} / ${fmtRate(rate.tx_bps)}` : '—'}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
     </div>
 
     <div class="card">
@@ -322,6 +338,12 @@
   .fh-badge.bad { background: #3d1f1f; color: #ff6b6b; }
   .fh-badge.none { background: #2a2f3a; color: #7a8aa5; }
   .muted { color: #7a8aa5; }
+  .ifaces { width: 100%; border-collapse: collapse; font-size: 0.78rem; margin-top: 8px; }
+  .ifaces th { text-align: left; color: #7a8aa5; font-weight: 600; padding: 2px 4px; border-bottom: 1px solid #0f3460; }
+  .ifaces td { padding: 3px 4px; border-bottom: 1px solid #16213e; }
+  .ifbadge { font-size: 0.68rem; font-weight: 700; padding: 0.05rem 0.35rem; border-radius: 6px; }
+  .ifbadge.up { background: #1f3d2b; color: #5fdba7; }
+  .ifbadge.down { background: #3d1f1f; color: #ff6b6b; }
   .spark { margin-top: 8px; font-family: ui-monospace, Menlo, monospace; }
   .spark-row { display: flex; align-items: center; gap: 8px; }
   .spark-label { color: #7a8aa5; font-size: 0.72rem; min-width: 34px; }
