@@ -389,7 +389,8 @@ fn link_to_info(name: String, header: LinkHeader, attrs: Vec<LinkAttribute>) -> 
             _ => {}
         }
     }
-    enrich_device_info(&info.name, &mut info);
+    let name = info.name.clone();
+    enrich_device_info(&name, &mut info);
     info
 }
 
