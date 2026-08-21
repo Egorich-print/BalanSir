@@ -106,7 +106,7 @@ impl DpiManager {
                 udp_ports,
             );
             let engine = Arc::new(engine);
-            let discovery = std::sync::Arc::new(crate::b4_discovery::DiscoveryManager::new());
+            let mut discovery = std::sync::Arc::new(crate::b4_discovery::DiscoveryManager::new());
             {
                 let dm_mut =
                     std::sync::Arc::get_mut(&mut discovery).expect("fresh Arc has unique ownership");
