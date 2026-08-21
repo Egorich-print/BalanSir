@@ -79,6 +79,17 @@ BR2_PACKAGE_FASTFETCH=y
 # Xray-core: the proxy runtime the VPN pool drives (VLESS outbounds).
 BR2_PACKAGE_XRAY_CORE=y
 
+# Network diagnostics (mission §35): an appliance operator must be able to
+# answer "what does BalanSir see?" without reflashing. iperf3 also feeds the
+# interface max-throughput probe (interface_probe.rs prefers it when present).
+BR2_PACKAGE_IPERF3=y
+BR2_PACKAGE_ETHTOOL=y
+BR2_PACKAGE_TCPDUMP=y
+BR2_PACKAGE_CONNTRACK_TOOLS=y
+BR2_PACKAGE_CURL=y
+BR2_PACKAGE_JQ=y
+BR2_PACKAGE_USBUTILS=y
+
 # Rootfs: ext4 on SD, no tar
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y

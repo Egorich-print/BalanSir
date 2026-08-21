@@ -1,0 +1,48 @@
+#!/bin/sh
+# BalanSir config persistence (mission §33-§34).
+#
+#   balansir-config save     /etc/balansir  ->  /persistent/balansir/config
+#   balansir-config restore  /persistent/balansir/config  ->  /etc/balansir
+#
+# The rootfs slots (A/B) are replaced wholesale by OTA/factory images; user
+# configuration must not live there. /persistent (mmcblk0p4) survives every
+# flash. Restore runs at boot before the daemon; save is operator-invoked
+# after a config change. Factory defaults in the image are never deleted —
+# a fresh persistent partition simply yields the factory config.
+
+set -eu
+
+LIVE=/etc/balansir
+PERSIST=/persistent/balansir/config
+# Files that carry operator state (never secrets — those are operator-managed).
+PATTERNS="*.toml local-sub.txt"
+
+case "${1:-}" in
+save)
+    [ -d /persistent ] || { echo "error: /persistent not mounted" >&2; exit 1; }
+    mkdir -p "$PERSIST"
+    for pat in $PATTERNS; do
+        for f in "$LIVE"/$pat; do
+            [ -f "$f" ] && cp -f "$f" "$PERSIST/"
+        done
+    done
+    echo "config saved: $LIVE -> $PERSIST ($(ls "$PERSIST" | wc -l) files)"
+    ;;
+restore)
+    [ -d "$PERSIST" ] || { echo "no persistent config yet (factory defaults stay)"; exit 0; }
+    copied=0
+    for pat in $PATTERNS; do
+        for f in "$PERSIST"/$pat; do
+            if [ -f "$f" ]; then
+                cp -f "$f" "$LIVE/"
+                copied=$((copied + 1))
+            fi
+        done
+    done
+    echo "config restored: $copied files from $PERSIST"
+    ;;
+*)
+    echo "usage: balansir-config {save|restore}" >&2
+    exit 2
+    ;;
+esac

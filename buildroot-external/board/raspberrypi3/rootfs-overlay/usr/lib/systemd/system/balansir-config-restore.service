@@ -1,0 +1,17 @@
+# Restore user config from the persistent partition before the daemon reads
+# it (mission §33-§34). A factory image plus an already-populated persistent
+# partition boots straight back into the operator's configuration.
+[Unit]
+Description=BalanSir restore user config from persistent storage
+DefaultDependencies=no
+After=persistent.mount
+Requires=persistent.mount
+Before=balansir-daemon.service balansir-executor.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/balansir-config restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
