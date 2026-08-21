@@ -78,6 +78,8 @@ BR2_PACKAGE_BTOP=y
 BR2_PACKAGE_FASTFETCH=y
 # Xray-core: the proxy runtime the VPN pool drives (VLESS outbounds).
 BR2_PACKAGE_XRAY_CORE=y
+# DHCP server for gateway mode LAN clients.
+BR2_PACKAGE_DNSMASQ=y
 
 # Network diagnostics (mission §35): an appliance operator must be able to
 # answer "what does BalanSir see?" without reflashing. iperf3 also feeds the
