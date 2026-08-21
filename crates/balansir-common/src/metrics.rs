@@ -106,9 +106,7 @@ impl Metrics {
         );
 
         let vpn_probe_latency: Family<VpnProfileLabel, Histogram> =
-            Family::new_with_constructor(|| {
-                Histogram::new(exponential_buckets(1.0, 2.0, 10))
-            });
+            Family::new_with_constructor(|| Histogram::new(exponential_buckets(1.0, 2.0, 10)));
         registry.register(
             "balansir_vpn_probe_latency_seconds",
             "VPN probe latency in milliseconds",
