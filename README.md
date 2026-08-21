@@ -299,6 +299,67 @@ other components are enabled by their own variables (`BALANSIR_B4_CONFIG`,
 `BALANSIR_DPI_CONFIG`, `BALANSIR_XRAY_CONFIG`, `BALANSIR_VPN_CONFIG`,
 `BALANSIR_DNS_CONFIG`). The API server binds per `BALANSIR_API_BIND`.
 
+### Gateway roles & hardware identity (`BALANSIR_NETWORK_CONFIG`)
+
+Gateway roles (WAN/LAN) can be pinned to **physical hardware** instead of kernel
+interface names — names (`eth0`, `eth1`, `enx…`) are transient across reboots,
+USB reconnects and kernel updates (mission §4–§12):
+
+```toml
+[network]
+lan_subnet = "192.168.3.0/24"
+
+# Hardware-identity matchers (fields AND-combined; >=1 required).
+[network.wan_match]
+usb = "0bda:8156"        # USB vid:pid — Realtek RTL8156
+# mac = "00:e0:4c:68:02:24"   # matches current OR factory MAC
+# driver = "r8152"            # kernel driver name
+
+[network.lan_match]
+mac = "b8:27:eb:8a:4e:ba"     # onboard Ethernet (RPi 3B+, smsc95xx)
+```
+
+Resolution priority: **hardware matchers → legacy names → auto-detect**.
+Ambiguity (e.g. two identical adapters with a driver-only matcher) or zero
+matches fails closed with a named explanation — never a guess. The 30s
+re-check loop resolves roles through the same pipeline every tick, so a USB
+NIC that reconnects under a new name is followed automatically (hotplug
+recovery).
+
+Operator diagnostics:
+
+```bash
+balansir-cli network    # table: name/link/role/driver/mac/usb/ipv4
+balansir-cli identify   # full identity chain per interface
+balansir-config save    # persist /etc/balansir -> /persistent (survives flash)
+```
+
+### Hardware Compatibility
+
+| Device | Bus | Driver | Identity | Verified |
+|---|---|---|---|---|
+| Realtek RTL8156 (2.5GbE) | USB | `r8152` | `0bda:8156` + MAC | ✅ hardware |
+| ASIX AX88179/AX88179A | USB | `ax88179_178a` | `0b95:1790` + MAC | ✅ module (kernel), ⚠️ macOS host needs vendor driver |
+| RPi 3B+ onboard | USB (LAN9514) | `smsc95xx` | `0424:ec00` + MAC | ✅ hardware |
+
+Any USB Ethernet adapter supported by the kernel works — matchers accept
+arbitrary `vid:pid`/`driver`/`mac`. Interface names are never used as
+physical identity.
+
+### Config persistence across factory flashes
+
+Rootfs slots (A/B) are replaced wholesale by OTA/factory images. Operator
+config lives on the **persistent partition** (`mmcblk0p4`):
+
+```bash
+balansir-config save      # /etc/balansir -> /persistent/balansir/config
+balansir-config restore   # runs automatically at boot before the daemon
+```
+
+A factory image plus a populated persistent partition boots straight back
+into the operator's configuration; a fresh persistent partition yields
+factory defaults. Secrets are never stored in images or the repository.
+
 ### Policy rules (`BALANSIR_CONFIG`)
 
 ```toml
