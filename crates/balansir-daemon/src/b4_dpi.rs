@@ -108,9 +108,8 @@ impl DpiManager {
             let engine = Arc::new(engine);
             let discovery = std::sync::Arc::new(crate::b4_discovery::DiscoveryManager::new());
             {
-                let mut dm = discovery.clone();
                 let dm_mut =
-                    std::sync::Arc::get_mut(&mut dm).expect("fresh Arc has unique ownership");
+                    std::sync::Arc::get_mut(&mut discovery).expect("fresh Arc has unique ownership");
                 dm_mut.attach_engine(Arc::clone(&engine));
             }
             Ok(Self {
