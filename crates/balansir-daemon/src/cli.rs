@@ -25,7 +25,7 @@ const SOCKET_PATH: &str = "/run/balansir/daemon.sock";
 
 fn usage() -> ! {
     eprintln!(
-        "usage: balansir-cli {{status|plan|explain|desired|actual|fingerprint|reload <config.toml>}}"
+        "usage: balansir-cli {{status|plan|explain|desired|actual|fingerprint|reload <config.toml>|network|identify}}"
     );
     std::process::exit(2);
 }
@@ -124,8 +124,117 @@ async fn main() -> Result<()> {
             }
             println!("reloaded");
         }
+        "network" | "identify" => {
+            // Mission §55 diagnostics over the management API (no extra deps:
+            // minimal HTTP/1.0 GET on a tokio TcpStream). Answers: what does
+            // BalanSir see, what is WAN/LAN, and why (identity chain).
+            drop(conn); // IPC socket unused for HTTP commands.
+            let base = env::var("BALANSIR_API").unwrap_or_else(|_| "127.0.0.1:8080".into());
+            let body = http_get(&base, "/interfaces").await?;
+
+            let ifaces: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                balansir_common::error::Error::Misconfiguration(format!("api /interfaces: {e}"))
+            })?;
+            let Some(list) = ifaces.as_array() else {
+                eprintln!("error: unexpected /interfaces payload");
+                std::process::exit(1);
+            };
+
+            if cmd == "network" {
+                let header = format!(
+                    "{:<12} {:<5} {:<6} {:<14} {:<17} {:<22} {}",
+                    "NAME", "LINK", "ROLE", "DRIVER", "MAC", "USB", "IPv4"
+                );
+                println!("{header}");
+                for i in list {
+                    println!(
+                        "{:<12} {:<5} {:<6} {:<14} {:<17} {:<22} {}",
+                        jstr(i, "name"),
+                        if jbool(i, "link_up") { "UP" } else { "DOWN" },
+                        jstr(i, "role"),
+                        jstr(i, "driver"),
+                        jstr(i, "mac"),
+                        match (jstr_opt(i, "vendor_id"), jstr_opt(i, "product_id"),) {
+                            (Some(v), Some(p)) => format!("{v}:{p}"),
+                            _ => "-".into(),
+                        },
+                        jstr(i, "ipv4"),
+                    );
+                }
+            } else {
+                // identify: full identity chain per interface (mission §4).
+                for i in list {
+                    println!("interface {}", jstr(i, "name"));
+                    println!("  role:       {}", jstr(i, "role"));
+                    println!("  kind/bus:   {}/{}", jstr(i, "kind"), jstr(i, "bus"));
+                    println!("  driver:     {}", jstr(i, "driver"));
+                    println!(
+                        "  mac:        {} (factory: {})",
+                        jstr(i, "mac"),
+                        jstr(i, "hardware_mac")
+                    );
+                    println!(
+                        "  usb:        {}:{} ({})",
+                        jstr(i, "vendor_id"),
+                        jstr(i, "product_id"),
+                        jstr(i, "device_model")
+                    );
+                    println!(
+                        "  link:       {} speed={:?}Mbps duplex={:?}",
+                        if jbool(i, "link_up") { "UP" } else { "DOWN" },
+                        i.get("speed_mbps").and_then(|v| v.as_u64()),
+                        i.get("duplex").and_then(|v| v.as_str())
+                    );
+                    println!("  ipv4:       {}", jstr(i, "ipv4"));
+                    println!();
+                }
+            }
+        }
         _ => usage(),
     }
 
     Ok(())
+}
+
+/// Minimal HTTP/1.0 GET against the management API. No client deps: the
+/// response is small JSON and one-shot (ponytail: reqwest is 200 crates for
+/// this).
+async fn http_get(addr: &str, path: &str) -> Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    let req = format!("GET {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let raw = String::from_utf8_lossy(&buf);
+    // Split headers from body on the first blank line.
+    raw.split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .ok_or_else(|| {
+            balansir_common::error::Error::IpcViolation("malformed HTTP response".into())
+        })
+}
+
+fn jstr(v: &serde_json::Value, key: &str) -> String {
+    match v.get(key) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .map(|x| x.as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(","),
+        Some(other) => other.to_string(),
+        None => "-".into(),
+    }
+}
+
+fn jstr_opt(v: &serde_json::Value, key: &str) -> Option<String> {
+    match v.get(key) {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn jbool(v: &serde_json::Value, key: &str) -> bool {
+    v.get(key).and_then(|b| b.as_bool()).unwrap_or(false)
 }
