@@ -53,10 +53,10 @@ define BALANSIR_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/local/bin/
 	# OTA installer (A/B slot management, mission §13): installed only when the
 	# operator enables BR2_PACKAGE_BALANSIR_OTA (default on).
-ifeq ($(BR2_PACKAGE_BALANSIR_OTA),y)
-	install -m 0755 $(BALANSIR_SRCDIR)/target/$(RUSTC_TARGET_NAME)/release/balansir-ota \
-		$(TARGET_DIR)/usr/local/bin/
-endif
+	if [ "$(BR2_PACKAGE_BALANSIR_OTA)" = "y" ]; then \
+		install -m 0755 $(BALANSIR_SRCDIR)/target/$(RUSTC_TARGET_NAME)/release/balansir-ota \
+			$(TARGET_DIR)/usr/local/bin/; \
+	fi
 	# Daemon unit (ADR-030) uses ProtectSystem=strict with
 	# ReadWritePaths=/var/lib/balansir /var/log/balansir — create them.
 	mkdir -p $(TARGET_DIR)/var/lib/balansir $(TARGET_DIR)/var/log/balansir
