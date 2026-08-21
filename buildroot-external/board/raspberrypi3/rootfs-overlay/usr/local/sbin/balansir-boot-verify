@@ -1,0 +1,116 @@
+#!/bin/sh
+# Post-boot health verification for OTA A/B slots (mission M5-C).
+#
+# After a candidate slot boots, this script waits for the system to stabilise,
+# verifies critical services, and either confirms or rolls back.
+#
+# State machine:
+#   Stable(A) -> Pending(B) -> Booting(B) -> Verifying(B)
+#       -> Healthy: Confirm(B)
+#       -> Failed:  Rollback(A)
+#
+# Idempotent: if the boot is already Confirmed, exits immediately.
+
+set -u
+
+META=/persistent/ota/boot_metadata.toml
+VERIFY_DELAY=30    # seconds to wait before starting checks
+VERIFY_TIMEOUT=120 # max seconds for all checks to pass
+CHECK_INTERVAL=5   # seconds between check attempts
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') boot-verify: $*"; }
+
+# Read a TOML key from boot metadata.
+meta_key() {
+    grep -oP "^${1} = .?" "$META" 2>/dev/null | head -1 | sed 's/^[^=]*= *//; s/"//g'
+}
+
+# Check if boot is already confirmed (idempotent).
+state=$(grep -oP '^state = "\K[^"]+' "$META" 2>/dev/null || echo "unknown")
+if [ "$state" = "confirmed" ]; then
+    log "boot already confirmed; skipping verification"
+    exit 0
+fi
+
+if [ "$state" != "pending" ] && [ "$state" != "trying" ]; then
+    log "no candidate boot (state=$state); nothing to verify"
+    exit 0
+fi
+
+log "candidate slot detected (state=$state); waiting ${VERIFY_DELAY}s for stabilisation"
+sleep "$VERIFY_DELAY"
+
+deadline=$(( $(date +%s) + VERIFY_TIMEOUT ))
+attempt=1
+
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    ok=true
+
+    # Check 1: executor is active
+    if ! systemctl is-active --quiet balansir-executor 2>/dev/null; then
+        log "check $attempt: executor NOT active"
+        ok=false
+    fi
+
+    # Check 2: daemon is active
+    if ! systemctl is-active --quiet balansir-daemon 2>/dev/null; then
+        log "check $attempt: daemon NOT active"
+        ok=false
+    fi
+
+    # Check 3: IPC socket exists
+    if [ ! -S /run/balansir/daemon.sock ] 2>/dev/null; then
+        log "check $attempt: IPC socket missing"
+        ok=false
+    fi
+
+    # Check 4: persistent partition mounted
+    if ! mount | grep -q "/persistent"; then
+        log "check $attempt: /persistent NOT mounted"
+        ok=false
+    fi
+
+    # Check 5: at least one non-loopback interface with an IPv4 address
+    if ! ip -4 addr show | grep -q "inet.*global"; then
+        log "check $attempt: no global IPv4 address"
+        ok=false
+    fi
+
+    if $ok; then
+        log "all checks passed on attempt $attempt — confirming boot"
+        balansir-ota boot-confirm 2>/dev/null || \
+            echo "warning: boot-confirm failed but all health checks passed"
+        log "slot CONFIRMED"
+        exit 0
+    fi
+
+    attempt=$((attempt + 1))
+    sleep "$CHECK_INTERVAL"
+done
+
+# Verification window expired without success — roll back.
+log "verification FAILED after ${VERIFY_TIMEOUT}s — initiating rollback"
+balansir-ota rollback 2>/dev/null || true
+
+# Force the bootloader to the other slot by rewriting cmdline.txt.
+mount /dev/mmcblk0p1 /mnt/boot 2>/dev/null || mkdir -p /mnt/boot && mount /dev/mmcblk0p1 /mnt/boot 2>/dev/null
+if mountpoint -q /mnt/boot 2>/dev/null || [ -f /mnt/boot/cmdline.txt.bak-A ]; then
+    # Determine which slot we came from and restore it.
+    CURRENT_SLOT=$(cat /proc/cmdline | grep -o 'balansir_slot=[AB]' | cut -d= -f2)
+    if [ "$CURRENT_SLOT" = "B" ]; then
+        PREV="A"
+        PREV_ROOT="mmcblk0p2"
+    else
+        PREV="B"
+        PREV_ROOT="mmcblk0p3"
+    fi
+    echo "root=/dev/${PREV_ROOT} rootwait console=tty1 console=serial0,115200 loglevel=8 consoleblank=0 net.ifnames=0 biosdevname=0 balansir_slot=${PREV}" > /mnt/boot/cmdline.txt
+    sync
+    umount /mnt/boot
+    log "cmdline rewritten to slot ${PREV}; rebooting in 3s"
+    sleep 3
+    reboot -f
+else
+    log "FATAL: cannot access boot partition for rollback"
+    exit 1
+fi

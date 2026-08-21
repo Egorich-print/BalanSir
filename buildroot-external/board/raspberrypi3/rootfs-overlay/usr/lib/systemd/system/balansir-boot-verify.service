@@ -1,0 +1,17 @@
+# Post-boot health verification for OTA A/B slots.
+# Runs after the system has stabilised, verifies critical services,
+# and either confirms or rolls back to the previous slot.
+[Unit]
+Description=BalanSir OTA boot verification
+After=multi-user.target balansir-daemon.service balansir-dhcp.service
+Requires=persistent.mount
+ConditionPathExists=/persistent/ota/boot_metadata.toml
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/balansir-boot-verify
+TimeoutStartSec=300
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
