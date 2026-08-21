@@ -2,6 +2,7 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
 use prometheus_client::registry::Registry;
 use std::sync::RwLock;
 
@@ -26,9 +27,25 @@ pub struct Metrics {
     pub active_rules: Gauge,
     pub desired_rules: Gauge,
 
+    // VPN observability (M5-E)
+    pub vpn_profile_health: Family<VpnProfileLabel, Gauge>,
+    pub vpn_probe_latency: Family<VpnProfileLabel, Histogram>,
+    pub vpn_rotations_total: Counter,
+
+    // B4 observability
+    pub b4_packets_seen: Counter,
+    pub b4_mutated: Counter,
+    pub b4_errors: Counter,
+
     // Driver observability
     drivers: Family<TierLabel, Gauge>,
     pub driver_lifecycle_transitions: Counter,
+}
+
+/// Label set for per-profile VPN gauges/histograms.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, prometheus_client::encoding::EncodeLabelSet)]
+pub struct VpnProfileLabel {
+    pub profile_id: String,
 }
 
 impl Metrics {
@@ -81,12 +98,63 @@ impl Metrics {
             driver_lifecycle_transitions.clone(),
         );
 
+        let vpn_profile_health = Family::default();
+        registry.register(
+            "balansir_vpn_profile_health",
+            "VPN profile health (1=healthy 0.5=degraded/recovering 0=failed/cooldown)",
+            vpn_profile_health.clone(),
+        );
+
+        let vpn_probe_latency: Family<VpnProfileLabel, Histogram> =
+            Family::new_with_constructor(|| {
+                Histogram::new(exponential_buckets(1.0, 2.0, 10))
+            });
+        registry.register(
+            "balansir_vpn_probe_latency_seconds",
+            "VPN probe latency in milliseconds",
+            vpn_probe_latency.clone(),
+        );
+
+        let vpn_rotations_total = Counter::default();
+        registry.register(
+            "balansir_vpn_rotations",
+            "Total VPN profile rotations",
+            vpn_rotations_total.clone(),
+        );
+
+        let b4_packets_seen = Counter::default();
+        registry.register(
+            "balansir_b4_packets_seen",
+            "Total B4/DPI intercepted packets",
+            b4_packets_seen.clone(),
+        );
+
+        let b4_mutated = Counter::default();
+        registry.register(
+            "balansir_b4_packets_mutated",
+            "Total B4/DPI mutated packets",
+            b4_mutated.clone(),
+        );
+
+        let b4_errors = Counter::default();
+        registry.register(
+            "balansir_b4_errors",
+            "Total B4/DPI processing errors",
+            b4_errors.clone(),
+        );
+
         Self {
             registry: RwLock::new(registry),
             reconciliations_total,
             reconciliation_failures_total,
             active_rules,
             desired_rules,
+            vpn_profile_health,
+            vpn_probe_latency,
+            vpn_rotations_total,
+            b4_packets_seen,
+            b4_mutated,
+            b4_errors,
             drivers,
             driver_lifecycle_transitions,
         }
