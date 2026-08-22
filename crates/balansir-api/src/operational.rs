@@ -264,3 +264,78 @@ pub async fn vpn_remove_profile(
         Err(e) => error_response(&e),
     }
 }
+
+// ---------------------------------------------------------------------------
+// B4 Explain
+// ---------------------------------------------------------------------------
+
+/// `POST /b4/explain` — "Why is this domain handled by B4?"
+///
+/// Returns the matching profile, strategies, and fallback for a hostname.
+/// Uses the real decision path (EngineConfig::profile_for), not a UI-only
+/// simulation.
+#[derive(serde::Deserialize)]
+pub struct B4ExplainBody {
+    pub domain: String,
+}
+
+pub async fn b4_explain(
+    axum::extract::Json(body): axum::extract::Json<B4ExplainBody>,
+) -> Response {
+    let domain = body.domain.trim().to_lowercase();
+    if domain.is_empty() || domain.len() > 253 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid domain" })),
+        )
+            .into_response();
+    }
+
+    // Read the DPI config to get the actual engine configuration.
+    let config_path = std::env::var("BALANSIR_DPI_CONFIG")
+        .unwrap_or_else(|_| "/etc/balansir/dpi.toml".to_string());
+    let raw = match std::fs::read_to_string(&config_path) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("read {config_path}: {e}") })),
+            )
+                .into_response()
+        }
+    };
+
+    let cfg: balansir_b4::config::B4Config = match balansir_b4::config::B4Config::parse(&raw) {
+        Ok(c) => c,
+        Err(e) => {
+            return error_response(&format!("B4 config parse: {e}"));
+        }
+    };
+
+    let engine_cfg = cfg.into_engine();
+    let profile = engine_cfg.profile_for(&domain);
+
+    match profile {
+        Some(p) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "domain": domain,
+                "matched": true,
+                "profile": p.name,
+                "domains": p.domains,
+                "strategies": p.strategies.iter().map(|s| format!("{:?}", s)).collect::<Vec<_>>(),
+                "fallback": "FAIL_OPEN",
+            })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "domain": domain,
+                "matched": false,
+                "reason": "no profile matches this domain; traffic goes direct",
+            })),
+        )
+            .into_response(),
+    }
+}

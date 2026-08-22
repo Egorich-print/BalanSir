@@ -194,6 +194,7 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/vpn/profiles", get(operational::vpn_profiles))
         .route("/vpn/profiles/add", post(operational::vpn_add_profile))
         .route("/vpn/profiles/:id", delete(operational::vpn_remove_profile))
+        .route("/b4/explain", post(operational::b4_explain))
         .with_state(state.clone())
         // Token auth is opt-in: only enforced when BALANSIR_API_TOKEN is set,
         // so it does not break health probes or local unauthenticated installs.

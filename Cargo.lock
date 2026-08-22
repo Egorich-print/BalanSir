@@ -192,6 +192,7 @@ dependencies = [
  "async-trait",
  "axum 0.7.9",
  "axum-extra",
+ "balansir-b4",
  "balansir-common",
  "balansir-control",
  "balansir-ota",
