@@ -102,6 +102,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ profile_id: profileId }),
     }),
+  vpnProfiles: () => req('/vpn/profiles'),
+  otaStatus: () => req('/ota/status'),
+  otaBootConfirm: () => req('/ota/boot-confirm', { method: 'POST' }),
+  otaRollback: () => req('/ota/rollback', { method: 'POST' }),
   pathDecision: () => req('/path/decision'),
 
   qos: () => req('/qos'),

@@ -4,13 +4,11 @@
   import { systemStatus } from './lib/status.js';
   import StatusBadge from './components/StatusBadge.svelte';
 
-  import Dashboard from './views/Dashboard.svelte';
+import Dashboard from './views/Dashboard.svelte';
   import Network from './views/Network.svelte';
   import Qos from './views/Qos.svelte';
   import B4 from './views/B4.svelte';
   import Dpi from './views/Dpi.svelte';
-  import Wifi from './views/Wifi.svelte';
-  import Mptcp from './views/Mptcp.svelte';
   import Xray from './views/Xray.svelte';
   import VpnPool from './views/VpnPool.svelte';
   import Tailscale from './views/Tailscale.svelte';
@@ -18,6 +16,7 @@
   import Events from './views/Events.svelte';
   import Diagnostics from './views/Diagnostics.svelte';
   import System from './views/System.svelte';
+  import Ota from './views/Ota.svelte';
 
   export let view = 'dashboard';
 
@@ -49,6 +48,7 @@
     { id: 'xray', label: 'Xray', component: Xray },
     { id: 'vpn', label: 'VPN Pool', component: VpnPool },
     { id: 'tailscale', label: 'Tailscale', component: Tailscale },
+    { id: 'ota', label: 'OTA', component: Ota },
     { id: 'system', label: 'System', component: System },
     { id: 'events', label: 'Events', component: Events },
     { id: 'diagnostics', label: 'Diagnostics', component: Diagnostics },
