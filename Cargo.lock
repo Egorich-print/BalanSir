@@ -194,6 +194,7 @@ dependencies = [
  "axum-extra",
  "balansir-common",
  "balansir-control",
+ "balansir-ota",
  "chrono",
  "futures",
  "reqwest",

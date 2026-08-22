@@ -20,6 +20,7 @@ pub fn uptime_seconds() -> u64 {
 pub mod auth;
 pub mod control;
 pub mod handlers;
+pub mod operational;
 pub mod subsystems;
 pub mod webui;
 
@@ -186,6 +187,11 @@ pub fn create_router(state: Arc<ApiState>) -> Router {
         .route("/mptcp", get(subsystems::get_mptcp))
         .route("/mptcp/enabled", post(subsystems::set_mptcp_enabled))
         .route("/mptcp/endpoints", post(subsystems::set_mptcp_endpoints))
+        // Operational control plane (M6): OTA + VPN profile diagnostics.
+        .route("/ota/status", get(operational::ota_status))
+        .route("/ota/boot-confirm", post(operational::ota_boot_confirm))
+        .route("/ota/rollback", post(operational::ota_rollback))
+        .route("/vpn/profiles", get(operational::vpn_profiles))
         .with_state(state.clone())
         // Token auth is opt-in: only enforced when BALANSIR_API_TOKEN is set,
         // so it does not break health probes or local unauthenticated installs.
