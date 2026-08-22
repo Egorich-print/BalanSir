@@ -9,6 +9,7 @@ license.workspace = true
 balansir-common = { path = "../balansir-common" }
 balansir-control = { path = "../balansir-control" }
 balansir-ota = { path = "../balansir-ota" }
+balansir-vpn = { path = "../balansir-vpn" }
 async-trait = "0.1"
 tokio = { workspace = true, features = ["rt", "net", "macros", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

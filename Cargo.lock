@@ -195,6 +195,7 @@ dependencies = [
  "balansir-common",
  "balansir-control",
  "balansir-ota",
+ "balansir-vpn",
  "chrono",
  "futures",
  "reqwest",

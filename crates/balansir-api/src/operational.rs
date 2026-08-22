@@ -58,7 +58,7 @@ pub struct OtaStatusResponse {
 
 /// `GET /ota/status` — current A/B slot state for the WebUI.
 pub async fn ota_status() -> Response {
-    let result = tokio::task::spawn_blocking(|| balansir_ota::slot::BootMetadata::load()).await;
+    let result = tokio::task::spawn_blocking(balansir_ota::slot::BootMetadata::load).await;
 
     match result {
         Ok(Ok(meta)) => {
@@ -203,4 +203,68 @@ pub async fn vpn_profiles(State(state): State<Arc<ApiState>>) -> Response {
         .collect();
 
     (StatusCode::OK, Json(profiles)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// VPN manual profile management
+// ---------------------------------------------------------------------------
+
+/// `POST /vpn/profiles/add` — add a VLESS URI as a manual profile.
+/// Manual profiles survive subscription refreshes (stored in /persistent).
+#[derive(serde::Deserialize)]
+pub struct AddProfileBody {
+    pub uri: String,
+}
+
+pub async fn vpn_add_profile(
+    State(_state): State<Arc<ApiState>>,
+    body: axum::extract::Json<AddProfileBody>,
+) -> Response {
+    let uri = body.uri.trim();
+    if !uri.starts_with("vless://") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "only vless:// URIs are supported" })),
+        )
+            .into_response();
+    }
+    if uri.len() > 4096 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "URI too long (max 4096 bytes)" })),
+        )
+            .into_response();
+    }
+
+    match balansir_vpn::append_manual_profile(uri) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "added": true })),
+        )
+            .into_response(),
+        Err(e) => error_response(&e),
+    }
+}
+
+/// `DELETE /vpn/profiles/:id` — remove a manual profile by ID prefix.
+pub async fn vpn_remove_profile(
+    axum::extract::Path(profile_id): axum::extract::Path<String>,
+) -> Response {
+    if profile_id.len() < 4 || profile_id.len() > 64 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "profile_id must be 4-64 chars" })),
+        )
+            .into_response();
+    }
+
+    match balansir_vpn::remove_manual_profile(&profile_id) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "removed": true }))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "profile not found in manual profiles" })),
+        )
+            .into_response(),
+        Err(e) => error_response(&e),
+    }
 }

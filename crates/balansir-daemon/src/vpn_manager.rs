@@ -414,6 +414,14 @@ impl VpnManager {
         let mut body = String::new();
         let mut source_label = String::new();
 
+        // Manual profiles (persisted across subscription refreshes) are
+        // always prepended so they survive atomic_replace.
+        let manual = balansir_vpn::read_manual_profiles();
+        if !manual.is_empty() {
+            body.push_str(&manual);
+            body.push('\n');
+        }
+
         if let Some(local) = &self.config.local_source {
             // local_source is either inline config text or a path to a file.
             let trimmed = local.trim();
@@ -727,6 +735,66 @@ impl VpnManager {
 }
 
 /// Fetch a plain-text subscription (HTTP/HTTPS), bounded size.
+/// Path to the manual VPN profiles file (persisted across flashes).
+pub const MANUAL_PROFILES_PATH: &str = "/persistent/balansir/manual-vpn.txt";
+
+/// Read manual VLESS URIs from the persistent store. Returns empty string
+/// when the file doesn't exist (fresh install / no manual profiles).
+pub fn read_manual_profiles() -> String {
+    std::fs::read_to_string(MANUAL_PROFILES_PATH).unwrap_or_default()
+}
+
+/// Append a VLESS URI to the manual profiles file. Dedup by exact line match.
+pub fn append_manual_profile(uri: &str) -> Result<(), String> {
+    let uri = uri.trim();
+    if !uri.starts_with("vless://") {
+        return Err("only vless:// URIs are supported".into());
+    }
+    if let Some(parent) = std::path::Path::new(MANUAL_PROFILES_PATH).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    // Dedup: don't append if the same URI already exists.
+    let existing = read_manual_profiles();
+    if existing.lines().any(|l| l.trim() == uri) {
+        return Ok(()); // already present, idempotent
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(MANUAL_PROFILES_PATH)
+        .map_err(|e| format!("open {MANUAL_PROFILES_PATH}: {e}"))?;
+    writeln!(f, "{uri}").map_err(|e| format!("write {MANUAL_PROFILES_PATH}: {e}"))?;
+    Ok(())
+}
+
+/// Remove a VLESS URI from the manual profiles file by profile_id prefix.
+pub fn remove_manual_profile(profile_id_prefix: &str) -> Result<bool, String> {
+    let existing = read_manual_profiles();
+    if existing.is_empty() {
+        return Ok(false);
+    }
+    let lines: Vec<&str> = existing
+        .lines()
+        .filter(|l| {
+            // Match by parsing the URI and computing a content-hash-like check.
+            // Simpler: check if the line contains the profile_id prefix as a substring.
+            !l.contains(profile_id_prefix)
+        })
+        .collect();
+    let removed = lines.len() < existing.lines().count();
+    if removed {
+        if let Some(parent) = std::path::Path::new(MANUAL_PROFILES_PATH).parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        std::fs::write(MANUAL_PROFILES_PATH, lines.join("\n") + "\n")
+            .map_err(|e| format!("write {MANUAL_PROFILES_PATH}: {e}"))?;
+    }
+    Ok(removed)
+}
+
 async fn fetch_subscription(url: &str) -> Result<String, String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(format!("subscription URL must be http(s): {url}"));
