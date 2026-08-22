@@ -171,7 +171,12 @@ impl NftablesExecutor {
                         mark: None,
                         comment: Some(DPI_RULE_TAG.to_string()),
                     };
-                    self.backend.add_rule(&spec)?;
+                    // Local traffic (output) + forwarded traffic (forward):
+                    // in gateway mode LAN clients' packets traverse forward;
+                    // the appliance's own traffic (xray direct outbounds,
+                    // probes) traverses output. Both need interception.
+                    self.backend.add_rule_to_chain("output", &spec)?;
+                    self.backend.add_rule_to_chain("forward", &spec)?;
                     installed += 1;
                 }
                 Ok(DpiOpResult {
