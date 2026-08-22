@@ -33,8 +33,7 @@ pub fn append_manual_profile(uri: &str) -> Result<(), String> {
         return Err("URI too long (max 4096 bytes)".into());
     }
     if let Some(parent) = std::path::Path::new(MANUAL_PROFILES_PATH).parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     let existing = read_manual_profiles();
     if existing.lines().any(|l| l.trim() == uri) {
@@ -56,10 +55,7 @@ pub fn remove_manual_profile(needle: &str) -> Result<bool, String> {
     if existing.is_empty() {
         return Ok(false);
     }
-    let lines: Vec<&str> = existing
-        .lines()
-        .filter(|l| !l.contains(needle))
-        .collect();
+    let lines: Vec<&str> = existing.lines().filter(|l| !l.contains(needle)).collect();
     let removed = lines.len() < existing.lines().count();
     if removed {
         std::fs::write(MANUAL_PROFILES_PATH, lines.join("\n") + "\n")

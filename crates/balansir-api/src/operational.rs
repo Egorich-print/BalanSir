@@ -237,11 +237,7 @@ pub async fn vpn_add_profile(
     }
 
     match balansir_vpn::append_manual_profile(uri) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "added": true })),
-        )
-            .into_response(),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "added": true }))).into_response(),
         Err(e) => error_response(&e),
     }
 }

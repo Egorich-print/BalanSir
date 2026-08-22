@@ -751,8 +751,7 @@ pub fn append_manual_profile(uri: &str) -> Result<(), String> {
         return Err("only vless:// URIs are supported".into());
     }
     if let Some(parent) = std::path::Path::new(MANUAL_PROFILES_PATH).parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     // Dedup: don't append if the same URI already exists.
     let existing = read_manual_profiles();
