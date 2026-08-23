@@ -328,6 +328,26 @@ fn interception_loop(
             continue;
         }
 
+        // SNI-less packets (SYN) cannot match by domain, but TCP-level
+        // strategies (MSS rewrite, SACK strip) must apply to the SYN — after
+        // the handshake it is too late. Classic b4 solves this with a
+        // catch-all profile: when no SNI-matched profile exists and this is a
+        // connection-establishing packet, fall back to the first profile with
+        // an empty domain list.
+        let profile = match profile {
+            Some(p) => Some(p),
+            None => {
+                let is_syn = tcp.tcp_flags() & 0x02 != 0;
+                if is_syn {
+                    config
+                        .profiles
+                        .iter()
+                        .find(|p| p.domains.is_empty() && !p.strategies.is_empty())
+                } else {
+                    None
+                }
+            }
+        };
         let Some(profile) = profile else {
             // No matching profile → pass through.
             stats.accepted.fetch_add(1, Ordering::Relaxed);
