@@ -175,6 +175,8 @@ impl NftablesExecutor {
                     // in gateway mode LAN clients' packets traverse forward;
                     // the appliance's own traffic (xray direct outbounds,
                     // probes) traverses output. Both need interception.
+                    self.backend
+                        .ensure_hooked_chain("output", &["type", "filter", "hook", "output", "priority", "0", "policy", "accept;"])?;
                     self.backend.add_rule_to_chain("output", &spec)?;
                     self.backend.add_rule_to_chain("forward", &spec)?;
                     installed += 1;
