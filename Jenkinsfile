@@ -123,8 +123,7 @@ pipeline {
                                     # fmt — предупреждение: в части репозиториев
                                     # (Antigravity) дерево намеренно не отформатировано,
                                     # и строгий гейт остаётся в CI самого репозитория.
-                                    flock "${LOCK_FILE}" cargo fmt --all -- --check \
-                                        || echo "WARN: cargo fmt --check не пройден (строгий гейт — в CI репозитория)"
+                                    flock "${LOCK_FILE}" cargo fmt --all -- --check || echo "WARN: cargo fmt --check не пройден (строгий гейт — в CI репозитория)"
                                     # clippy без -D warnings: реальные ошибки компиляции
                                     # валят сборку, а предупреждения — зона CI репозитория.
                                     flock "${LOCK_FILE}" cargo clippy --all-targets --all-features
@@ -180,8 +179,10 @@ pipeline {
                                 set -e
                                 flock "${LOCK_FILE}" cargo build --release
                                 mkdir -p /srv/jenkins/archive/"${JOB_NAME}"
-                                find "${CARGO_TARGET_DIR}/release" -maxdepth 1 -type f -perm -u+x \
-                                    -exec cp -p {} /srv/jenkins/archive/"${JOB_NAME}"/ \;
+                                # -exec ... + вместо экранированной точки с запятой:
+                                # такой escape в Groovy-строке невалиден и Jenkinsfile
+                                # не компилируется ("unexpected char").
+                                find "${CARGO_TARGET_DIR}/release" -maxdepth 1 -type f -perm -u+x -exec cp -p {} /srv/jenkins/archive/"${JOB_NAME}"/ +
                                 ls -la /srv/jenkins/archive/"${JOB_NAME}" || true
                             '''
                             break
