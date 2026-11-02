@@ -85,8 +85,33 @@ pipeline {
                         env.PROJECT_TYPE = 'shell'
                     }
 
-                    // Репозиторий для gh release: из GIT_URL (https://github.com/<owner>/<repo>.git).
-                    def m = (env.GIT_URL ?: '').replaceAll('\\.git$', '').split('/')
+                    // Репозиторий для gh release.
+                    //
+                    // В multibranch-сборке переменной GIT_URL НЕТ — проверено:
+                    // в окружении сборки есть только BRANCH_NAME, BRANCH_IS_PRIMARY
+                    // и JOB_NAME. Поэтому URL берём из SCM-объекта ветки (`scm`),
+                    // куда checkout его и положил.
+                    def repoUrl = ''
+                    try {
+                        def rcs = scm.getUserRemoteConfigs()
+                        if (rcs && !rcs.isEmpty()) {
+                            repoUrl = rcs.get(0).getUrl() ?: ''
+                        }
+                    } catch (Throwable t) {
+                        try { repoUrl = scm.getUrl() ?: '' } catch (Throwable t2) { }
+                    }
+                    if (!repoUrl) {
+                        repoUrl = env.GIT_URL ?: ''
+                    }
+                    if (!repoUrl) {
+                        // Последний вариант: имя репозитория — предпоследний
+                        // сегмент JOB_NAME ("ci-github/<repo>/<branch>").
+                        def parts = (env.JOB_NAME ?: '').split('/')
+                        if (parts.size() >= 2) {
+                            repoUrl = "https://github.com/Egorich-print/${parts[-2]}"
+                        }
+                    }
+                    def m = repoUrl.replaceAll('\\.git$', '').split('/')
                     env.GH_REPO = m.size() >= 2 ? "${m[-2]}/${m[-1]}" : ''
 
                     // Свой гейт-скрипт репозитория — приоритет над базовым набором.
