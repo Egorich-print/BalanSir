@@ -20,6 +20,21 @@
 // release-workflow (.github/workflows/release*.yml) — иначе GitHub Actions и
 // Jenkins создали бы один и тот же релиз дважды.
 //
+// ВАЖНО про порядок шагов:
+//   checkout scm идёт ПЕРЕД определением типа проекта и гейт-скрипта.
+//   fileExists() до checkout смотрит в пустой workspace — тип всегда
+//   определялся как "shell", а родной гейт-скрипт и GIT_URL не находились
+//   никогда. Та же поправка нужна и для GIT_URL: переменные SCM
+//   (GIT_URL, GIT_COMMIT) появляются только после checkout.
+//
+// ВАЖНО про shell:
+//   Шаг `sh` в Jenkins выполняет скрипт через /bin/sh, а на Debian это dash.
+//   Поэтому все встроенные скрипты POSIX-совместимы: никаких process
+//   substitution (<(...)), [[ ]], массивов. Bash-ism в скрипте даёт
+//   "Syntax error: redirection unexpected" и падает до выполнения.
+//   Скрипты самого репозитория (scripts/gate.sh и т.п.) запускаются
+//   напрямую и используют собственный shebang.
+//
 // Пути (LXC 120 на pve-xeon):
 //   /var/lib/jenkins/workspace         -> sdb1, SSD P4-240 (240 МБ/с)
 //   /var/lib/jenkins/workspace/.cargo-target -> тот же SSD, кэш cargo
@@ -56,6 +71,9 @@ pipeline {
 
         stage('Подготовка') {
             steps {
+                // Сначала код репозитория — только потом можно определить
+                // тип проекта, найти гейт-скрипт и взять GIT_URL.
+                checkout scm
                 script {
                     if (fileExists('Cargo.toml')) {
                         env.PROJECT_TYPE = 'rust'
@@ -89,10 +107,10 @@ pipeline {
                     currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.PROJECT_TYPE} ${ref}"
                     currentBuild.description = "repo=${env.GH_REPO} ref=${ref} commit=${env.GIT_COMMIT?.take(8)}"
                     echo "Тип проекта: ${env.PROJECT_TYPE}"
+                    echo "Репозиторий: ${env.GH_REPO ?: 'не определён'}"
                     echo "Гейт-скрипт репозитория: ${env.REPO_GATE ?: 'нет — базовый набор'}"
                     echo "Свой release-workflow: ${env.REPO_HAS_RELEASE ? 'есть — релиз создаёт он' : 'нет'}"
                 }
-                checkout scm
                 sh '''
                     set -e
                     mkdir -p /var/lib/jenkins/ci "$(dirname "${CARGO_TARGET_DIR}")"
@@ -107,6 +125,8 @@ pipeline {
                 script {
                     if (env.REPO_GATE) {
                         // Родной гейт репозитория: не дублируем его логику.
+                        // Запускаем напрямую — шебанг скрипта репозитория
+                        // сам выбирает интерпретатор (bash/posix).
                         sh """
                             set -e
                             chmod +x '${env.REPO_GATE}' 2>/dev/null || true
@@ -143,7 +163,7 @@ pipeline {
                             case 'make':
                                 sh '''
                                     set -e
-                                    if [ -f Justfile ]; then
+                                    if command -v just >/dev/null 2>&1 && [ -f Justfile ]; then
                                       flock "${LOCK_FILE}" just --list >/dev/null
                                     else
                                       make -n >/dev/null
@@ -151,16 +171,25 @@ pipeline {
                                 '''
                                 break
                             default:
-                                // shell-проекты: синтаксис всех tracked *.sh и *.py
+                                // shell-проекты: синтаксис всех tracked *.sh и *.py.
+                                // Списки — во временные файлы: перенаправление
+                                // "done < file" работает в dash, process
+                                // substitution "<(...)" — нет.
                                 sh '''
                                     set -e
                                     fail=0
+                                    git ls-files '*.sh' > /tmp/jenkins_gate_sh.txt || true
                                     while IFS= read -r f; do
+                                      [ -n "$f" ] || continue
                                       bash -n "$f" || { echo "syntax error: $f"; fail=1; }
-                                    done < <(git ls-files '*.sh')
-                                    while IFS= read -r f; do
-                                      python3 -m py_compile "$f" || { echo "python error: $f"; fail=1; }
-                                    done < <(git ls-files '*.py')
+                                    done < /tmp/jenkins_gate_sh.txt
+                                    git ls-files '*.py' > /tmp/jenkins_gate_py.txt || true
+                                    if command -v python3 >/dev/null 2>&1; then
+                                      while IFS= read -r f; do
+                                        [ -n "$f" ] || continue
+                                        python3 -m py_compile "$f" || { echo "python error: $f"; fail=1; }
+                                      done < /tmp/jenkins_gate_py.txt
+                                    fi
                                     [ "$fail" = 0 ] || exit 1
                                     echo "все tracked shell/python скрипты разбираются"
                                 '''
