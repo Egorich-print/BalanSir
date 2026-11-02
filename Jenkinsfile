@@ -203,7 +203,10 @@ pipeline {
             when {
                 buildingTag()
                 allOf {
-                    not changeRequest()
+                    // В декларативном DSL условие "not" требует блок:
+                    // "not changeRequest()" — синтаксическая ошибка компиляции
+                    // ("No additional arguments are allowed for children").
+                    not { changeRequest() }
                     expression { env.TAG_NAME != null }
                 }
             }
