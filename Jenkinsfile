@@ -208,10 +208,18 @@ pipeline {
                                 set -e
                                 flock "${LOCK_FILE}" cargo build --release
                                 mkdir -p /srv/jenkins/archive/"${JOB_NAME}"
-                                # -exec ... + вместо экранированной точки с запятой:
-                                # такой escape в Groovy-строке невалиден и Jenkinsfile
-                                # не компилируется ("unexpected char").
-                                find "${CARGO_TARGET_DIR}/release" -maxdepth 1 -type f -perm -u+x -exec cp -p {} /srv/jenkins/archive/"${JOB_NAME}"/ +
+                                # Копируем бинарники в архив через xargs -0 + cp -t.
+                                #
+                                # НЕЛЬЗЯ писать find ... -exec cp -p {} DEST + :
+                                # в форме "+" GNU find требует, чтобы "{}" был
+                                # ПОСЛЕДНИМ аргументом команды (man find:
+                                # "it must appear at the end, immediately before
+                                # the +"). Иначе find не находит терминатор и
+                                # падает с "missing argument to `-exec'".
+                                # xargs -0 (безопасные пробелы) + cp -t (каталог
+                                # назначения) дают правильный порядок аргументов.
+                                find "${CARGO_TARGET_DIR}/release" -maxdepth 1 -type f -perm -u+x -print0 \
+                                    | xargs -0 -r cp -p -t /srv/jenkins/archive/"${JOB_NAME}"/
                                 ls -la /srv/jenkins/archive/"${JOB_NAME}" || true
                             '''
                             break
