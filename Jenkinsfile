@@ -43,13 +43,30 @@
 //   /srv/jenkins/archive               -> sdc1 (78 МБ/с) — артефакты
 //
 // Блокировка: flock /var/lib/jenkins/ci/build.lock (путь внутри контейнера).
+//
+// `--close` обязателен на каждом вызове. flock(2) держит блокировку на
+// открытом описании файла, и любой потомок, унаследовавший этот дескриптор,
+// удерживает её после выхода родителя. Тест-хелпер, который переживает
+// тест (в BTP это `btp-server` из проверки epipe), унаследовал дескриптор
+// гейта и держал эксклюзивную блокировку **после** того, как гейт отработал.
+// Следующая сборка вставала на `flock` молча — ноль строк в консоли — и
+// упиралась в таймаут пайплайна. `--close` закрывает дескриптор в дочернем
+// процессе: блокировку держит сам `flock` и отпускает её, когда команда
+// завершилась, а осиротевший потомок её уже не удерживает.
 
 pipeline {
     agent any
 
     options {
         timestamps()
-        timeout(time: 120, unit: 'MINUTES')
+        // The pipeline timeout is a safety net against a stuck build, not a
+        // schedule: the executor is shared and serial, so a build that is
+        // aborted still blocks every other repository behind it. 120 minutes
+        // was too short for a repository whose own gate takes minutes and
+        // whose release build then rebuilds the whole workspace in release
+        // mode — BTP build #23 (2026-11-03) was aborted by this timeout with
+        // the gate already green (see CI-KNOWN-FAILURES.md § Jenkins).
+        timeout(time: 240, unit: 'MINUTES')
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '10'))
         skipDefaultCheckout(true)
@@ -124,9 +141,21 @@ pipeline {
                     env.REPO_GATE = gates.find { fileExists(it) } ?: ''
 
                     // Свой release-workflow — тогда релиз создаёт он, а не Jenkins.
-                    env.REPO_HAS_RELEASE = fileExists('.github/workflows/release.yml') ||
-                                          fileExists('.github/workflows/release.yaml') ||
-                                          fileExists('.github/workflows/ide-release.yml')
+                    //
+                    // Значение — строка 'yes'/'no', а НЕ булево: env хранит
+                    // строки, и строка "false" в Groovy истинна (непустая).
+                    // С булевым env.REPO_HAS_RELEASE = false условие
+                    // "env.REPO_HAS_RELEASE ? ... : ..." всегда срабатывало в
+                    // первую сторону — и Jenkins не публиковал релиз НИ ОДНОГО
+                    // репозитория, объявляя, что релиз создаёт сам репозиторий.
+                    env.REPO_HAS_RELEASE = (fileExists('.github/workflows/release.yml') ||
+                                            fileExists('.github/workflows/release.yaml') ||
+                                            fileExists('.github/workflows/ide-release.yml')) ? 'yes' : 'no'
+
+                    // Свой релизный скрипт репозитория — приоритет над базовым
+                    // набором ассетов, по той же логике, что и гейт-скрипт:
+                    // имена и состав ассетов задаёт репозиторий, а не Jenkins.
+                    env.REPO_RELEASE_HOOK = ['scripts/release.sh'].find { fileExists(it) } ?: ''
 
                     def ref = env.TAG_NAME ?: env.BRANCH_NAME ?: '-'
                     currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.PROJECT_TYPE} ${ref}"
@@ -134,7 +163,8 @@ pipeline {
                     echo "Тип проекта: ${env.PROJECT_TYPE}"
                     echo "Репозиторий: ${env.GH_REPO ?: 'не определён'}"
                     echo "Гейт-скрипт репозитория: ${env.REPO_GATE ?: 'нет — базовый набор'}"
-                    echo "Свой release-workflow: ${env.REPO_HAS_RELEASE ? 'есть — релиз создаёт он' : 'нет'}"
+                    echo "Релизный скрипт репозитория: ${env.REPO_RELEASE_HOOK ?: 'нет — базовый набор'}"
+                    echo "Свой release-workflow: ${env.REPO_HAS_RELEASE == 'yes' ? 'есть — релиз создаёт он' : 'нет'}"
                 }
                 sh '''
                     set -e
@@ -155,7 +185,7 @@ pipeline {
                         sh """
                             set -e
                             chmod +x '${env.REPO_GATE}' 2>/dev/null || true
-                            flock "${LOCK_FILE}" './${env.REPO_GATE}'
+                            flock --close "${LOCK_FILE}" './${env.REPO_GATE}'
                         """
                     } else {
                         switch (env.PROJECT_TYPE) {
@@ -168,11 +198,11 @@ pipeline {
                                     # fmt — предупреждение: в части репозиториев
                                     # (Antigravity) дерево намеренно не отформатировано,
                                     # и строгий гейт остаётся в CI самого репозитория.
-                                    flock "${LOCK_FILE}" cargo fmt --all -- --check || echo "WARN: cargo fmt --check не пройден (строгий гейт — в CI репозитория)"
+                                    flock --close "${LOCK_FILE}" cargo fmt --all -- --check || echo "WARN: cargo fmt --check не пройден (строгий гейт — в CI репозитория)"
                                     # clippy без -D warnings: реальные ошибки компиляции
                                     # валят сборку, а предупреждения — зона CI репозитория.
-                                    flock "${LOCK_FILE}" cargo clippy --all-targets --all-features
-                                    flock "${LOCK_FILE}" cargo test --all-targets
+                                    flock --close "${LOCK_FILE}" cargo clippy --all-targets --all-features
+                                    flock --close "${LOCK_FILE}" cargo test --all-targets
                                 '''
                                 break
                             case 'node':
@@ -181,15 +211,15 @@ pipeline {
                                     node --version
                                     npm --version
                                     npm ci
-                                    flock "${LOCK_FILE}" npm run lint
-                                    flock "${LOCK_FILE}" npm test
+                                    flock --close "${LOCK_FILE}" npm run lint
+                                    flock --close "${LOCK_FILE}" npm test
                                 '''
                                 break
                             case 'make':
                                 sh '''
                                     set -e
                                     if command -v just >/dev/null 2>&1 && [ -f Justfile ]; then
-                                      flock "${LOCK_FILE}" just --list >/dev/null
+                                      flock --close "${LOCK_FILE}" just --list >/dev/null
                                     else
                                       make -n >/dev/null
                                     fi
@@ -231,7 +261,7 @@ pipeline {
                         case 'rust':
                             sh '''
                                 set -e
-                                flock "${LOCK_FILE}" cargo build --release
+                                flock --close "${LOCK_FILE}" cargo build --release
                                 mkdir -p /srv/jenkins/archive/"${JOB_NAME}"
                                 # Копируем бинарники в архив через xargs -0 + cp -t.
                                 #
@@ -251,7 +281,7 @@ pipeline {
                         case 'node':
                             sh '''
                                 set -e
-                                flock "${LOCK_FILE}" npm run build --if-present
+                                flock --close "${LOCK_FILE}" npm run build --if-present
                             '''
                             break
                         default:
@@ -273,8 +303,12 @@ pipeline {
                 }
             }
             steps {
+                // Всё в одном script-блоке — иначе `return` из script-блока
+                // выполняет только сам блок, а следующие шаги stage всё равно
+                // исполнились бы. Прежняя версия объявляла «релиз создаёт он»
+                // и тут же создавала релиз сама: дубль.
                 script {
-                    if (env.REPO_HAS_RELEASE) {
+                    if (env.REPO_HAS_RELEASE == 'yes') {
                         echo 'В репозитории есть свой release-workflow — релиз создаёт он, Jenkins не дублирует.'
                         return
                     }
@@ -283,30 +317,45 @@ pipeline {
                     }
                     def tag = env.TAG_NAME ?: env.GIT_TAG
                     echo "Публикация релиза ${tag} для ${env.GH_REPO}"
-                }
-                sh '''
-                    set -e
-                    mkdir -p dist
-                    if [ -d /srv/jenkins/archive/"${JOB_NAME}" ]; then
-                      cp -a /srv/jenkins/archive/"${JOB_NAME}"/. dist/ 2>/dev/null || true
-                    fi
-                    ( cd dist && sha256sum * > SHA256SUMS ) 2>/dev/null || true
-                    ls -la dist
-                '''
-                script {
-                    def token = withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
-                        return sh(script: 'echo "$GH_TOKEN"', returnStdout: true).trim()
+
+                    if (env.REPO_RELEASE_HOOK) {
+                        // Свой релизный скрипт репозитория: он сам собирает,
+                        // упаковывает и публикует ассеты — состав и имена
+                        // ассетов задаёт репозиторий.
+                        echo "Релизный скрипт репозитория: ${env.REPO_RELEASE_HOOK}"
+                        withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
+                            sh """
+                                set -e
+                                chmod +x './${env.REPO_RELEASE_HOOK}' 2>/dev/null || true
+                                flock --close "${LOCK_FILE}" './${env.REPO_RELEASE_HOOK}' '${env.TAG_NAME}'
+                            """
+                        }
+                        return
                     }
+
+                    sh '''
+                        set -e
+                        mkdir -p dist
+                        if [ -d /srv/jenkins/archive/"${JOB_NAME}" ]; then
+                          cp -a /srv/jenkins/archive/"${JOB_NAME}"/. dist/ 2>/dev/null || true
+                        fi
+                        ( cd dist && sha256sum * > SHA256SUMS ) 2>/dev/null || true
+                        ls -la dist
+                    '''
                     def hasAssets = sh(script: 'ls dist 2>/dev/null | wc -l', returnStdout: true).trim().toInteger() > 0
                     if (!hasAssets) {
                         echo 'Артефактов нет — релиз без вложений создавать не буду'
                         return
                     }
-                    sh """
-                        set -e
-                        export GH_TOKEN='${token}'
-                        gh release create '${env.TAG_NAME}' dist/* --verify-tag --generate-notes --repo '${env.GH_REPO}'
-                    """
+                    // Токен — в переменной окружения шага, а не в тексте
+                    // команды: withCredentials подставляет его и маскирует в
+                    // выводе.
+                    withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
+                        sh """
+                            set -e
+                            gh release create '${env.TAG_NAME}' dist/* --verify-tag --generate-notes --repo '${env.GH_REPO}'
+                        """
+                    }
                 }
             }
         }
